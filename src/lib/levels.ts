@@ -18,19 +18,21 @@ export function calculateLevels(
   const atrMultiplier = 1.5;
   const riskDistance = Math.abs(atr1h) * atrMultiplier;
 
+  const isLong = direction !== "short";
+
   let entry: number, stop: number, tp1: number, tp2: number, tp3: number;
 
-  if (direction === "long") {
+  if (isLong) {
     entry = markPrice;
     stop = entry - riskDistance;
-    const risk = entry - stop;
+    const risk = riskDistance;
     tp1 = entry + risk * 1.5;
     tp2 = entry + risk * 2.5;
     tp3 = entry + risk * 4.0;
   } else {
     entry = markPrice;
     stop = entry + riskDistance;
-    const risk = stop - entry;
+    const risk = riskDistance;
     tp1 = entry - risk * 1.5;
     tp2 = entry - risk * 2.5;
     tp3 = entry - risk * 4.0;

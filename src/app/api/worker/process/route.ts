@@ -81,8 +81,9 @@ export async function POST() {
     return NextResponse.json({ error: "Corrupt queue entry" }, { status: 500 });
   }
 
-  const direction = alert.type.toLowerCase() as "long" | "short";
-  console.log(`[worker] Processing: ${alert.symbol} ${alert.type}`);
+  const rawType = alert.type.toLowerCase();
+  const direction: "long" | "short" = rawType === "short" ? "short" : "long";
+  console.log(`[worker] Processing: ${alert.symbol} type=${alert.type} direction=${direction}`);
 
   // ── 2. Find alert_id ──────────────────────────────────
   const { data: rawRow } = await supabase
