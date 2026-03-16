@@ -15,6 +15,8 @@ import { classifyRegime } from "@/lib/regime";
 import { runGateB } from "@/lib/gate-b";
 import { calculateLevels } from "@/lib/levels";
 import { isCooldownActive, setCooldown } from "@/lib/cooldown";
+import { reviewWithClaude, ClaudeReviewInput } from "@/lib/reviewer";
+import { buildMessage, sendTelegram } from "@/lib/telegram";
 
 interface AlertPayload {
   type: string;
@@ -117,6 +119,7 @@ export async function POST() {
 
   const markPrice = parseFloat(ticker.markPrice);
   const turnover24h = parseFloat(ticker.turnover24h);
+  const fundingRate = parseFloat(ticker.fundingRate);
   const spreadBps = computeSpreadBps(ticker.bid1Price, ticker.ask1Price);
   const bookDepthBidUsd = computeBookDepthUsd(orderbook.bids, markPrice);
   const bookDepthAskUsd = computeBookDepthUsd(orderbook.asks, markPrice);
@@ -142,7 +145,7 @@ export async function POST() {
       alert_bb_width: alert.bb_width,
       mark_price: markPrice,
       index_price: parseFloat(ticker.indexPrice),
-      funding_rate: parseFloat(ticker.fundingRate),
+      funding_rate: fundingRate,
       next_funding_time: new Date(Number(ticker.nextFundingTime)).toISOString(),
       open_interest: parseFloat(ticker.openInterest),
       open_interest_value: parseFloat(ticker.openInterestValue),
@@ -174,7 +177,7 @@ export async function POST() {
 
   const snapshotId: string | null = snapRow?.id ?? null;
 
-  // If Gate A fails, record NO_TRADE and stop
+  // If Gate A fails, record NO_TRADE and stop (no Claude review needed)
   if (!gateA.passed) {
     console.log(`[worker] ${alert.symbol} Gate A rejected: ${gateA.rejectReason}`);
     await storeDecision(supabase, {
@@ -200,11 +203,10 @@ export async function POST() {
       symbol: alert.symbol,
       decision: "NO_TRADE",
       gate_a: { passed: false, quality: gateA.quality, reject_reason: gateA.rejectReason },
-      gate_b: { passed: false, reason: `Gate A rejected: ${gateA.rejectReason}` },
     });
   }
 
-  // ── 5. HTF Trend (parallel with regime) ───────────────
+  // ── 5. HTF Trend ──────────────────────────────────────
   let candles1h, candles4h, candles1d;
   try {
     [candles1h, candles4h, candles1d] = await Promise.all([
@@ -250,7 +252,7 @@ export async function POST() {
   // ── 9. Cooldown check ─────────────────────────────────
   const cooldownActive = await isCooldownActive(alert.symbol, alert.type);
 
-  // ── 10. Final decision ────────────────────────────────
+  // ── 10. Deterministic decision ────────────────────────
   let decision: string;
   let finalGateBReason = gateB.reason;
 
@@ -261,17 +263,103 @@ export async function POST() {
     decision = "NO_TRADE";
   } else {
     decision = direction.toUpperCase();
-    // Set cooldown for this symbol+type
-    await setCooldown(alert.symbol, alert.type);
   }
 
   console.log(
-    `[worker] ${alert.symbol} decision=${decision} gate_b=${gateB.passed}` +
+    `[worker] ${alert.symbol} deterministic=${decision} gate_b=${gateB.passed}` +
       ` regime=${regime.btc_regime} trend_4h=${trend4h.trend}` +
       (finalGateBReason ? ` reason=${finalGateBReason}` : "")
   );
 
-  // ── 11. Store decision ────────────────────────────────
+  // ── 11. Claude review (only if deterministic passed) ──
+  let claudeDecision: string | null = null;
+  let claudeConfidence: number | null = null;
+  let claudeRequest: object | null = null;
+  let claudeResponse: object | null = null;
+  let promptVersionId: string | null = null;
+  let setupType: string | null = null;
+  let riskFlags: string[] = [];
+  let reasoning: string | null = null;
+
+  if (decision === "LONG" || decision === "SHORT") {
+    // Get production prompt version
+    const { data: promptRow } = await supabase
+      .from("prompt_versions")
+      .select("id")
+      .eq("is_production", true)
+      .limit(1)
+      .single();
+
+    promptVersionId = promptRow?.id ?? null;
+
+    const reviewInput: ClaudeReviewInput = {
+      symbol: alert.symbol,
+      direction,
+      alert_tf: alert.tf,
+      alert_price: alert.price,
+      alert_rsi: alert.rsi,
+      alert_adx1h: alert.adx1h,
+      alert_adx4h: alert.adx4h,
+      alert_bb_width: alert.bb_width,
+      mark_price: markPrice,
+      funding_rate: fundingRate,
+      turnover_24h: turnover24h,
+      spread_bps: spreadBps,
+      open_interest_value: parseFloat(ticker.openInterestValue),
+      book_depth_bid_usd: bookDepthBidUsd,
+      book_depth_ask_usd: bookDepthAskUsd,
+      oi_delta_5m: oiDelta5m,
+      oi_delta_15m: oiDelta15m,
+      oi_delta_1h: oiDelta1h,
+      trend_4h: trend4h.trend,
+      trend_1d: trend1d.trend,
+      ema20_4h: trend4h.ema20,
+      ema50_4h: trend4h.ema50,
+      atr14_1h,
+      atr14_4h,
+      btc_regime: regime.btc_regime,
+      alt_environment: regime.alt_environment,
+      entry: levels.entry,
+      stop: levels.stop,
+      tp1: levels.tp1,
+      tp2: levels.tp2,
+      tp3: levels.tp3,
+      rr_tp1: levels.rr_tp1,
+      snapshot_quality: gateA.quality,
+      gate_a_quality: gateA.quality,
+      gate_b_passed: gateB.passed,
+    };
+
+    try {
+      const review = await reviewWithClaude(reviewInput);
+      claudeRequest = review.request;
+      claudeResponse = review.response;
+      claudeDecision = review.response.decision;
+      claudeConfidence = review.response.confidence;
+      setupType = review.response.setup_type;
+      riskFlags = review.response.risk_flags;
+      reasoning = review.response.reasoning;
+
+      console.log(
+        `[worker] Claude: decision=${claudeDecision} confidence=${claudeConfidence} setup=${setupType}`
+      );
+
+      // Claude can downgrade to NO_TRADE or INVALID
+      if (claudeDecision === "NO_TRADE" || claudeDecision === "INVALID") {
+        decision = "NO_TRADE";
+      }
+    } catch (err) {
+      console.error("[worker] Claude review failed:", err);
+      // Continue with deterministic decision if Claude fails
+    }
+  }
+
+  // Set cooldown only if final decision is a trade
+  if (decision === "LONG" || decision === "SHORT") {
+    await setCooldown(alert.symbol, alert.type);
+  }
+
+  // ── 12. Store decision ────────────────────────────────
   await storeDecision(supabase, {
     snapshot_id: snapshotId,
     alert_id: alertId,
@@ -304,19 +392,46 @@ export async function POST() {
     rr_tp2: levels.rr_tp2,
     rr_tp3: levels.rr_tp3,
     cooldown_active: cooldownActive,
+    prompt_version_id: promptVersionId,
+    claude_request: claudeRequest,
+    claude_response: claudeResponse,
+    claude_decision: claudeDecision,
+    claude_confidence: claudeConfidence,
   });
 
-  // ── 12. Mark alert processed ──────────────────────────
+  // ── 13. Mark alert processed ──────────────────────────
   await markProcessed(supabase, alertId);
 
-  // ── 13. Return full decision packet ───────────────────
+  // ── 14. Telegram delivery ─────────────────────────────
+  let telegramSent = false;
+  if (decision === "LONG" || decision === "SHORT") {
+    const msg = buildMessage({
+      symbol: alert.symbol,
+      decision,
+      entry: levels.entry,
+      stop: levels.stop,
+      tp1: levels.tp1,
+      tp2: levels.tp2,
+      tp3: levels.tp3,
+      confidence: claudeConfidence ?? 0,
+      setup_type: setupType ?? "unknown",
+      btc_regime: regime.btc_regime,
+      alt_environment: regime.alt_environment,
+      funding_rate: fundingRate,
+      risk_flags: riskFlags,
+      reasoning: reasoning ?? "",
+    });
+    telegramSent = await sendTelegram(msg);
+  }
+
+  // ── 15. Return full decision packet ───────────────────
   return NextResponse.json({
     status: "decision_made",
     symbol: alert.symbol,
+    decision,
     gate_a: {
       passed: true,
       quality: gateA.quality,
-      reject_reason: null,
     },
     gate_b: {
       passed: gateB.passed,
@@ -331,11 +446,7 @@ export async function POST() {
     },
     htf_trend: {
       trend_4h: trend4h.trend,
-      ema20_4h: trend4h.ema20,
-      ema50_4h: trend4h.ema50,
       trend_1d: trend1d.trend,
-      ema20_1d: trend1d.ema20,
-      ema50_1d: trend1d.ema50,
       atr14_1h,
       atr14_4h,
     },
@@ -347,8 +458,15 @@ export async function POST() {
       tp3: levels.tp3,
       rr_tp1: levels.rr_tp1,
     },
-    decision,
+    claude: {
+      decision: claudeDecision,
+      confidence: claudeConfidence,
+      setup_type: setupType,
+      risk_flags: riskFlags,
+      reasoning,
+    },
     cooldown_active: cooldownActive,
+    telegram_sent: telegramSent,
   });
 }
 
