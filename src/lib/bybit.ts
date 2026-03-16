@@ -104,3 +104,41 @@ export function computeOIDelta(records: OIRecord[]): number | null {
   if (previous === 0) return null;
   return ((latest - previous) / previous) * 100;
 }
+
+// ── Kline (candlestick) data ────────────────────────────
+
+export interface Kline {
+  startTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export async function fetchKlines(
+  symbol: string,
+  interval: string,
+  limit: number
+): Promise<Kline[]> {
+  const res = await fetch(
+    `${BYBIT_BASE}/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${limit}`,
+    { cache: "no-store" }
+  );
+  const data = await res.json();
+  if (data.retCode !== 0) {
+    throw new Error(`Kline fetch failed for ${symbol} (${interval}): ${data.retMsg}`);
+  }
+  // Bybit returns [startTime, open, high, low, close, volume, turnover]
+  // Results are newest-first, reverse to chronological order
+  return data.result.list
+    .map((k: string[]) => ({
+      startTime: Number(k[0]),
+      open: parseFloat(k[1]),
+      high: parseFloat(k[2]),
+      low: parseFloat(k[3]),
+      close: parseFloat(k[4]),
+      volume: parseFloat(k[5]),
+    }))
+    .reverse();
+}
