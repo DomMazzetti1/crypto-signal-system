@@ -36,11 +36,12 @@ export function runGateB(
     };
   }
 
-  // R:R minimum check
-  if (rrTp1 < 1.5) {
+  // R:R minimum check (round to 2dp to avoid floating point rejection)
+  const rrRounded = Math.round(rrTp1 * 100) / 100;
+  if (rrRounded < 1.5) {
     return {
       passed: false,
-      reason: `R:R to TP1 too low: ${rrTp1.toFixed(2)} < 1.5`,
+      reason: `R:R to TP1 too low: ${rrRounded} < 1.5`,
     };
   }
 

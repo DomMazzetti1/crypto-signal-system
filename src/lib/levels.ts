@@ -16,7 +16,7 @@ export function calculateLevels(
   direction: "long" | "short"
 ): PriceLevels {
   const atrMultiplier = 1.5;
-  const riskDistance = atr1h * atrMultiplier;
+  const riskDistance = Math.abs(atr1h) * atrMultiplier;
 
   let entry: number, stop: number, tp1: number, tp2: number, tp3: number;
 
