@@ -4,6 +4,10 @@
     {
       "path": "/api/universe/build",
       "schedule": "0 0 * * *"
+    },
+    {
+      "path": "/api/scanner/run",
+      "schedule": "1 * * * *"
     }
   ]
 }
