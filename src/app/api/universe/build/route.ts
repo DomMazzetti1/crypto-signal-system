@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 const BYBIT_BASE = "https://api.bybit.com/v5/market";
 const MIN_TURNOVER_24H = 10_000_000;
