@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { getRedis, ALERTS_QUEUE_KEY } from "@/lib/redis";
+import { runPipeline, AlertPayload } from "@/lib/pipeline";
 
 const REQUIRED_FIELDS = [
   "type",
@@ -33,10 +34,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const supabase = getSupabase();
+
   // Store raw payload to Postgres
-  const { error: dbError } = await getSupabase()
+  const { data: rawRow, error: dbError } = await supabase
     .from("alerts_raw")
-    .insert({ payload });
+    .insert({ payload })
+    .select("id")
+    .single();
 
   if (dbError) {
     console.error("Failed to insert alert_raw:", dbError);
@@ -46,8 +51,17 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Push to Redis queue
+  const alertId: string = rawRow.id;
+
+  // Push to Redis queue (kept for audit / replay capability)
   await getRedis().lpush(ALERTS_QUEUE_KEY, JSON.stringify(payload));
 
-  return NextResponse.json({ status: "queued" }, { status: 200 });
+  // Run full pipeline inline
+  const alert = payload as unknown as AlertPayload;
+  const result = await runPipeline(alert, alertId);
+
+  const httpStatus = result.http_status ?? 200;
+  delete result.http_status;
+
+  return NextResponse.json(result, { status: httpStatus });
 }
