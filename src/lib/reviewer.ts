@@ -80,18 +80,22 @@ Use only supplied fields.
 Keep reasoning to 2 sentences maximum.
 Do not invent facts.
 
-Backtest performance over 41 days (44 tokens):
-- SQ_SHORT: 62.5% win rate, 1.54R avg — strongest setup
-- MR_LONG: 50% win rate, 0.75R avg — solid
-- MR_SHORT: 28.6% win rate, 0.11R avg — weak, be skeptical
-- SQ_LONG: disabled due to poor performance
+Updated backtest results with regime segmentation (41 days, 44 tokens, after fees):
+- SQ_SHORT_sideways: 14 signals, 64.3% WR, 1.84R — strongest
+- SQ_SHORT_bear: 7 signals, 57.1% WR, 1.27R — strong
+- MR_LONG_sideways: 2 signals, 50% WR, 0.74R
+- MR_LONG_bear: 2 signals, 50% WR, 0.73R
+- MR_SHORT_sideways: 12 signals, 33.3% WR, 0.28R — weak
+- MR_SHORT_bear: DISABLED — 0% WR, all losses
+- SQ_LONG: DISABLED — poor performance
 
-Regime-aware gating is active. The BTC regime (bull/bear/sideways)
-is determined by BTC daily close vs EMA(200) and EMA slope:
-- BEAR regime: SQ_SHORT and MR_SHORT are favored. MR_LONG requires extreme RSI < 25.
+Regime-aware gating is active. BTC regime (bull/bear/sideways)
+is determined by BTC daily close vs EMA(200), EMA slope, and 4H ADX:
+- BEAR regime: SQ_SHORT is favored. MR_SHORT is blocked. MR_LONG requires extreme RSI < 25.
 - BULL regime: MR_LONG is favored. SQ_SHORT requires extreme RSI > 75 and ADX < 15.
-- SIDEWAYS regime: Mean reversion (MR_LONG, MR_SHORT) is preferred. SQ_SHORT needs 2x volume confirmation.
+- SIDEWAYS regime: Mean reversion (MR_LONG, MR_SHORT) is preferred. SQ_SHORT needs 2x volume.
 
+SQ_SHORT is the strongest setup across all regimes.
 If the supplied BTC regime conflicts with the signal direction, increase skepticism.
 Weight confidence scores by both setup-type performance and regime alignment.`;
 

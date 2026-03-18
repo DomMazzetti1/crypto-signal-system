@@ -56,7 +56,14 @@ export function runGateB(input: GateBInput): GateBResult {
   // ── Regime-aware signal gating ────────────────────────
 
   if (btcRegime === "bear") {
-    // BEAR: allow SQ_SHORT, MR_SHORT freely
+    // BEAR: allow SQ_SHORT freely
+    // MR_SHORT: blocked — 0% win rate, -1.00R in backtest
+    if (lowerType.includes("mr_short")) {
+      return {
+        passed: false,
+        reason: "MR_SHORT historically fails in bear regime",
+      };
+    }
     // MR_LONG: restrict to RSI < 25
     if (lowerType.includes("mr_long") && rsi !== undefined && rsi >= 25) {
       return {
