@@ -18,6 +18,13 @@ export async function classifyRegime(): Promise<RegimeResult> {
     fetchKlines("BTCUSDT", "D", 30),
   ]);
 
+  return classifyRegimeFromCandles(btc4h, btc1d);
+}
+
+export function classifyRegimeFromCandles(
+  btc4h: import("./bybit").Kline[],
+  btc1d: import("./bybit").Kline[]
+): RegimeResult {
   const trend4h = computeHTFTrend(btc4h);
   const trend1d = computeHTFTrend(btc1d);
 

@@ -1,0 +1,259 @@
+import { Kline } from "./bybit";
+import { RSI, BollingerBands, EMA, ATR, ADX, SMA } from "trading-signals";
+
+// ── Indicator result ────────────────────────────────────
+
+export interface SymbolIndicators {
+  // 1H
+  close: number;
+  high: number;
+  low: number;
+  volume: number;
+  prev_close: number;
+  prev_rsi: number;
+  rsi: number;
+  bb_upper: number;
+  bb_lower: number;
+  bb_basis: number;
+  prev_bb_basis: number;
+  bb_width_ratio: number;
+  bb_stdev: number;
+  ema20: number;
+  atr_1h: number;
+  adx_1h: number;
+  sma20_volume: number;
+  z_score: number;
+  close_off_low: number;
+  close_off_high: number;
+  bb_width_near_min: boolean;
+  candle_range: number;
+  // 4H
+  close_4h: number;
+  ema50_4h: number;
+  adx_4h: number;
+  // 1D
+  ema50_1d: number | null;
+  atr_1d: number;
+  // metadata
+  candle_start_time: number;
+}
+
+// ── Signal result ───────────────────────────────────────
+
+export interface Signal {
+  type: string;
+  symbol: string;
+  indicators: SymbolIndicators;
+}
+
+// ── Indicator computation ───────────────────────────────
+
+export function computeIndicators(
+  candles1h: Kline[],
+  candles4h: Kline[],
+  candles1d: Kline[]
+): SymbolIndicators | null {
+  if (candles1h.length < 30 || candles4h.length < 14 || candles1d.length < 14) {
+    return null;
+  }
+
+  // ── 1H indicators ──
+  const rsi = new RSI(14);
+  const bb = new BollingerBands(20, 2.2);
+  const ema20 = new EMA(20);
+  const atr1h = new ATR(14);
+  const adx1h = new ADX(14);
+  const smaVol = new SMA(20);
+
+  const bbWidths: number[] = [];
+
+  for (const c of candles1h) {
+    rsi.update(c.close, false);
+    bb.update(c.close, false);
+    ema20.update(c.close, false);
+    atr1h.update({ high: c.high, low: c.low, close: c.close }, false);
+    adx1h.update({ high: c.high, low: c.low, close: c.close }, false);
+    smaVol.update(c.volume, false);
+
+    if (bb.isStable) {
+      const r = bb.getResult();
+      if (r) {
+        const basis = Number(r.middle);
+        const width = basis > 0 ? (Number(r.upper) - Number(r.lower)) / basis : 0;
+        bbWidths.push(width);
+      }
+    }
+  }
+
+  if (!rsi.isStable || !bb.isStable || !atr1h.isStable || !adx1h.isStable) {
+    return null;
+  }
+
+  // Get second-to-last RSI and BB basis for crossover detection
+  const tempRsi = new RSI(14);
+  const tempBb = new BollingerBands(20, 2.2);
+  for (let i = 0; i < candles1h.length - 1; i++) {
+    tempRsi.update(candles1h[i].close, false);
+    tempBb.update(candles1h[i].close, false);
+  }
+  let prevRsi = 50;
+  if (tempRsi.isStable) {
+    prevRsi = Number(tempRsi.getResult() ?? 50);
+  }
+  const prevClose = candles1h[candles1h.length - 2].close;
+
+  const lastCandle = candles1h[candles1h.length - 1];
+  const bbResult = bb.getResult()!;
+  const bbUpper = Number(bbResult.upper);
+  const bbLower = Number(bbResult.lower);
+  const bbBasis = Number(bbResult.middle);
+  const bbWidthRatio = bbBasis > 0 ? (bbUpper - bbLower) / bbBasis : 0;
+
+  // Previous BB basis for crossover detection
+  let prevBbBasis = bbBasis;
+  if (tempBb.isStable) {
+    const prevBbResult = tempBb.getResult();
+    if (prevBbResult) prevBbBasis = Number(prevBbResult.middle);
+  }
+
+  // BB stdev from width
+  const bbStdev = (bbUpper - bbBasis) / 2.2;
+
+  // BB width percentile (near minimum of last 120)
+  const recentWidths = bbWidths.slice(-120);
+  const minWidth = Math.min(...recentWidths);
+  const bbWidthNearMin = minWidth > 0
+    ? bbWidthRatio <= minWidth * 1.15
+    : false;
+
+  const closeVal = lastCandle.close;
+  const highVal = lastCandle.high;
+  const lowVal = lastCandle.low;
+  const range = highVal - lowVal;
+
+  // ── 4H indicators ──
+  const ema504h = new EMA(50);
+  const adx4h = new ADX(14);
+  for (const c of candles4h) {
+    ema504h.update(c.close, false);
+    adx4h.update({ high: c.high, low: c.low, close: c.close }, false);
+  }
+
+  if (!ema504h.isStable || !adx4h.isStable) return null;
+
+  // ── 1D indicators ──
+  const ema501d = new EMA(50);
+  const atr1d = new ATR(14);
+  for (const c of candles1d) {
+    ema501d.update(c.close, false);
+    atr1d.update({ high: c.high, low: c.low, close: c.close }, false);
+  }
+
+  const ema50_1d_val = ema501d.isStable ? Number(ema501d.getResult()!) : null;
+  const atr_1d_val = atr1d.isStable ? Number(atr1d.getResult()!) : Number(atr1h.getResult()!) * 4;
+
+  return {
+    close: closeVal,
+    high: highVal,
+    low: lowVal,
+    volume: lastCandle.volume,
+    prev_close: prevClose,
+    prev_rsi: prevRsi,
+    rsi: Number(rsi.getResult()!),
+    bb_upper: bbUpper,
+    bb_lower: bbLower,
+    bb_basis: bbBasis,
+    prev_bb_basis: prevBbBasis,
+    bb_width_ratio: bbWidthRatio,
+    bb_stdev: bbStdev,
+    ema20: Number(ema20.getResult()!),
+    atr_1h: Number(atr1h.getResult()!),
+    adx_1h: Number(adx1h.getResult()!),
+    sma20_volume: Number(smaVol.getResult()!),
+    z_score: bbStdev > 0 ? (closeVal - bbBasis) / bbStdev : 0,
+    close_off_low: range > 0 ? (closeVal - lowVal) / range : 0,
+    close_off_high: range > 0 ? (highVal - closeVal) / range : 0,
+    bb_width_near_min: bbWidthNearMin,
+    candle_range: range,
+    close_4h: candles4h[candles4h.length - 1].close,
+    ema50_4h: Number(ema504h.getResult()!),
+    adx_4h: Number(adx4h.getResult()!),
+    ema50_1d: ema50_1d_val,
+    atr_1d: atr_1d_val,
+    candle_start_time: lastCandle.startTime,
+  };
+}
+
+// ── Signal conditions ───────────────────────────────────
+
+export function detectSignals(symbol: string, ind: SymbolIndicators): Signal[] {
+  const signals: Signal[] = [];
+
+  // MR_LONG
+  if (
+    ind.close < ind.bb_lower &&
+    ind.rsi < 29 &&
+    ind.z_score < -2.0 &&
+    ind.close_off_low >= 0.25 &&
+    ind.volume > ind.sma20_volume * 1.2 &&
+    ind.adx_1h < 18 &&
+    ind.adx_4h < 22 &&
+    (ind.ema50_1d === null || ind.close > ind.ema50_1d - 2.2 * ind.atr_1d)
+  ) {
+    signals.push({ type: "MR_LONG", symbol, indicators: ind });
+  }
+
+  // MR_SHORT
+  if (
+    ind.close > ind.bb_upper &&
+    ind.rsi > 71 &&
+    ind.z_score > 2.0 &&
+    ind.close_off_high >= 0.25 &&
+    ind.volume > ind.sma20_volume * 1.2 &&
+    ind.adx_1h < 18 &&
+    ind.adx_4h < 22 &&
+    (ind.ema50_1d === null || ind.close < ind.ema50_1d + 2.2 * ind.atr_1d)
+  ) {
+    signals.push({ type: "MR_SHORT", symbol, indicators: ind });
+  }
+
+  // SQ_LONG
+  const crossedAboveBasis = ind.prev_close <= ind.prev_bb_basis && ind.close > ind.bb_basis;
+  const rsiCrossedAbove52 = ind.prev_rsi <= 52 && ind.rsi > 52;
+
+  if (
+    ind.bb_width_ratio < 0.06 &&
+    ind.bb_width_near_min &&
+    crossedAboveBasis &&
+    ind.close > ind.ema20 &&
+    rsiCrossedAbove52 &&
+    ind.volume > ind.sma20_volume * 1.5 &&
+    ind.adx_1h < 30 &&
+    ind.close_4h > ind.ema50_4h &&
+    ind.candle_range < ind.atr_1h * 2.2 &&
+    Math.abs(ind.close - ind.ema20) < ind.atr_1h * 1.5
+  ) {
+    signals.push({ type: "SQ_LONG", symbol, indicators: ind });
+  }
+
+  // SQ_SHORT
+  const crossedBelowBasis = ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis;
+  const rsiCrossedBelow48 = ind.prev_rsi >= 48 && ind.rsi < 48;
+
+  if (
+    ind.bb_width_ratio < 0.06 &&
+    ind.bb_width_near_min &&
+    crossedBelowBasis &&
+    ind.close < ind.ema20 &&
+    rsiCrossedBelow48 &&
+    ind.volume > ind.sma20_volume * 1.5 &&
+    ind.adx_1h < 30 &&
+    ind.close_4h < ind.ema50_4h &&
+    ind.candle_range < ind.atr_1h * 2.2 &&
+    Math.abs(ind.close - ind.ema20) < ind.atr_1h * 1.5
+  ) {
+    signals.push({ type: "SQ_SHORT", symbol, indicators: ind });
+  }
+
+  return signals;
+}
