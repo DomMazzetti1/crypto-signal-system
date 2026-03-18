@@ -454,9 +454,9 @@ export async function GET() {
               setup_type: sig.type,
               candle_start_time: candleTime,
             });
+            candidatesQueued++;
+            console.log(`[scanner] Queued: ${symbol} ${sig.type} close=${indicators.close}`);
           }
-          candidatesQueued++;
-          console.log(`[scanner] Queued: ${symbol} ${sig.type} close=${indicators.close}`);
         } catch (err) {
           console.error(`[scanner] Pipeline error for ${symbol} ${sig.type}:`, err);
         }
