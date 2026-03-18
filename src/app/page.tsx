@@ -1,101 +1,83 @@
-import Image from "next/image";
+import { createClient } from "@supabase/supabase-js";
 
-export default function Home() {
+export const dynamic = "force-dynamic";
+
+async function getStats() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !key) return null;
+
+  const supabase = createClient(url, key);
+
+  const [universeRes, scannerRes, decisionsRes] = await Promise.all([
+    supabase
+      .from("universe")
+      .select("symbol", { count: "exact", head: true })
+      .eq("is_eligible", true),
+    supabase
+      .from("scanner_runs")
+      .select("completed_at")
+      .order("completed_at", { ascending: false })
+      .limit(1)
+      .single(),
+    supabase
+      .from("decisions")
+      .select("id", { count: "exact", head: true })
+      .in("decision", ["LONG", "SHORT"])
+      .gte("created_at", new Date().toISOString().slice(0, 10)),
+  ]);
+
+  return {
+    eligibleSymbols: universeRes.count ?? 0,
+    lastScannerRun: scannerRes.data?.completed_at ?? null,
+    signalsToday: decisionsRes.count ?? 0,
+  };
+}
+
+export default async function Home() {
+  const stats = await getStats();
+
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+    <div className="min-h-screen bg-black text-white flex items-center justify-center p-8 font-[family-name:var(--font-geist-mono)]">
+      <div className="w-full max-w-md space-y-8">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">
+            Alchemy Signal System
+          </h1>
+          <div className="mt-2 flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-emerald-400 text-sm font-medium">Live</span>
+          </div>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
+
+        <div className="space-y-4 text-sm">
+          <Row
+            label="Eligible symbols"
+            value={stats ? String(stats.eligibleSymbols) : "--"}
           />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
+          <Row
+            label="Signals today"
+            value={stats ? String(stats.signalsToday) : "--"}
           />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
+          <Row
+            label="Last scan"
+            value={
+              stats?.lastScannerRun
+                ? new Date(stats.lastScannerRun).toUTCString()
+                : "--"
+            }
           />
-          Go to nextjs.org →
-        </a>
-      </footer>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between border-b border-white/10 pb-2">
+      <span className="text-neutral-400">{label}</span>
+      <span>{value}</span>
     </div>
   );
 }
