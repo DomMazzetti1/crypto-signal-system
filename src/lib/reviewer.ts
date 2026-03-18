@@ -78,7 +78,14 @@ Return NO_TRADE if setup is not worth forwarding.
 Return LONG or SHORT only if setup is coherent, regime-aligned, and materially worth acting on.
 Use only supplied fields.
 Keep reasoning to 2 sentences maximum.
-Do not invent facts.`;
+Do not invent facts.
+
+Backtest performance over 41 days (44 tokens):
+- SQ_SHORT: 62.5% win rate, 1.54R avg — strongest setup
+- MR_LONG: 50% win rate, 0.75R avg — solid
+- MR_SHORT: 28.6% win rate, 0.11R avg — weak, be skeptical
+- SQ_LONG: disabled due to poor performance
+Weight confidence scores accordingly.`;
 
 const OUTPUT_SCHEMA = {
   type: "object" as const,

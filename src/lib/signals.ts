@@ -217,24 +217,7 @@ export function detectSignals(symbol: string, ind: SymbolIndicators): Signal[] {
     signals.push({ type: "MR_SHORT", symbol, indicators: ind });
   }
 
-  // SQ_LONG
-  const crossedAboveBasis = ind.prev_close <= ind.prev_bb_basis && ind.close > ind.bb_basis;
-  const rsiCrossedAbove52 = ind.prev_rsi <= 52 && ind.rsi > 52;
-
-  if (
-    ind.bb_width_ratio < 0.06 &&
-    ind.bb_width_near_min &&
-    crossedAboveBasis &&
-    ind.close > ind.ema20 &&
-    rsiCrossedAbove52 &&
-    ind.volume > ind.sma20_volume * 1.5 &&
-    ind.adx_1h < 30 &&
-    ind.close_4h > ind.ema50_4h &&
-    ind.candle_range < ind.atr_1h * 2.2 &&
-    Math.abs(ind.close - ind.ema20) < ind.atr_1h * 1.5
-  ) {
-    signals.push({ type: "SQ_LONG", symbol, indicators: ind });
-  }
+  // SQ_LONG — disabled: 20% win rate, -0.20R avg over 41-day backtest
 
   // SQ_SHORT
   const crossedBelowBasis = ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis;
