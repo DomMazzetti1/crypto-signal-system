@@ -85,7 +85,15 @@ Backtest performance over 41 days (44 tokens):
 - MR_LONG: 50% win rate, 0.75R avg — solid
 - MR_SHORT: 28.6% win rate, 0.11R avg — weak, be skeptical
 - SQ_LONG: disabled due to poor performance
-Weight confidence scores accordingly.`;
+
+Regime-aware gating is active. The BTC regime (bull/bear/sideways)
+is determined by BTC daily close vs EMA(200) and EMA slope:
+- BEAR regime: SQ_SHORT and MR_SHORT are favored. MR_LONG requires extreme RSI < 25.
+- BULL regime: MR_LONG is favored. SQ_SHORT requires extreme RSI > 75 and ADX < 15.
+- SIDEWAYS regime: Mean reversion (MR_LONG, MR_SHORT) is preferred. SQ_SHORT needs 2x volume confirmation.
+
+If the supplied BTC regime conflicts with the signal direction, increase skepticism.
+Weight confidence scores by both setup-type performance and regime alignment.`;
 
 const OUTPUT_SCHEMA = {
   type: "object" as const,

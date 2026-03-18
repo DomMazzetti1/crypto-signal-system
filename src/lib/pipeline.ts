@@ -276,14 +276,19 @@ export async function runPipeline(
   const levels = calculateLevels(markPrice, atr14_1h, direction);
 
   // ── 6. Gate B ─────────────────────────────────────────
-  const gateB = runGateB(
-    alert.type,
-    trend4h.trend,
-    regime.alt_environment,
-    atr14_1h,
+  const gateB = runGateB({
+    alertType: alert.type,
+    trend4h: trend4h.trend,
+    altEnvironment: regime.alt_environment,
+    btcRegime: regime.btc_regime,
+    atr1h: atr14_1h,
     markPrice,
-    levels.rr_tp1
-  );
+    rrTp1: levels.rr_tp1,
+    rsi: alert.rsi,
+    adx1h: alert.adx1h,
+    volume: undefined,
+    sma20Volume: undefined,
+  });
 
   // ── 7. Cooldown check ─────────────────────────────────
   const cooldownActive = await isCooldownActive(alert.symbol, alert.type);

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { fetchKlines, Kline } from "@/lib/bybit";
 import { computeIndicators, detectSignals } from "@/lib/signals";
-import { classifyRegimeFromCandles, AltEnvironment } from "@/lib/regime";
+import { classifyRegimeFromCandles, BTCRegime } from "@/lib/regime";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -262,10 +262,10 @@ export async function GET() {
       // Classify regime at this point in time
       const btc4hSlice = candlesUpTo(btc4h, currentBarTime + 1);
       const btc1dSlice = candlesUpTo(btc1d, currentBarTime + 1);
-      let regime: AltEnvironment = "mixed";
+      let regime: BTCRegime = "sideways";
       if (btc4hSlice.length >= 14 && btc1dSlice.length >= 14) {
         const regimeResult = classifyRegimeFromCandles(btc4hSlice, btc1dSlice);
-        regime = regimeResult.alt_environment;
+        regime = regimeResult.btc_regime;
       }
 
       // Grade each signal
@@ -315,7 +315,7 @@ export async function GET() {
     : 0;
 
   // By setup type
-  const setupTypes = ["MR_LONG", "MR_SHORT", "SQ_LONG", "SQ_SHORT"] as const;
+  const setupTypes = ["MR_LONG", "MR_SHORT", "SQ_SHORT"] as const;
   const by_setup: Record<string, SetupStats> = {};
   for (const st of setupTypes) {
     const subset = allSignals.filter((s) => s.setup_type === st);
@@ -328,7 +328,7 @@ export async function GET() {
   }
 
   // By regime
-  const regimeTypes = ["favorable", "mixed", "hostile"] as const;
+  const regimeTypes = ["bull", "bear", "sideways"] as const;
   const by_regime: Record<string, RegimeStats> = {};
   for (const rt of regimeTypes) {
     const subset = allSignals.filter((s) => s.regime === rt);
@@ -336,6 +336,22 @@ export async function GET() {
       count: subset.length,
       win_rate: subset.length > 0 ? subset.filter((s) => s.hit_tp1).length / subset.length : 0,
     };
+  }
+
+  // By setup × regime combination
+  const by_setup_regime: Record<string, SetupStats> = {};
+  for (const st of setupTypes) {
+    for (const rt of regimeTypes) {
+      const key = `${st}_${rt}`;
+      const subset = allSignals.filter((s) => s.setup_type === st && s.regime === rt);
+      if (subset.length === 0) continue;
+      const subRs = subset.map(computeR);
+      by_setup_regime[key] = {
+        count: subset.length,
+        win_rate: subset.filter((s) => s.hit_tp1).length / subset.length,
+        avg_r: subRs.reduce((a, b) => a + b, 0) / subset.length,
+      };
+    }
   }
 
   const summary = {
@@ -355,6 +371,12 @@ export async function GET() {
       Object.entries(by_regime).map(([k, v]) => [
         k,
         { count: v.count, win_rate: round(v.win_rate, 4) },
+      ])
+    ),
+    by_setup_regime: Object.fromEntries(
+      Object.entries(by_setup_regime).map(([k, v]) => [
+        k,
+        { count: v.count, win_rate: round(v.win_rate, 4), avg_r: round(v.avg_r, 2) },
       ])
     ),
     symbol_errors: symbolErrors.length,
