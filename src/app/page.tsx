@@ -1,19 +1,34 @@
+import { getSupabase } from "@/lib/supabase";
+
 export const dynamic = "force-dynamic";
 
-interface Stats {
-  eligible_symbols: number;
-  last_universe_build: string | null;
-  signals_today: number;
-}
-
-async function getStats(): Promise<Stats | null> {
-  const base = process.env.VERCEL_URL
-    ? `https://${process.env.VERCEL_URL}`
-    : "http://localhost:3000";
+async function getStats() {
   try {
-    const res = await fetch(`${base}/api/status`, { cache: "no-store" });
-    if (!res.ok) return null;
-    return res.json();
+    const supabase = getSupabase();
+
+    const [universeRes, lastBuildRes, decisionsRes] = await Promise.all([
+      supabase
+        .from("universe")
+        .select("symbol", { count: "exact", head: true })
+        .eq("is_eligible", true),
+      supabase
+        .from("universe")
+        .select("updated_at")
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabase
+        .from("decisions")
+        .select("id", { count: "exact", head: true })
+        .in("decision", ["LONG", "SHORT"])
+        .gte("created_at", new Date().toISOString().slice(0, 10)),
+    ]);
+
+    return {
+      eligibleSymbols: universeRes.count ?? 0,
+      lastUniverseBuild: lastBuildRes.data?.updated_at ?? null,
+      signalsToday: decisionsRes.count ?? 0,
+    };
   } catch {
     return null;
   }
@@ -38,17 +53,17 @@ export default async function Home() {
         <div className="space-y-4 text-sm">
           <Row
             label="Eligible symbols"
-            value={stats ? String(stats.eligible_symbols) : "--"}
+            value={stats ? String(stats.eligibleSymbols) : "--"}
           />
           <Row
             label="Signals today"
-            value={stats ? String(stats.signals_today) : "--"}
+            value={stats ? String(stats.signalsToday) : "--"}
           />
           <Row
             label="Last universe build"
             value={
-              stats?.last_universe_build
-                ? new Date(stats.last_universe_build).toUTCString()
+              stats?.lastUniverseBuild
+                ? new Date(stats.lastUniverseBuild).toUTCString()
                 : "--"
             }
           />
