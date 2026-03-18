@@ -1,41 +1,22 @@
-import { createClient } from "@supabase/supabase-js";
-
 export const dynamic = "force-dynamic";
 
-async function getStats() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
+interface Stats {
+  eligible_symbols: number;
+  last_universe_build: string | null;
+  signals_today: number;
+}
 
-  const supabase = createClient(url, key);
-
-  const [universeRes, scannerRes, decisionsRes] = await Promise.allSettled([
-    supabase
-      .from("universe")
-      .select("symbol", { count: "exact", head: true })
-      .eq("is_eligible", true),
-    supabase
-      .from("scanner_runs")
-      .select("completed_at")
-      .order("completed_at", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-    supabase
-      .from("decisions")
-      .select("id", { count: "exact", head: true })
-      .in("decision", ["LONG", "SHORT"])
-      .gte("created_at", new Date().toISOString().slice(0, 10)),
-  ]);
-
-  const universe = universeRes.status === "fulfilled" ? universeRes.value : null;
-  const scanner = scannerRes.status === "fulfilled" ? scannerRes.value : null;
-  const decisions = decisionsRes.status === "fulfilled" ? decisionsRes.value : null;
-
-  return {
-    eligibleSymbols: universe?.count ?? 0,
-    lastScannerRun: scanner?.data?.completed_at ?? null,
-    signalsToday: decisions?.count ?? 0,
-  };
+async function getStats(): Promise<Stats | null> {
+  const base = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : "http://localhost:3000";
+  try {
+    const res = await fetch(`${base}/api/status`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
 }
 
 export default async function Home() {
@@ -57,17 +38,17 @@ export default async function Home() {
         <div className="space-y-4 text-sm">
           <Row
             label="Eligible symbols"
-            value={stats ? String(stats.eligibleSymbols) : "--"}
+            value={stats ? String(stats.eligible_symbols) : "--"}
           />
           <Row
             label="Signals today"
-            value={stats ? String(stats.signalsToday) : "--"}
+            value={stats ? String(stats.signals_today) : "--"}
           />
           <Row
-            label="Last scan"
+            label="Last universe build"
             value={
-              stats?.lastScannerRun
-                ? new Date(stats.lastScannerRun).toUTCString()
+              stats?.last_universe_build
+                ? new Date(stats.last_universe_build).toUTCString()
                 : "--"
             }
           />
