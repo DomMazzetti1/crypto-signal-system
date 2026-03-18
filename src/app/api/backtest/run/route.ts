@@ -3,6 +3,8 @@ import { getSupabase } from "@/lib/supabase";
 import { fetchKlines, Kline } from "@/lib/bybit";
 import { computeIndicators, detectSignals } from "@/lib/signals";
 import { classifyRegimeFromCandles, BTCRegime } from "@/lib/regime";
+import { runGateB } from "@/lib/gate-b";
+import { computeHTFTrend } from "@/lib/ta";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -223,6 +225,7 @@ export async function GET() {
   const symbols = universeRows.map((r) => r.symbol);
   const allSignals: BacktestSignal[] = [];
   const symbolErrors: { symbol: string; error: string }[] = [];
+  let filteredByGateB = 0;
 
   // 2. Fetch BTC data for regime classification
   let btc4h: Kline[], btc1d: Kline[];
@@ -279,13 +282,35 @@ export async function GET() {
         regime = regimeResult.btc_regime;
       }
 
-      // Grade each signal
+      // 4H trend for Gate B
+      const trend4h = computeHTFTrend(slice4h);
+
+      // Grade each signal — only if it passes Gate B
       const futureBars = candles1h.slice(i + 1, i + 1 + FORWARD_BARS);
 
       for (const sig of signals) {
         const isLong = sig.type.includes("LONG");
         const rawEntry = indicators.close;
         const atrVal = indicators.atr_1h;
+
+        // Apply Gate B (same logic as live pipeline)
+        const gateB = runGateB({
+          alertType: sig.type,
+          trend4h: trend4h.trend,
+          btcRegime: regime,
+          atr1h: atrVal,
+          markPrice: rawEntry,
+          rrTp1: 1.5, // calculateLevels always produces 1.5 R:R to TP1
+          rsi: indicators.rsi,
+          adx1h: indicators.adx_1h,
+          volume: indicators.volume,
+          sma20Volume: indicators.sma20_volume,
+        });
+
+        if (!gateB.passed) {
+          filteredByGateB++;
+          continue;
+        }
 
         const grade = gradeSignal(rawEntry, atrVal, isLong, futureBars);
 
@@ -390,6 +415,7 @@ export async function GET() {
         { count: v.count, win_rate: round(v.win_rate, 4), avg_r: round(v.avg_r, 2) },
       ])
     ),
+    filtered_by_gate_b: filteredByGateB,
     symbol_errors: symbolErrors.length,
     runtime_ms: Date.now() - startTime,
   };
