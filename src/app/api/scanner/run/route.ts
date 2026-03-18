@@ -16,7 +16,7 @@ const MAX_CONCURRENT = 8;
 
 function currentHourBucket(): number {
   const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours()).getTime();
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), now.getUTCHours());
 }
 
 function current4hBucket(): number {
@@ -439,13 +439,14 @@ export async function GET() {
         // Push to Redis queue
         await redis.lpush(ALERTS_QUEUE_KEY, JSON.stringify(alertPayload));
 
-        // Set cooldown
-        await redis.set(cooldownKey, Date.now(), { ex: 8 * 60 * 60 });
-
         // Run pipeline inline
         const alertId = rawRow?.id ?? null;
         try {
-          await runPipeline(alertPayload, alertId);
+          const result = await runPipeline(alertPayload, alertId);
+          // Only set cooldown if pipeline decided LONG or SHORT
+          if (result.decision === "LONG" || result.decision === "SHORT") {
+            await redis.set(cooldownKey, Date.now(), { ex: 8 * 60 * 60 });
+          }
         } catch (err) {
           console.error(`[scanner] Pipeline error for ${symbol} ${sig.type}:`, err);
         }

@@ -14,13 +14,13 @@ export function runGateB(
   markPrice: number,
   rrTp1: number
 ): GateBResult {
-  const direction = alertType.toLowerCase();
+  const lowerType = alertType.toLowerCase();
 
-  if (direction === "long" && trend4h === "bearish") {
+  if (lowerType.includes("long") && trend4h === "bearish") {
     return { passed: false, reason: "LONG signal but 4H trend is bearish" };
   }
 
-  if (direction === "short" && trend4h === "bullish") {
+  if (lowerType.includes("short") && trend4h === "bullish") {
     return { passed: false, reason: "SHORT signal but 4H trend is bullish" };
   }
 
