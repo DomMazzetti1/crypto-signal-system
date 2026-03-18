@@ -49,6 +49,7 @@ interface SymbolIndicators {
   bb_upper: number;
   bb_lower: number;
   bb_basis: number;
+  prev_bb_basis: number;
   bb_width_ratio: number;
   bb_stdev: number;
   ema20: number;
@@ -65,7 +66,7 @@ interface SymbolIndicators {
   ema50_4h: number;
   adx_4h: number;
   // 1D
-  ema50_1d: number;
+  ema50_1d: number | null;
   atr_1d: number;
   // metadata
   candle_start_time: number;
@@ -114,10 +115,12 @@ function computeIndicators(
     return null;
   }
 
-  // Get second-to-last RSI for crossover detection
+  // Get second-to-last RSI and BB basis for crossover detection
   const tempRsi = new RSI(14);
+  const tempBb = new BollingerBands(20, 2.2);
   for (let i = 0; i < candles1h.length - 1; i++) {
     tempRsi.update(candles1h[i].close, false);
+    tempBb.update(candles1h[i].close, false);
   }
   if (tempRsi.isStable) {
     prevRsi = Number(tempRsi.getResult() ?? 50);
@@ -130,6 +133,13 @@ function computeIndicators(
   const bbLower = Number(bbResult.lower);
   const bbBasis = Number(bbResult.middle);
   const bbWidthRatio = bbBasis > 0 ? (bbUpper - bbLower) / bbBasis : 0;
+
+  // Previous BB basis for crossover detection
+  let prevBbBasis = bbBasis;
+  if (tempBb.isStable) {
+    const prevBbResult = tempBb.getResult();
+    if (prevBbResult) prevBbBasis = Number(prevBbResult.middle);
+  }
 
   // BB stdev from width
   // BB bands = basis ± multiplier * stdev, so stdev = (upper - basis) / multiplier
@@ -165,9 +175,8 @@ function computeIndicators(
     atr1d.update({ high: c.high, low: c.low, close: c.close }, false);
   }
 
-  // 1D EMA50 needs 50 periods — may not be stable with only 60 candles
-  // Fall back if not stable
-  const ema50_1d_val = ema501d.isStable ? Number(ema501d.getResult()!) : closeVal;
+  // 1D EMA50 requires sufficient history — skip daily veto if not stable
+  const ema50_1d_val = ema501d.isStable ? Number(ema501d.getResult()!) : null;
   const atr_1d_val = atr1d.isStable ? Number(atr1d.getResult()!) : Number(atr1h.getResult()!) * 4;
 
   return {
@@ -181,6 +190,7 @@ function computeIndicators(
     bb_upper: bbUpper,
     bb_lower: bbLower,
     bb_basis: bbBasis,
+    prev_bb_basis: prevBbBasis,
     bb_width_ratio: bbWidthRatio,
     bb_stdev: bbStdev,
     ema20: Number(ema20.getResult()!),
@@ -221,7 +231,7 @@ function detectSignals(symbol: string, ind: SymbolIndicators): Signal[] {
     ind.volume > ind.sma20_volume * 1.2 &&
     ind.adx_1h < 18 &&
     ind.adx_4h < 22 &&
-    ind.close > ind.ema50_1d - 2.2 * ind.atr_1d
+    (ind.ema50_1d === null || ind.close > ind.ema50_1d - 2.2 * ind.atr_1d)
   ) {
     signals.push({ type: "MR_LONG", symbol, indicators: ind });
   }
@@ -235,13 +245,13 @@ function detectSignals(symbol: string, ind: SymbolIndicators): Signal[] {
     ind.volume > ind.sma20_volume * 1.2 &&
     ind.adx_1h < 18 &&
     ind.adx_4h < 22 &&
-    ind.close < ind.ema50_1d + 2.2 * ind.atr_1d
+    (ind.ema50_1d === null || ind.close < ind.ema50_1d + 2.2 * ind.atr_1d)
   ) {
     signals.push({ type: "MR_SHORT", symbol, indicators: ind });
   }
 
   // SQ_LONG
-  const crossedAboveBasis = ind.prev_close <= ind.bb_basis && ind.close > ind.bb_basis;
+  const crossedAboveBasis = ind.prev_close <= ind.prev_bb_basis && ind.close > ind.bb_basis;
   const rsiCrossedAbove52 = ind.prev_rsi <= 52 && ind.rsi > 52;
 
   if (
@@ -260,7 +270,7 @@ function detectSignals(symbol: string, ind: SymbolIndicators): Signal[] {
   }
 
   // SQ_SHORT
-  const crossedBelowBasis = ind.prev_close >= ind.bb_basis && ind.close < ind.bb_basis;
+  const crossedBelowBasis = ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis;
   const rsiCrossedBelow48 = ind.prev_rsi >= 48 && ind.rsi < 48;
 
   if (
@@ -410,13 +420,6 @@ export async function GET() {
           continue;
         }
 
-        // Record candle signal for idempotency
-        await supabase.from("candle_signals").insert({
-          symbol,
-          setup_type: sig.type,
-          candle_start_time: candleTime,
-        });
-
         // Build alert payload
         const alertPayload: AlertPayload = {
           type: sig.type,
@@ -443,16 +446,20 @@ export async function GET() {
         const alertId = rawRow?.id ?? null;
         try {
           const result = await runPipeline(alertPayload, alertId);
-          // Only set cooldown if pipeline decided LONG or SHORT
+          // Only set cooldown and record idempotency on tradable decision
           if (result.decision === "LONG" || result.decision === "SHORT") {
             await redis.set(cooldownKey, Date.now(), { ex: 8 * 60 * 60 });
+            await supabase.from("candle_signals").insert({
+              symbol,
+              setup_type: sig.type,
+              candle_start_time: candleTime,
+            });
           }
+          candidatesQueued++;
+          console.log(`[scanner] Queued: ${symbol} ${sig.type} close=${indicators.close}`);
         } catch (err) {
           console.error(`[scanner] Pipeline error for ${symbol} ${sig.type}:`, err);
         }
-
-        candidatesQueued++;
-        console.log(`[scanner] Queued: ${symbol} ${sig.type} close=${indicators.close}`);
       }
     });
 
