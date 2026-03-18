@@ -4,12 +4,12 @@ export const dynamic = "force-dynamic";
 
 async function getStats() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!url || !key) return null;
 
   const supabase = createClient(url, key);
 
-  const [universeRes, scannerRes, decisionsRes] = await Promise.all([
+  const [universeRes, scannerRes, decisionsRes] = await Promise.allSettled([
     supabase
       .from("universe")
       .select("symbol", { count: "exact", head: true })
@@ -27,10 +27,14 @@ async function getStats() {
       .gte("created_at", new Date().toISOString().slice(0, 10)),
   ]);
 
+  const universe = universeRes.status === "fulfilled" ? universeRes.value : null;
+  const scanner = scannerRes.status === "fulfilled" ? scannerRes.value : null;
+  const decisions = decisionsRes.status === "fulfilled" ? decisionsRes.value : null;
+
   return {
-    eligibleSymbols: universeRes.count ?? 0,
-    lastScannerRun: scannerRes.data?.completed_at ?? null,
-    signalsToday: decisionsRes.count ?? 0,
+    eligibleSymbols: universe?.count ?? 0,
+    lastScannerRun: scanner?.data?.completed_at ?? null,
+    signalsToday: decisions?.count ?? 0,
   };
 }
 
