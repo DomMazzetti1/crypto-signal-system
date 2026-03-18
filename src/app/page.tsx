@@ -19,7 +19,7 @@ async function getStats() {
       .select("completed_at")
       .order("completed_at", { ascending: false })
       .limit(1)
-      .single(),
+      .maybeSingle(),
     supabase
       .from("decisions")
       .select("id", { count: "exact", head: true })
