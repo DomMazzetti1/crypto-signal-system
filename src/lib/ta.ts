@@ -96,6 +96,67 @@ export function latestATR(candles: Kline[], period: number = 14): number {
   return atrValues[atrValues.length - 1];
 }
 
+// ── ADX (Average Directional Index) ─────────────────────
+
+export function adx(candles: Kline[], period: number): number {
+  if (candles.length < period * 2) return 50; // not enough data
+
+  // Compute +DM, -DM, TR series
+  const pDM: number[] = [];
+  const mDM: number[] = [];
+  const tr: number[] = [];
+
+  for (let i = 1; i < candles.length; i++) {
+    const highDiff = candles[i].high - candles[i - 1].high;
+    const lowDiff = candles[i - 1].low - candles[i].low;
+    pDM.push(highDiff > lowDiff && highDiff > 0 ? highDiff : 0);
+    mDM.push(lowDiff > highDiff && lowDiff > 0 ? lowDiff : 0);
+    tr.push(Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - candles[i - 1].close),
+      Math.abs(candles[i].low - candles[i - 1].close)
+    ));
+  }
+
+  // Wilder's smoothing
+  function smooth(values: number[], p: number): number[] {
+    const result: number[] = [];
+    let sum = 0;
+    for (let i = 0; i < p && i < values.length; i++) sum += values[i];
+    result[p - 1] = sum;
+    for (let i = p; i < values.length; i++) {
+      result[i] = result[i - 1] - result[i - 1] / p + values[i];
+    }
+    return result;
+  }
+
+  const smoothTR = smooth(tr, period);
+  const smoothPDM = smooth(pDM, period);
+  const smoothMDM = smooth(mDM, period);
+
+  // DX series
+  const dx: number[] = [];
+  for (let i = period - 1; i < smoothTR.length; i++) {
+    if (!smoothTR[i]) continue;
+    const pdi = (smoothPDM[i] / smoothTR[i]) * 100;
+    const mdi = (smoothMDM[i] / smoothTR[i]) * 100;
+    const sum = pdi + mdi;
+    dx.push(sum === 0 ? 0 : (Math.abs(pdi - mdi) / sum) * 100);
+  }
+
+  if (dx.length < period) return 50;
+
+  // ADX = EMA of DX using Wilder's smoothing
+  let adxVal = 0;
+  for (let i = 0; i < period; i++) adxVal += dx[i];
+  adxVal /= period;
+  for (let i = period; i < dx.length; i++) {
+    adxVal = (adxVal * (period - 1) + dx[i]) / period;
+  }
+
+  return adxVal;
+}
+
 // ── Rolling median helper ───────────────────────────────
 
 export function rollingMedian(values: number[]): number {

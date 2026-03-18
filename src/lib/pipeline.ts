@@ -25,6 +25,8 @@ export interface AlertPayload {
   adx1h: number;
   adx4h: number;
   bb_width: number;
+  volume?: number;
+  sma20_volume?: number;
 }
 
 interface GateAResult {
@@ -279,15 +281,14 @@ export async function runPipeline(
   const gateB = runGateB({
     alertType: alert.type,
     trend4h: trend4h.trend,
-    altEnvironment: regime.alt_environment,
     btcRegime: regime.btc_regime,
     atr1h: atr14_1h,
     markPrice,
     rrTp1: levels.rr_tp1,
     rsi: alert.rsi,
     adx1h: alert.adx1h,
-    volume: undefined,
-    sma20Volume: undefined,
+    volume: alert.volume,
+    sma20Volume: alert.sma20_volume,
   });
 
   // ── 7. Cooldown check ─────────────────────────────────

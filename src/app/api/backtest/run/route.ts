@@ -12,6 +12,10 @@ const WARMUP_BARS = 150;
 const FORWARD_BARS = 48;
 const ATR_MULT = 1.5;
 
+// Friction model (Bybit perps)
+const TAKER_FEE = 0.00055;  // 0.055% per side
+const SLIPPAGE = 0.0005;     // 0.05% per side
+
 // ── Types ───────────────────────────────────────────────
 
 interface BacktestSignal {
@@ -90,7 +94,7 @@ function candlesUpTo(candles: Kline[], beforeMs: number): Kline[] {
 // ── Grade a signal against future bars ──────────────────
 
 function gradeSignal(
-  entry: number,
+  rawEntry: number,
   atrVal: number,
   isLong: boolean,
   futureBars: Kline[]
@@ -106,20 +110,27 @@ function gradeSignal(
   tp2: number;
   tp3: number;
   stop_loss: number;
+  entry_price: number;
 } {
+  // Apply slippage to entry
+  const entry = isLong
+    ? rawEntry * (1 + SLIPPAGE)
+    : rawEntry * (1 - SLIPPAGE);
+
   const risk = atrVal * ATR_MULT;
   let tp1: number, tp2: number, tp3: number, sl: number;
 
+  // Apply taker fee to exit levels (reduces profit targets, widens stop loss)
   if (isLong) {
     sl = entry - risk;
-    tp1 = entry + risk * 1.5;
-    tp2 = entry + risk * 2.5;
-    tp3 = entry + risk * 4.0;
+    tp1 = (entry + risk * 1.5) * (1 - TAKER_FEE);
+    tp2 = (entry + risk * 2.5) * (1 - TAKER_FEE);
+    tp3 = (entry + risk * 4.0) * (1 - TAKER_FEE);
   } else {
     sl = entry + risk;
-    tp1 = entry - risk * 1.5;
-    tp2 = entry - risk * 2.5;
-    tp3 = entry - risk * 4.0;
+    tp1 = (entry - risk * 1.5) * (1 + TAKER_FEE);
+    tp2 = (entry - risk * 2.5) * (1 + TAKER_FEE);
+    tp3 = (entry - risk * 4.0) * (1 + TAKER_FEE);
   }
 
   let hit_tp1 = false, hit_tp2 = false, hit_tp3 = false, hit_sl = false;
@@ -177,7 +188,7 @@ function gradeSignal(
     }
   }
 
-  return { hit_tp1, hit_tp2, hit_tp3, hit_sl, bars_to_resolution, max_favorable, max_adverse, tp1, tp2, tp3, stop_loss: sl };
+  return { hit_tp1, hit_tp2, hit_tp3, hit_sl, bars_to_resolution, max_favorable, max_adverse, tp1, tp2, tp3, stop_loss: sl, entry_price: entry };
 }
 
 // ── Compute R at close for a signal ─────────────────────
@@ -273,16 +284,16 @@ export async function GET() {
 
       for (const sig of signals) {
         const isLong = sig.type.includes("LONG");
-        const entry = indicators.close;
+        const rawEntry = indicators.close;
         const atrVal = indicators.atr_1h;
 
-        const grade = gradeSignal(entry, atrVal, isLong, futureBars);
+        const grade = gradeSignal(rawEntry, atrVal, isLong, futureBars);
 
         allSignals.push({
           symbol,
           setup_type: sig.type,
           candle_time: new Date(currentBarTime).toISOString(),
-          entry_price: entry,
+          entry_price: grade.entry_price,
           stop_loss: grade.stop_loss,
           tp1: grade.tp1,
           tp2: grade.tp2,

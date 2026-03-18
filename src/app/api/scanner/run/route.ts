@@ -174,6 +174,8 @@ export async function GET() {
           adx1h: indicators.adx_1h,
           adx4h: indicators.adx_4h,
           bb_width: indicators.bb_width_ratio,
+          volume: indicators.volume,
+          sma20_volume: indicators.sma20_volume,
         };
 
         // Store in alerts_raw

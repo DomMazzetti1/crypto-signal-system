@@ -1,5 +1,5 @@
 import { TrendDirection } from "./ta";
-import { BTCRegime, AltEnvironment } from "./regime";
+import { BTCRegime } from "./regime";
 
 export interface GateBResult {
   passed: boolean;
@@ -9,7 +9,6 @@ export interface GateBResult {
 export interface GateBInput {
   alertType: string;
   trend4h: TrendDirection;
-  altEnvironment: AltEnvironment;
   btcRegime: BTCRegime;
   atr1h: number;
   markPrice: number;

@@ -1,5 +1,5 @@
 import { fetchKlines, Kline } from "./bybit";
-import { computeHTFTrend, ema, atr, rollingMedian, TrendDirection } from "./ta";
+import { computeHTFTrend, ema, atr, adx, rollingMedian, TrendDirection } from "./ta";
 
 export type BTCRegime = "bull" | "bear" | "sideways";
 export type AltEnvironment = "favorable" | "mixed" | "hostile";
@@ -56,7 +56,7 @@ export function classifyRegimeFromCandles(
     : 0;
 
   // ADX on 4H for sideways detection
-  // Use ATR ratio as proxy — high_volatility with no trend = sideways
+  const btc4hAdx = adx(btc4h, 14);
 
   let btc_regime: BTCRegime;
 
@@ -69,8 +69,8 @@ export function classifyRegimeFromCandles(
     } else {
       btc_regime = "sideways";
     }
-  } else if (Math.abs(distFromEma200) < 0.03) {
-    // Within 3% of EMA200 — sideways
+  } else if (Math.abs(distFromEma200) < 0.03 || btc4hAdx < 20) {
+    // Within 3% of EMA200 OR low ADX — sideways
     btc_regime = "sideways";
   } else if (btcClose > currentEma200 && ema200Slope > 0) {
     btc_regime = "bull";
