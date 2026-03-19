@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { Kline } from "@/lib/bybit";
-import { computeIndicators, detectSignals } from "@/lib/signals";
+import { SymbolIndicators, detectSignals } from "@/lib/signals";
+import { RSI, BollingerBands, EMA, ATR, ADX, SMA } from "trading-signals";
 import { classifyRegimeFromCandles, BTCRegime } from "@/lib/regime";
 import { runGateB } from "@/lib/gate-b";
 import { computeHTFTrend } from "@/lib/ta";
@@ -423,11 +424,16 @@ async function fetchKlinesPaginated(
   let freshCandles: Kline[] = [];
 
   if (stableCandles.length >= totalNeeded) {
-    // Cache fully covers — only refresh recent candles
-    freshCandles = await fetchFromBybit(symbol, interval, Math.max(staleCount + 50, 100));
-    // Write refreshed candles to cache
-    await writeCache(symbol, interval, freshCandles);
-    console.log(`[cache] ${symbol}/${interval}: ${stableCandles.length} cached, refreshed ${freshCandles.length} recent candles`);
+    // Cache fully covers the historical window
+    if (staleCount > 0) {
+      // Refresh only the stale (recent) candles
+      freshCandles = await fetchFromBybit(symbol, interval, staleCount + 10);
+      await writeCache(symbol, interval, freshCandles);
+      console.log(`[cache] ${symbol}/${interval}: ${stableCandles.length} cached, refreshed ${freshCandles.length} recent`);
+    } else {
+      // All candles are stable — no Bybit fetch needed
+      console.log(`[cache] ${symbol}/${interval}: ${stableCandles.length} cached, fully stable — no fetch needed`);
+    }
   } else if (stableCandles.length > 0) {
     // Partial cache — fetch only the gap (older candles we're missing)
     const oldestCached = stableCandles[0].startTime;
@@ -451,6 +457,183 @@ async function fetchKlinesPaginated(
   for (const c of stableCandles) merged.set(c.startTime, c);
   for (const c of freshCandles) merged.set(c.startTime, c); // fresh overwrites stale
   return Array.from(merged.values()).sort((a, b) => a.startTime - b.startTime);
+}
+
+// ── Precomputed indicator frame for O(n) backtest ───────
+// Runs each indicator once over the full candle series and stores
+// all intermediate values. The bar-walk loop then indexes into
+// these arrays instead of calling computeIndicators(slice) per bar.
+//
+// Produces the EXACT same SymbolIndicators values as computeIndicators()
+// because it uses the same library classes with the same parameters.
+
+function precomputeIndicatorFrame(
+  candles1h: Kline[],
+  candles4h: Kline[],
+  candles1d: Kline[]
+): (SymbolIndicators | null)[] {
+  const n = candles1h.length;
+  const frame: (SymbolIndicators | null)[] = new Array(n).fill(null);
+
+  // 1H indicator instances — created once, updated incrementally
+  const rsi = new RSI(14);
+  const bb = new BollingerBands(20, 2.2);
+  const ema20Ind = new EMA(20);
+  const atr1hInd = new ATR(14);
+  const adx1hInd = new ADX(14);
+  const smaVol = new SMA(20);
+
+  // Rolling state for BB width near-min (last 120 widths)
+  const bbWidths: number[] = [];
+
+  // Previous-bar state for crossover detection
+  let prevRsi = 50;
+  let prevClose = 0;
+  let prevBbBasis = 0;
+
+  // 4H/1D precomputation — walk once, store per-index results
+  // Build lookup: for each 1H bar index, find the latest 4H/1D candle index
+  const ema504h = new EMA(50);
+  const adx4hInd = new ADX(14);
+  const htf4hResults: { close: number; ema50: number; adx: number; stable: boolean }[] = [];
+
+  for (const c of candles4h) {
+    ema504h.update(c.close, false);
+    adx4hInd.update({ high: c.high, low: c.low, close: c.close }, false);
+    htf4hResults.push({
+      close: c.close,
+      ema50: ema504h.isStable ? Number(ema504h.getResult()!) : 0,
+      adx: adx4hInd.isStable ? Number(adx4hInd.getResult()!) : 0,
+      stable: ema504h.isStable && adx4hInd.isStable,
+    });
+  }
+
+  const ema501d = new EMA(50);
+  const atr1dInd = new ATR(14);
+  const htf1dResults: { ema50: number | null; atr: number; stable: boolean }[] = [];
+
+  for (const c of candles1d) {
+    ema501d.update(c.close, false);
+    atr1dInd.update({ high: c.high, low: c.low, close: c.close }, false);
+    htf1dResults.push({
+      ema50: ema501d.isStable ? Number(ema501d.getResult()!) : null,
+      atr: atr1dInd.isStable ? Number(atr1dInd.getResult()!) : 0,
+      stable: ema501d.isStable || atr1dInd.isStable,
+    });
+  }
+
+  // Walk through 1H candles, building the frame
+  for (let i = 0; i < n; i++) {
+    const c = candles1h[i];
+
+    // Save prev values BEFORE updating current bar's indicators
+    if (i > 0) {
+      prevClose = candles1h[i - 1].close;
+      if (rsi.isStable) {
+        prevRsi = Number(rsi.getResult()!);
+      }
+      if (bb.isStable) {
+        const prevBb = bb.getResult();
+        if (prevBb) prevBbBasis = Number(prevBb.middle);
+      }
+    }
+
+    // Update all 1H indicators with current bar
+    rsi.update(c.close, false);
+    bb.update(c.close, false);
+    ema20Ind.update(c.close, false);
+    atr1hInd.update({ high: c.high, low: c.low, close: c.close }, false);
+    adx1hInd.update({ high: c.high, low: c.low, close: c.close }, false);
+    smaVol.update(c.volume, false);
+
+    // Track BB widths for near-min check
+    if (bb.isStable) {
+      const bbR = bb.getResult();
+      if (bbR) {
+        const basis = Number(bbR.middle);
+        const width = basis > 0 ? (Number(bbR.upper) - Number(bbR.lower)) / basis : 0;
+        bbWidths.push(width);
+      }
+    }
+
+    // Skip bars where indicators aren't stable yet
+    if (!rsi.isStable || !bb.isStable || !atr1hInd.isStable || !adx1hInd.isStable) {
+      continue;
+    }
+    if (i === 0) continue; // Need prev values
+
+    // Find latest 4H candle at or before this 1H bar
+    const currentBarTime = c.startTime;
+    let htf4hIdx = -1;
+    for (let j = candles4h.length - 1; j >= 0; j--) {
+      if (candles4h[j].startTime <= currentBarTime) {
+        htf4hIdx = j;
+        break;
+      }
+    }
+
+    let htf1dIdx = -1;
+    for (let j = candles1d.length - 1; j >= 0; j--) {
+      if (candles1d[j].startTime <= currentBarTime) {
+        htf1dIdx = j;
+        break;
+      }
+    }
+
+    // Need at least 14 4H and 14 1D candles
+    if (htf4hIdx < 13 || htf1dIdx < 13) continue;
+    if (!htf4hResults[htf4hIdx].stable) continue;
+
+    const bbResult = bb.getResult()!;
+    const bbUpper = Number(bbResult.upper);
+    const bbLower = Number(bbResult.lower);
+    const bbBasis = Number(bbResult.middle);
+    const bbWidthRatio = bbBasis > 0 ? (bbUpper - bbLower) / bbBasis : 0;
+    const bbStdev = (bbUpper - bbBasis) / 2.2;
+
+    const recentWidths = bbWidths.slice(-120);
+    const minWidth = recentWidths.length > 0 ? Math.min(...recentWidths) : 0;
+    const bbWidthNearMin = minWidth > 0 ? bbWidthRatio <= minWidth * 1.15 : false;
+
+    const range = c.high - c.low;
+    const atr1hVal = Number(atr1hInd.getResult()!);
+
+    const htf4h = htf4hResults[htf4hIdx];
+    const htf1d = htf1dResults[htf1dIdx];
+
+    frame[i] = {
+      close: c.close,
+      high: c.high,
+      low: c.low,
+      volume: c.volume,
+      prev_close: prevClose,
+      prev_rsi: prevRsi,
+      rsi: Number(rsi.getResult()!),
+      bb_upper: bbUpper,
+      bb_lower: bbLower,
+      bb_basis: bbBasis,
+      prev_bb_basis: prevBbBasis,
+      bb_width_ratio: bbWidthRatio,
+      bb_stdev: bbStdev,
+      ema20: Number(ema20Ind.getResult()!),
+      atr_1h: atr1hVal,
+      adx_1h: Number(adx1hInd.getResult()!),
+      sma20_volume: Number(smaVol.getResult()!),
+      z_score: bbStdev > 0 ? (c.close - bbBasis) / bbStdev : 0,
+      close_off_low: range > 0 ? (c.close - c.low) / range : 0,
+      close_off_high: range > 0 ? (c.high - c.close) / range : 0,
+      bb_width_near_min: bbWidthNearMin,
+      candle_range: range,
+      close_4h: htf4h.close,
+      ema50_4h: htf4h.ema50,
+      adx_4h: htf4h.adx,
+      ema50_1d: htf1d.ema50,
+      atr_1d: htf1d.atr > 0 ? htf1d.atr : atr1hVal * 4,
+      candle_start_time: c.startTime,
+    };
+  }
+
+  return frame;
 }
 
 // ── Find candles up to a given timestamp ────────────────
@@ -681,20 +864,18 @@ export async function GET(request: NextRequest) {
       return;
     }
 
+    // Precompute all indicators in one O(n) pass
+    const indicatorFrame = precomputeIndicatorFrame(candles1h, candles4h, candles1d);
+
     // Cooldown state: maps "SYMBOL:SETUP_TYPE" → timestamp when cooldown expires
     // Mirrors live Redis key "cooldown:{symbol}:{alertType}" with 8h TTL
     const cooldownUntil = new Map<string, number>();
 
     for (let i = WARMUP_BARS; i < candles1h.length - FORWARD_BARS; i++) {
-      const slice1h = candles1h.slice(0, i + 1);
       const currentBarTime = candles1h[i].startTime;
 
-      const slice4h = candlesUpTo(candles4h, currentBarTime + 1);
-      const slice1d = candlesUpTo(candles1d, currentBarTime + 1);
-
-      if (slice4h.length < 14 || slice1d.length < 14) continue;
-
-      const indicators = computeIndicators(slice1h, slice4h, slice1d);
+      // Read precomputed indicators for this bar (O(1) lookup)
+      const indicators = indicatorFrame[i];
       if (!indicators) continue;
 
       const signals = detectSignals(symbol, indicators);
@@ -718,6 +899,8 @@ export async function GET(request: NextRequest) {
         regime = regimeResult.btc_regime;
       }
 
+      // 4H trend for Gate B (uses symbol's own 4H candles up to this bar)
+      const slice4h = candlesUpTo(candles4h, currentBarTime + 1);
       const trend4h = computeHTFTrend(slice4h);
       const futureBars = candles1h.slice(i + 1, i + 1 + FORWARD_BARS);
 
