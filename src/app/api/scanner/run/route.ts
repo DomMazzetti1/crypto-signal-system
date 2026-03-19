@@ -234,6 +234,7 @@ export async function GET() {
           volume: indicators.volume,
           sma20_volume: indicators.sma20_volume,
           close_price: indicators.close,
+          atr_1h: indicators.atr_1h,
           baseline_pass: baselinePass,
           baseline_block_reason: baselineBlockReason,
           relaxed_pass: relaxedPass,

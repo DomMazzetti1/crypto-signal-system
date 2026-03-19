@@ -101,5 +101,78 @@ export async function GET(request: NextRequest) {
     by_regime: byRegime,
 
     relaxed_only_candidates: relaxedOnlyDetail.length > 0 ? relaxedOnlyDetail : undefined,
+
+    // ── Graded performance (only for GRADED rows) ───────
+    graded_performance: buildGradedPerformance(rows),
   });
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildGradedPerformance(rows: any[]) {
+  const graded = rows.filter((r) => r.grade_status === "GRADED");
+  if (graded.length === 0) {
+    return { note: "No graded signals yet. Call /api/shadow/grade to grade pending signals.", graded_count: 0 };
+  }
+
+  const round = (n: number, dp: number) => Math.round(n * 10 ** dp) / 10 ** dp;
+
+  function metrics(subset: typeof graded) {
+    if (subset.length === 0) return null;
+    const wins = subset.filter((r) => r.hit_tp1).length;
+    const rs = subset.map((r) => Number(r.outcome_r) || 0);
+    const avgR = rs.reduce((a, b) => a + b, 0) / subset.length;
+    const grossProfit = rs.filter((r) => r > 0).reduce((a, b) => a + b, 0);
+    const grossLoss = Math.abs(rs.filter((r) => r < 0).reduce((a, b) => a + b, 0));
+    const pf = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0;
+    return {
+      count: subset.length,
+      win_rate: round(wins / subset.length, 4),
+      avg_r: round(avgR, 2),
+      profit_factor: round(pf, 2),
+    };
+  }
+
+  const overlap = graded.filter((r) => r.baseline_pass && r.relaxed_pass);
+  const relaxedOnly = graded.filter((r) => !r.baseline_pass && r.relaxed_pass);
+  const baselineOnly = graded.filter((r) => r.baseline_pass && !r.relaxed_pass);
+
+  // By setup type
+  const setupTypes = ["MR_SHORT", "SQ_SHORT"];
+  const bySetup: Record<string, { overlap: ReturnType<typeof metrics>; relaxed_only: ReturnType<typeof metrics> }> = {};
+  for (const st of setupTypes) {
+    const stOverlap = overlap.filter((r) => r.setup_type === st);
+    const stRelaxedOnly = relaxedOnly.filter((r) => r.setup_type === st);
+    if (stOverlap.length === 0 && stRelaxedOnly.length === 0) continue;
+    bySetup[st] = {
+      overlap: metrics(stOverlap),
+      relaxed_only: metrics(stRelaxedOnly),
+    };
+  }
+
+  // By regime
+  const regimeTypes = ["bear", "sideways", "bull"];
+  const byRegime: Record<string, { overlap: ReturnType<typeof metrics>; relaxed_only: ReturnType<typeof metrics> }> = {};
+  for (const rt of regimeTypes) {
+    const rtOverlap = overlap.filter((r) => r.regime === rt);
+    const rtRelaxedOnly = relaxedOnly.filter((r) => r.regime === rt);
+    if (rtOverlap.length === 0 && rtRelaxedOnly.length === 0) continue;
+    byRegime[rt] = {
+      overlap: metrics(rtOverlap),
+      relaxed_only: metrics(rtRelaxedOnly),
+    };
+  }
+
+  return {
+    graded_count: graded.length,
+    pending_count: rows.filter((r) => r.grade_status === "PENDING" && (r.baseline_pass || r.relaxed_pass)).length,
+    failed_count: rows.filter((r) => r.grade_status === "FAILED").length,
+
+    // Key comparison: do relaxed-only signals have comparable edge?
+    overlap: metrics(overlap),
+    relaxed_only: metrics(relaxedOnly),
+    baseline_only: metrics(baselineOnly),
+
+    by_setup: bySetup,
+    by_regime: byRegime,
+  };
 }
