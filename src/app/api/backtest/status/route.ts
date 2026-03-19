@@ -57,19 +57,20 @@ export async function GET(request: NextRequest) {
   const hoursParam = request.nextUrl.searchParams.get("hours");
   const hours = hoursParam ? parseInt(hoursParam, 10) : 24;
 
-  let query = supabase
+  // Step 1: Fetch run metadata (without the large results JSONB)
+  let runsQuery = supabase
     .from("backtest_runs")
-    .select("id, run_at, symbols_tested, total_signals, results, summary, run_group_id")
+    .select("id, run_at, symbols_tested, total_signals, summary, run_group_id")
     .order("run_at", { ascending: true });
 
   if (runGroupId) {
-    query = query.eq("run_group_id", runGroupId);
+    runsQuery = runsQuery.eq("run_group_id", runGroupId);
   } else {
     const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-    query = query.gte("run_at", since);
+    runsQuery = runsQuery.gte("run_at", since);
   }
 
-  const { data: runs, error } = await query;
+  const { data: runs, error } = await runsQuery;
 
   if (error) {
     return NextResponse.json({ error: "Failed to fetch backtest runs", detail: error.message }, { status: 500 });
@@ -83,17 +84,56 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  // Combine all signals from all batches
+  // Step 2: Fetch signals from backtest_signals table using run IDs
+  const runIds = runs.map((r) => r.id);
   const allSignals: BacktestSignal[] = [];
-  const allSymbols = new Set<string>();
-  const batchDetails: { id: string; run_at: string; symbols_tested: number; total_signals: number; batch_symbols?: string[] }[] = [];
 
-  for (const run of runs) {
-    const signals = (run.results ?? []) as BacktestSignal[];
-    allSignals.push(...signals);
-    for (const s of signals) {
-      allSymbols.add(s.symbol);
+  // Paginate through signals (Supabase default limit is 1000)
+  for (const runId of runIds) {
+    let offset = 0;
+    const PAGE = 1000;
+    while (true) {
+      const { data: signals, error: sigError } = await supabase
+        .from("backtest_signals")
+        .select("symbol, setup_type, candle_time, entry_price, stop_loss, tp1, tp2, tp3, hit_tp1, hit_tp2, hit_tp3, hit_sl, bars_to_resolution, max_favorable, max_adverse, regime, atr")
+        .eq("backtest_run_id", runId)
+        .range(offset, offset + PAGE - 1);
+
+      if (sigError || !signals || signals.length === 0) break;
+
+      for (const s of signals) {
+        allSignals.push({
+          symbol: s.symbol,
+          setup_type: s.setup_type,
+          candle_time: s.candle_time,
+          entry_price: Number(s.entry_price),
+          stop_loss: Number(s.stop_loss),
+          tp1: Number(s.tp1),
+          tp2: Number(s.tp2),
+          tp3: Number(s.tp3),
+          hit_tp1: s.hit_tp1,
+          hit_tp2: s.hit_tp2,
+          hit_tp3: s.hit_tp3,
+          hit_sl: s.hit_sl,
+          bars_to_resolution: s.bars_to_resolution,
+          max_favorable: Number(s.max_favorable),
+          max_adverse: Number(s.max_adverse),
+          regime: s.regime,
+          atr: Number(s.atr),
+        });
+      }
+
+      if (signals.length < PAGE) break;
+      offset += PAGE;
     }
+  }
+
+  // Build batch details and symbol set
+  const allSymbols = new Set<string>();
+  for (const s of allSignals) allSymbols.add(s.symbol);
+
+  const batchDetails: { id: string; run_at: string; symbols_tested: number; total_signals: number; batch_symbols?: string[] }[] = [];
+  for (const run of runs) {
     batchDetails.push({
       id: run.id,
       run_at: run.run_at,
