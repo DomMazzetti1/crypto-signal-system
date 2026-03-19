@@ -4,6 +4,10 @@ import { getRedis, ALERTS_QUEUE_KEY } from "@/lib/redis";
 import { fetchKlines, Kline } from "@/lib/bybit";
 import { runPipeline, AlertPayload } from "@/lib/pipeline";
 import { computeIndicators, detectSignals } from "@/lib/signals";
+import { runGateBRelaxed, isShadowCooldownActive, setShadowCooldown } from "@/lib/shadow-relaxed";
+import { runGateB } from "@/lib/gate-b";
+import { computeHTFTrend } from "@/lib/ta";
+import { classifyRegime } from "@/lib/regime";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -139,8 +143,105 @@ export async function GET() {
 
       candidatesFound += signals.length;
 
+      // ── Shadow evaluation: compute once per symbol ──────
+      // Get HTF trend and regime for shadow Gate B evaluation.
+      // These are the same values the pipeline will compute
+      // independently — we compute them here to avoid an extra
+      // fetch, and to evaluate shadow BEFORE baseline cooldown
+      // filters (which may skip signals the relaxed path accepts).
+      let shadowTrend4h = "neutral";
+      let shadowRegime = "sideways";
+      const shadowMarkPrice = indicators.close;
+      let shadowAtr1h = 0;
+      const shadowRrTp1 = 1.5;
+      try {
+        const trend4hResult = computeHTFTrend(candles4h);
+        shadowTrend4h = trend4hResult.trend;
+        shadowAtr1h = indicators.atr_1h;
+        const regimeResult = await classifyRegime();
+        shadowRegime = regimeResult.btc_regime;
+      } catch {
+        // If HTF/regime fetch fails, shadow uses defaults (sideways/neutral)
+        // Baseline pipeline handles its own errors independently
+      }
+
       for (const sig of signals) {
-        // 7a. Cooldown check
+        // ── Shadow: evaluate relaxed variant for EVERY signal ─
+        // This runs before baseline cooldown/idempotency checks.
+        // Shadow never affects production behavior.
+        const candleTime = new Date(indicators.candle_start_time).toISOString();
+
+        // Shadow baseline Gate B (same as production, for comparison logging)
+        const shadowBaselineGateB = runGateB({
+          alertType: sig.type,
+          trend4h: shadowTrend4h as "bullish" | "bearish" | "neutral",
+          btcRegime: shadowRegime as "bull" | "bear" | "sideways",
+          atr1h: shadowAtr1h,
+          markPrice: shadowMarkPrice,
+          rrTp1: shadowRrTp1,
+          rsi: indicators.rsi,
+          adx1h: indicators.adx_1h,
+          volume: indicators.volume,
+          sma20Volume: indicators.sma20_volume,
+        });
+
+        // Shadow baseline cooldown check (reads production cooldown keys)
+        const baselineCooldownActive = await redis.get(`cooldown:${symbol}:${sig.type}`) !== null;
+        const baselinePass = shadowBaselineGateB.passed && !baselineCooldownActive;
+        const baselineBlockReason = !shadowBaselineGateB.passed
+          ? shadowBaselineGateB.reason
+          : baselineCooldownActive
+            ? "Cooldown active (8h)"
+            : null;
+
+        // Shadow relaxed Gate B
+        const shadowRelaxedGateB = runGateBRelaxed({
+          alertType: sig.type,
+          trend4h: shadowTrend4h as "bullish" | "bearish" | "neutral",
+          btcRegime: shadowRegime as "bull" | "bear" | "sideways",
+          atr1h: shadowAtr1h,
+          markPrice: shadowMarkPrice,
+          rrTp1: shadowRrTp1,
+          rsi: indicators.rsi,
+          adx1h: indicators.adx_1h,
+          volume: indicators.volume,
+          sma20Volume: indicators.sma20_volume,
+        });
+
+        // Shadow relaxed cooldown (separate Redis namespace, 4h TTL)
+        const relaxedCooldownActive = await isShadowCooldownActive(symbol, sig.type);
+        const relaxedPass = shadowRelaxedGateB.passed && !relaxedCooldownActive;
+        const relaxedBlockReason = !shadowRelaxedGateB.passed
+          ? shadowRelaxedGateB.reason
+          : relaxedCooldownActive
+            ? "Shadow cooldown active (4h)"
+            : null;
+
+        // Set shadow cooldown if relaxed passes (does NOT affect production)
+        if (relaxedPass) {
+          await setShadowCooldown(symbol, sig.type);
+        }
+
+        // Store shadow comparison row
+        await supabase.from("shadow_signals").upsert({
+          symbol,
+          setup_type: sig.type,
+          candle_time: candleTime,
+          regime: shadowRegime,
+          trend_4h: shadowTrend4h,
+          rsi: indicators.rsi,
+          adx_1h: indicators.adx_1h,
+          volume: indicators.volume,
+          sma20_volume: indicators.sma20_volume,
+          close_price: indicators.close,
+          baseline_pass: baselinePass,
+          baseline_block_reason: baselineBlockReason,
+          relaxed_pass: relaxedPass,
+          relaxed_block_reason: relaxedBlockReason,
+          shadow_only: relaxedPass && !baselinePass,
+        }, { onConflict: "symbol,setup_type,candle_time" });
+
+        // 7a. Cooldown check (PRODUCTION — unchanged)
         const cooldownKey = `cooldown:${symbol}:${sig.type}`;
         const cooldownExists = await redis.get(cooldownKey);
         if (cooldownExists) {
@@ -148,8 +249,7 @@ export async function GET() {
           continue;
         }
 
-        // 7b. Idempotency check
-        const candleTime = new Date(indicators.candle_start_time).toISOString();
+        // 7b. Idempotency check (PRODUCTION — unchanged)
         const { data: existing } = await supabase
           .from("candle_signals")
           .select("id")
@@ -164,7 +264,7 @@ export async function GET() {
           continue;
         }
 
-        // Build alert payload
+        // Build alert payload (PRODUCTION — unchanged)
         const alertPayload: AlertPayload = {
           type: sig.type,
           symbol,
@@ -188,7 +288,7 @@ export async function GET() {
         // Push to Redis queue
         await redis.lpush(ALERTS_QUEUE_KEY, JSON.stringify(alertPayload));
 
-        // Run pipeline inline
+        // Run pipeline inline (PRODUCTION — unchanged)
         const alertId = rawRow?.id ?? null;
         try {
           const result = await runPipeline(alertPayload, alertId);
@@ -203,6 +303,12 @@ export async function GET() {
             candidatesQueued++;
             console.log(`[scanner] Queued: ${symbol} ${sig.type} close=${indicators.close}`);
           }
+          // Update shadow row with baseline final decision (includes Claude override)
+          await supabase.from("shadow_signals")
+            .update({ baseline_decision: result.decision })
+            .eq("symbol", symbol)
+            .eq("setup_type", sig.type)
+            .eq("candle_time", candleTime);
         } catch (err) {
           console.error(`[scanner] Pipeline error for ${symbol} ${sig.type}:`, err);
         }
