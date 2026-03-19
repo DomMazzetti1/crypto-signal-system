@@ -21,6 +21,8 @@ interface BacktestSignal {
   max_adverse: number;
   regime: string;
   atr: number;
+  reviewer_shadow?: string;
+  reviewer_shadow_action?: string;
 }
 
 interface SetupStats {
@@ -95,7 +97,7 @@ export async function GET(request: NextRequest) {
     while (true) {
       const { data: signals, error: sigError } = await supabase
         .from("backtest_signals")
-        .select("symbol, setup_type, candle_time, entry_price, stop_loss, tp1, tp2, tp3, hit_tp1, hit_tp2, hit_tp3, hit_sl, bars_to_resolution, max_favorable, max_adverse, regime, atr")
+        .select("symbol, setup_type, candle_time, entry_price, stop_loss, tp1, tp2, tp3, hit_tp1, hit_tp2, hit_tp3, hit_sl, bars_to_resolution, max_favorable, max_adverse, regime, atr, reviewer_shadow, reviewer_shadow_action")
         .eq("backtest_run_id", runId)
         .range(offset, offset + PAGE - 1);
 
@@ -120,6 +122,8 @@ export async function GET(request: NextRequest) {
           max_adverse: Number(s.max_adverse),
           regime: s.regime,
           atr: Number(s.atr),
+          reviewer_shadow: s.reviewer_shadow ?? undefined,
+          reviewer_shadow_action: s.reviewer_shadow_action ?? undefined,
         });
       }
 
@@ -196,6 +200,35 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // Reviewer shadow aggregation (deterministic approximation, NOT Claude parity)
+  const shadowTiers = ["HIGH_CONFIDENCE", "MEDIUM_CONFIDENCE", "LOW_CONFIDENCE"] as const;
+  const shadowActions = ["SEND", "REVIEW", "SKIP"] as const;
+  const signalsWithShadow = allSignals.filter((s) => s.reviewer_shadow);
+
+  const by_reviewer_shadow: Record<string, SetupStats> = {};
+  for (const tier of shadowTiers) {
+    const subset = signalsWithShadow.filter((s) => s.reviewer_shadow === tier);
+    if (subset.length === 0) continue;
+    const subRs = subset.map(computeR);
+    by_reviewer_shadow[tier] = {
+      count: subset.length,
+      win_rate: subset.filter((s) => s.hit_tp1).length / subset.length,
+      avg_r: subRs.reduce((a, b) => a + b, 0) / subset.length,
+    };
+  }
+
+  const by_reviewer_action: Record<string, SetupStats> = {};
+  for (const act of shadowActions) {
+    const subset = signalsWithShadow.filter((s) => s.reviewer_shadow_action === act);
+    if (subset.length === 0) continue;
+    const subRs = subset.map(computeR);
+    by_reviewer_action[act] = {
+      count: subset.length,
+      win_rate: subset.filter((s) => s.hit_tp1).length / subset.length,
+      avg_r: subRs.reduce((a, b) => a + b, 0) / subset.length,
+    };
+  }
+
   // Backtest period
   const candleTimes = allSignals.map((s) => new Date(s.candle_time).getTime());
   const earliestMs = candleTimes.length > 0 ? Math.min(...candleTimes) : 0;
@@ -236,5 +269,22 @@ export async function GET(request: NextRequest) {
         { count: v.count, win_rate: round(v.win_rate, 4), avg_r: round(v.avg_r, 2) },
       ])
     ),
+    // Deterministic reviewer shadow (NOT Claude parity — rule-based approximation)
+    reviewer_shadow: signalsWithShadow.length > 0 ? {
+      note: "Deterministic approximation only. Not Claude parity.",
+      signals_classified: signalsWithShadow.length,
+      by_confidence: Object.fromEntries(
+        Object.entries(by_reviewer_shadow).map(([k, v]) => [
+          k,
+          { count: v.count, win_rate: round(v.win_rate, 4), avg_r: round(v.avg_r, 2) },
+        ])
+      ),
+      by_action: Object.fromEntries(
+        Object.entries(by_reviewer_action).map(([k, v]) => [
+          k,
+          { count: v.count, win_rate: round(v.win_rate, 4), avg_r: round(v.avg_r, 2) },
+        ])
+      ),
+    } : undefined,
   });
 }

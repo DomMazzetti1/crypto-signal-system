@@ -26,6 +26,9 @@ const BTC_1D_WINDOW = 220;  // regime.ts:21 — fetchKlines("BTCUSDT", "D", 220)
 
 // ── Types ───────────────────────────────────────────────
 
+type ReviewerShadow = "HIGH_CONFIDENCE" | "MEDIUM_CONFIDENCE" | "LOW_CONFIDENCE";
+type ReviewerShadowAction = "SEND" | "REVIEW" | "SKIP";
+
 interface BacktestSignal {
   symbol: string;
   setup_type: string;
@@ -44,6 +47,97 @@ interface BacktestSignal {
   max_adverse: number;
   regime: string;
   atr: number;
+  reviewer_shadow: ReviewerShadow;
+  reviewer_shadow_action: ReviewerShadowAction;
+}
+
+// ── Deterministic reviewer shadow classification ────────
+// NOT Claude parity. This is a rule-based approximation of
+// what a reviewer would likely decide, using only fields
+// available at signal time. Used for analytics segmentation.
+//
+// Scoring system: accumulate points from 0-10, then map to tiers.
+// Each rule is derived from the reviewer's system prompt guidance
+// and the STRATEGY_PROFILE regime rules.
+
+interface ShadowInput {
+  setup_type: string;       // MR_LONG, MR_SHORT, SQ_SHORT
+  regime: string;           // bull, bear, sideways
+  trend4h: string;          // bullish, bearish, neutral
+  rsi: number;
+  adx_1h: number;
+  volume: number;
+  sma20_volume: number;
+  z_score: number;
+  bb_width_ratio: number;
+}
+
+function classifyReviewerShadow(input: ShadowInput): {
+  shadow: ReviewerShadow;
+  action: ReviewerShadowAction;
+  score: number;
+} {
+  let score = 5; // Start neutral
+
+  const st = input.setup_type.toUpperCase();
+  const volumeRatio = input.sma20_volume > 0 ? input.volume / input.sma20_volume : 1;
+
+  // 1. Setup tier alignment (matches STRATEGY_PROFILE)
+  //    Primary setup gets a boost, secondary is neutral, disabled is penalized
+  if (st === "SQ_SHORT") score += 1;        // primary setup
+  else if (st === "MR_SHORT") score += 0;    // secondary
+  else if (st === "MR_LONG") score -= 2;     // disabled in most regimes
+
+  // 2. Regime alignment (matches gate-b.ts regime rules)
+  //    Favored combos get a boost, disfavored get penalized
+  if (st === "SQ_SHORT" && input.regime === "bear") score += 2;
+  if (st === "SQ_SHORT" && input.regime === "sideways") score += 1;
+  if (st === "SQ_SHORT" && input.regime === "bull") score -= 2;   // restricted in bull
+  if (st === "MR_SHORT" && input.regime === "sideways") score += 1;
+  if (st === "MR_LONG" && input.regime === "bear") score -= 1;    // extreme restriction
+
+  // 3. Trend alignment (reviewer checks if indicators align with direction)
+  //    SHORT signals in bearish trend = aligned
+  //    SHORT signals in bullish trend = misaligned (Gate B blocks this, but edge cases)
+  if (st.includes("SHORT") && input.trend4h === "bearish") score += 1;
+  if (st.includes("SHORT") && input.trend4h === "neutral") score += 0;
+  if (st.includes("LONG") && input.trend4h === "bullish") score += 1;
+
+  // 4. Volume confirmation strength
+  //    Higher volume ratio = more conviction
+  if (volumeRatio >= 3.0) score += 1;
+  else if (volumeRatio < 1.5) score -= 1;
+
+  // 5. RSI extremity (more extreme = stronger mean reversion signal)
+  if (st.includes("MR_SHORT") && input.rsi > 75) score += 1;
+  if (st.includes("MR_LONG") && input.rsi < 25) score += 1;
+  if (st === "SQ_SHORT" && input.rsi < 45) score += 1;  // squeeze shorts favor low RSI
+
+  // 6. ADX assessment (reviewer considers trend strength)
+  //    Low ADX for MR setups = good (ranging market favors mean reversion)
+  //    Very low ADX for SQ_SHORT = good (squeeze needs low volatility)
+  if (st.includes("MR") && input.adx_1h < 15) score += 1;
+  if (st === "SQ_SHORT" && input.adx_1h < 20) score += 1;
+
+  // Clamp to 0-10
+  score = Math.max(0, Math.min(10, score));
+
+  // Map score to tiers
+  let shadow: ReviewerShadow;
+  let action: ReviewerShadowAction;
+
+  if (score >= 7) {
+    shadow = "HIGH_CONFIDENCE";
+    action = "SEND";
+  } else if (score >= 4) {
+    shadow = "MEDIUM_CONFIDENCE";
+    action = "REVIEW";
+  } else {
+    shadow = "LOW_CONFIDENCE";
+    action = "SKIP";
+  }
+
+  return { shadow, action, score };
 }
 
 // ── Concurrency limiter ─────────────────────────────────
@@ -546,6 +640,19 @@ export async function GET(request: NextRequest) {
 
         const grade = gradeSignal(rawEntry, atrVal, isLong, futureBars);
 
+        // Deterministic reviewer shadow classification (analytics only)
+        const shadowResult = classifyReviewerShadow({
+          setup_type: sig.type,
+          regime,
+          trend4h: trend4h.trend,
+          rsi: indicators.rsi,
+          adx_1h: indicators.adx_1h,
+          volume: indicators.volume,
+          sma20_volume: indicators.sma20_volume,
+          z_score: indicators.z_score,
+          bb_width_ratio: indicators.bb_width_ratio,
+        });
+
         allSignals.push({
           symbol,
           setup_type: sig.type,
@@ -564,6 +671,8 @@ export async function GET(request: NextRequest) {
           max_adverse: grade.max_adverse,
           regime,
           atr: atrVal,
+          reviewer_shadow: shadowResult.shadow,
+          reviewer_shadow_action: shadowResult.action,
         });
       }
     }
@@ -643,6 +752,8 @@ export async function GET(request: NextRequest) {
         max_adverse: s.max_adverse,
         regime: s.regime,
         atr: s.atr,
+        reviewer_shadow: s.reviewer_shadow,
+        reviewer_shadow_action: s.reviewer_shadow_action,
       }));
       await supabase.from("backtest_signals").insert(batch);
     }
