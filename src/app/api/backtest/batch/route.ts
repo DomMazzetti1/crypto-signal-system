@@ -17,6 +17,7 @@ const ATR_MULT = 1.5;
 // Friction model (Bybit perps)
 const TAKER_FEE = 0.00055;
 const SLIPPAGE = 0.0005;
+const COOLDOWN_MS = 8 * 60 * 60 * 1000; // 8 hours in milliseconds (mirrors live Redis TTL)
 
 // ── Types ───────────────────────────────────────────────
 
@@ -421,6 +422,8 @@ export async function GET(request: NextRequest) {
   const allSignals: BacktestSignal[] = [];
   const symbolErrors: { symbol: string; error: string }[] = [];
   let filteredByGateB = 0;
+  let filteredByCooldown = 0;
+  let signalsBeforeCooldown = 0;
 
   // Fetch BTC data for regime classification (paginated for 1 year)
   let btc4h: Kline[], btc1d: Kline[];
@@ -456,6 +459,10 @@ export async function GET(request: NextRequest) {
       console.log(`[backtest/batch] symbol ${symbolsDone}/${symbolsToProcess.length} ${symbol} skipped (insufficient data)`);
       return;
     }
+
+    // Cooldown state: maps "SYMBOL:SETUP_TYPE" → timestamp when cooldown expires
+    // Mirrors live Redis key "cooldown:{symbol}:{alertType}" with 8h TTL
+    const cooldownUntil = new Map<string, number>();
 
     for (let i = WARMUP_BARS; i < candles1h.length - FORWARD_BARS; i++) {
       const slice1h = candles1h.slice(0, i + 1);
@@ -505,6 +512,22 @@ export async function GET(request: NextRequest) {
           filteredByGateB++;
           continue;
         }
+
+        // Cooldown check: mirrors live pipeline.ts:295-303
+        // Live uses Redis key "cooldown:{symbol}:{alertType}" with 8h TTL
+        // Here we track expiry timestamp per (symbol, setup_type)
+        const cooldownKey = `${symbol}:${sig.type}`;
+        const expiresAt = cooldownUntil.get(cooldownKey);
+        signalsBeforeCooldown++;
+        if (expiresAt !== undefined && currentBarTime < expiresAt) {
+          filteredByCooldown++;
+          continue;
+        }
+
+        // Signal accepted — set cooldown (mirrors live pipeline.ts:397-398)
+        // Live sets cooldown only when final decision is LONG or SHORT
+        // In backtest, passing Gate B = trade decision (no Claude override)
+        cooldownUntil.set(cooldownKey, currentBarTime + COOLDOWN_MS);
 
         const grade = gradeSignal(rawEntry, atrVal, isLong, futureBars);
 
@@ -562,6 +585,9 @@ export async function GET(request: NextRequest) {
     profit_factor: round(profitFactor, 2),
     avg_r: round(avgR, 2),
     filtered_by_gate_b: filteredByGateB,
+    filtered_by_cooldown: filteredByCooldown,
+    total_signals_before_cooldown: signalsBeforeCooldown,
+    total_signals_after_cooldown: total,
     symbol_errors: symbolErrors,
     runtime_ms: Date.now() - startTime,
   };
