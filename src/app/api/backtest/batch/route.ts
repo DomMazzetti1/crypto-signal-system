@@ -390,8 +390,33 @@ export async function GET(request: NextRequest) {
   }
 
   const runGroupId = request.nextUrl.searchParams.get("run_group_id") ?? null;
+  const maxPerCallParam = request.nextUrl.searchParams.get("max_per_call");
+  const maxPerCall = maxPerCallParam ? parseInt(maxPerCallParam, 10) : 2;
 
-  console.log(`[backtest/batch] Starting batch for ${symbols.length} symbols: ${symbols.join(", ")} (group: ${runGroupId ?? "none"})`);
+  // Check which symbols have cache (quick count query per symbol)
+  const cacheStatus: Record<string, boolean> = {};
+  for (const sym of symbols) {
+    const { count } = await supabase
+      .from("candle_cache")
+      .select("id", { count: "exact", head: true })
+      .eq("symbol", sym)
+      .eq("interval", "60");
+    cacheStatus[sym] = (count ?? 0) > 100;
+  }
+
+  const cachedSymbols = symbols.filter((s) => cacheStatus[s]);
+  const coldSymbols = symbols.filter((s) => !cacheStatus[s]);
+
+  // Limit cold symbols to max_per_call to avoid timeouts
+  const coldToProcess = coldSymbols.slice(0, maxPerCall);
+  const coldSkipped = coldSymbols.slice(maxPerCall);
+  const symbolsToProcess = [...cachedSymbols, ...coldToProcess];
+
+  if (coldSkipped.length > 0) {
+    console.log(`[backtest/batch] Limiting cold symbols: processing ${coldToProcess.length}, skipped ${coldSkipped.length} (use ?max_per_call= to adjust)`);
+  }
+
+  console.log(`[backtest/batch] Starting batch: ${symbolsToProcess.length} symbols (${cachedSymbols.length} cached, ${coldToProcess.length} cold) group=${runGroupId ?? "none"}`);
 
   const allSignals: BacktestSignal[] = [];
   const symbolErrors: { symbol: string; error: string }[] = [];
@@ -411,7 +436,7 @@ export async function GET(request: NextRequest) {
 
   // Process each symbol
   let symbolsDone = 0;
-  await runWithConcurrency(symbols, MAX_CONCURRENT, async (symbol) => {
+  await runWithConcurrency(symbolsToProcess, MAX_CONCURRENT, async (symbol) => {
     let candles1h: Kline[], candles4h: Kline[], candles1d: Kline[];
     try {
       [candles1h, candles4h, candles1d] = await Promise.all([
@@ -422,13 +447,13 @@ export async function GET(request: NextRequest) {
     } catch (err) {
       symbolErrors.push({ symbol, error: String(err) });
       symbolsDone++;
-      console.log(`[backtest/batch] symbol ${symbolsDone}/${symbols.length} ${symbol} ERROR`);
+      console.log(`[backtest/batch] symbol ${symbolsDone}/${symbolsToProcess.length} ${symbol} ERROR`);
       return;
     }
 
     if (candles1h.length < WARMUP_BARS + FORWARD_BARS) {
       symbolsDone++;
-      console.log(`[backtest/batch] symbol ${symbolsDone}/${symbols.length} ${symbol} skipped (insufficient data)`);
+      console.log(`[backtest/batch] symbol ${symbolsDone}/${symbolsToProcess.length} ${symbol} skipped (insufficient data)`);
       return;
     }
 
@@ -506,7 +531,7 @@ export async function GET(request: NextRequest) {
     }
 
     symbolsDone++;
-    console.log(`[backtest/batch] symbol ${symbolsDone}/${symbols.length} ${symbol} complete (${allSignals.length} signals so far)`);
+    console.log(`[backtest/batch] symbol ${symbolsDone}/${symbolsToProcess.length} ${symbol} complete (${allSignals.length} signals so far)`);
   });
 
   // Calculate batch statistics
@@ -524,8 +549,9 @@ export async function GET(request: NextRequest) {
   const tradingDays = candleTimes.length > 0 ? Math.round((latestMs - earliestMs) / (1000 * 60 * 60 * 24)) : 0;
 
   const batchSummary = {
-    batch_symbols: symbols,
-    symbols_tested: symbols.length,
+    batch_symbols: symbolsToProcess,
+    symbols_tested: symbolsToProcess.length,
+    symbols_skipped: coldSkipped.length > 0 ? coldSkipped : undefined,
     backtest_period: {
       from: earliestMs > 0 ? new Date(earliestMs).toISOString() : null,
       to: latestMs > 0 ? new Date(latestMs).toISOString() : null,
@@ -544,7 +570,7 @@ export async function GET(request: NextRequest) {
   const { data: runRow } = await supabase
     .from("backtest_runs")
     .insert({
-      symbols_tested: symbols.length,
+      symbols_tested: symbolsToProcess.length,
       total_signals: total,
       results: allSignals,
       summary: batchSummary,
