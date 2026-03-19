@@ -5,7 +5,7 @@ import { SymbolIndicators, detectSignals } from "@/lib/signals";
 import { RSI, BollingerBands, EMA, ATR, ADX, SMA } from "trading-signals";
 import { classifyRegimeFromCandles, BTCRegime } from "@/lib/regime";
 import { runGateB } from "@/lib/gate-b";
-import { computeHTFTrend } from "@/lib/ta";
+import { ema } from "@/lib/ta";
 import { STRATEGY_PROFILE } from "@/lib/reviewer";
 
 export const dynamic = "force-dynamic";
@@ -636,14 +636,52 @@ function precomputeIndicatorFrame(
   return frame;
 }
 
-// ── Find candles up to a given timestamp ────────────────
+// ── Precomputed symbol 4H trend frame ───────────────────
+// Computes 4H trend once per 4H candle, then maps each 1H bar
+// to the trend at that point via the latest 4H candle index.
 
-function candlesUpTo(candles: Kline[], beforeMs: number): Kline[] {
-  const filtered: Kline[] = [];
-  for (const c of candles) {
-    if (c.startTime < beforeMs) filtered.push(c);
+function precompute4hTrendFrame(
+  candles4h: Kline[],
+  candles1h: Kline[]
+): { trend: "bullish" | "bearish" | "neutral" }[] {
+  const n = candles1h.length;
+  const frame: { trend: "bullish" | "bearish" | "neutral" }[] = new Array(n).fill({ trend: "neutral" as const });
+
+  // Compute trend at each 4H candle index (incremental EMA)
+  const closes4h = candles4h.map((c) => c.close);
+  const ema20_4h = ema(closes4h, 20);
+  const ema50_4h = ema(closes4h, 50);
+
+  // Build per-4H-candle trend results
+  const trendAt4h: { trend: "bullish" | "bearish" | "neutral" }[] = [];
+  for (let j = 0; j < candles4h.length; j++) {
+    const close = closes4h[j];
+    const e20 = ema20_4h[j];
+    const e50 = ema50_4h[j];
+    let trend: "bullish" | "bearish" | "neutral" = "neutral";
+    if (e20 !== undefined && e50 !== undefined) {
+      if (close > e50 && e20 >= e50) trend = "bullish";
+      else if (close < e50 && e20 <= e50) trend = "bearish";
+    }
+    trendAt4h.push({ trend });
   }
-  return filtered;
+
+  // Map each 1H bar to the latest 4H candle's trend
+  let lastIdx = -1;
+  for (let i = 0; i < n; i++) {
+    const barTime = candles1h[i].startTime;
+
+    // Advance to the latest 4H candle at or before this 1H bar
+    while (lastIdx + 1 < candles4h.length && candles4h[lastIdx + 1].startTime <= barTime) {
+      lastIdx++;
+    }
+
+    if (lastIdx >= 0) {
+      frame[i] = trendAt4h[lastIdx];
+    }
+  }
+
+  return frame;
 }
 
 // ── Grade a signal against future bars ──────────────────
@@ -841,6 +879,43 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Failed to fetch BTC data", detail: String(err) }, { status: 502 });
   }
 
+  // Precompute BTC regime at each BTC 4H boundary (shared across all symbols)
+  // Regime only changes when a new BTC 4H or 1D candle closes.
+  // We compute it once per unique 4H boundary, store as sorted array of
+  // {timestamp, regime} entries for O(log n) lookup per 1H bar.
+  const btcRegimeEntries: { time: number; regime: BTCRegime }[] = [];
+  {
+    let last4hCount = -1;
+    let last1dCount = -1;
+    let lastRegime: BTCRegime = "sideways";
+
+    // Walk through all BTC 4H candle boundaries
+    for (let j = 0; j < btc4h.length; j++) {
+      const boundaryTime = btc4h[j].startTime;
+
+      // Count 1D candles available at this 4H boundary
+      let btc1dCount = 0;
+      for (let k = btc1d.length - 1; k >= 0; k--) {
+        if (btc1d[k].startTime <= boundaryTime) { btc1dCount = k + 1; break; }
+      }
+
+      const btc4hCount = j + 1;
+      if (btc4hCount !== last4hCount || btc1dCount !== last1dCount) {
+        last4hCount = btc4hCount;
+        last1dCount = btc1dCount;
+
+        if (btc4hCount >= 14 && btc1dCount >= 14) {
+          const btc4hSlice = btc4h.slice(Math.max(0, btc4hCount - BTC_4H_WINDOW), btc4hCount);
+          const btc1dSlice = btc1d.slice(Math.max(0, btc1dCount - BTC_1D_WINDOW), btc1dCount);
+          lastRegime = classifyRegimeFromCandles(btc4hSlice, btc1dSlice).btc_regime;
+        }
+      }
+
+      btcRegimeEntries.push({ time: boundaryTime, regime: lastRegime });
+    }
+  }
+  console.log(`[backtest/batch] BTC regime precomputed: ${btcRegimeEntries.length} entries`);
+
   // Process each symbol
   let symbolsDone = 0;
   await runWithConcurrency(symbolsToProcess, MAX_CONCURRENT, async (symbol) => {
@@ -867,6 +942,9 @@ export async function GET(request: NextRequest) {
     // Precompute all indicators in one O(n) pass
     const indicatorFrame = precomputeIndicatorFrame(candles1h, candles4h, candles1d);
 
+    // Precompute 4H trend frame for this symbol (one pass over 4H candles)
+    const trend4hFrame = precompute4hTrendFrame(candles4h, candles1h);
+
     // Cooldown state: maps "SYMBOL:SETUP_TYPE" → timestamp when cooldown expires
     // Mirrors live Redis key "cooldown:{symbol}:{alertType}" with 8h TTL
     const cooldownUntil = new Map<string, number>();
@@ -881,27 +959,25 @@ export async function GET(request: NextRequest) {
       const signals = detectSignals(symbol, indicators);
       if (signals.length === 0) continue;
 
-      // Fixed-window BTC slicing for regime classification
-      // Mirrors live: classifyRegime() fetches exactly 50 4H + 220 1D candles
-      // 1. Get all BTC candles up to current bar (no future leakage)
-      // 2. Take only the last N candles (fixed window, not growing)
-      const btc4hAll = candlesUpTo(btc4h, currentBarTime + 1);
-      const btc1dAll = candlesUpTo(btc1d, currentBarTime + 1);
-      const btc4hSlice = btc4hAll.slice(-BTC_4H_WINDOW);
-      const btc1dSlice = btc1dAll.slice(-BTC_1D_WINDOW);
-
-      // EMA(200) needs 210+ candles for both currentEma200 and ema200_10ago
-      // With < 210 1D candles, regime falls back to trend-based (regime.ts:63-71)
-      // With < 14 candles on either timeframe, skip regime entirely
+      // BTC regime: O(1) lookup from precomputed frame (binary search)
       let regime: BTCRegime = "sideways";
-      if (btc4hSlice.length >= 14 && btc1dSlice.length >= 14) {
-        const regimeResult = classifyRegimeFromCandles(btc4hSlice, btc1dSlice);
-        regime = regimeResult.btc_regime;
+      {
+        // Find the latest BTC 4H entry at or before currentBarTime
+        let lo = 0, hi = btcRegimeEntries.length - 1, best = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (btcRegimeEntries[mid].time <= currentBarTime) {
+            best = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        if (best >= 0) regime = btcRegimeEntries[best].regime;
       }
 
-      // 4H trend for Gate B (uses symbol's own 4H candles up to this bar)
-      const slice4h = candlesUpTo(candles4h, currentBarTime + 1);
-      const trend4h = computeHTFTrend(slice4h);
+      // 4H trend: O(1) lookup from precomputed frame
+      const trend4h = trend4hFrame[i];
       const futureBars = candles1h.slice(i + 1, i + 1 + FORWARD_BARS);
 
       for (const sig of signals) {
