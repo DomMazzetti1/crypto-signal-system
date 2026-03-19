@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
-import { fetchKlines, Kline } from "@/lib/bybit";
+import { Kline } from "@/lib/bybit";
 import { computeIndicators, detectSignals } from "@/lib/signals";
 import { classifyRegimeFromCandles, BTCRegime } from "@/lib/regime";
 import { runGateB } from "@/lib/gate-b";
@@ -139,17 +139,6 @@ async function fetchKlinesPaginated(
 
   // Return in chronological order
   return Array.from(allCandles.values()).sort((a, b) => a.startTime - b.startTime);
-}
-
-// ── Fetch with retry (small requests) ───────────────────
-
-async function fetchRetry(symbol: string, interval: string, limit: number): Promise<Kline[]> {
-  try {
-    return await fetchKlines(symbol, interval, limit);
-  } catch {
-    await new Promise((r) => setTimeout(r, 500));
-    return fetchKlines(symbol, interval, limit);
-  }
 }
 
 // ── Find 4H/1D candles up to a given 1H timestamp ──────
