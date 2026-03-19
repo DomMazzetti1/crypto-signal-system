@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
+import { STRATEGY_PROFILE } from "@/lib/reviewer";
 
 export const dynamic = "force-dynamic";
+
+const DISABLED_SETUPS: readonly string[] = STRATEGY_PROFILE.disabled_setups;
 
 interface BacktestSignal {
   symbol: string;
@@ -158,11 +161,16 @@ export async function GET(request: NextRequest) {
   const symbolsWithSignals = allSymbols;
   const symbolsMissing = Array.from(allRequestedSymbols).filter((s) => !symbolsWithSignals.has(s)).sort();
 
-  // Calculate combined statistics
-  const total = allSignals.length;
-  const wins = allSignals.filter((s) => s.hit_tp1).length;
-  const losses = allSignals.filter((s) => s.hit_sl && !s.hit_tp1).length;
-  const rValues = allSignals.map(computeR);
+  // Separate enabled (live-equivalent) from disabled (research-only) signals
+  // Policy source: STRATEGY_PROFILE.disabled_setups in src/lib/reviewer.ts
+  const liveSignals = allSignals.filter((s) => !DISABLED_SETUPS.includes(s.setup_type));
+  const disabledSignals = allSignals.filter((s) => DISABLED_SETUPS.includes(s.setup_type));
+
+  // Calculate live-equivalent statistics (enabled setups only)
+  const total = liveSignals.length;
+  const wins = liveSignals.filter((s) => s.hit_tp1).length;
+  const losses = liveSignals.filter((s) => s.hit_sl && !s.hit_tp1).length;
+  const rValues = liveSignals.map(computeR);
   const avgR = total > 0 ? rValues.reduce((a, b) => a + b, 0) / total : 0;
   const grossProfit = rValues.filter((r) => r > 0).reduce((a, b) => a + b, 0);
   const grossLoss = Math.abs(rValues.filter((r) => r < 0).reduce((a, b) => a + b, 0));
@@ -171,11 +179,11 @@ export async function GET(request: NextRequest) {
     ? (wins / total) * (grossProfit / (wins || 1)) - (losses / total) * (grossLoss / (losses || 1))
     : 0;
 
-  // By setup type
-  const setupTypes = ["MR_LONG", "MR_SHORT", "SQ_SHORT"] as const;
+  // By setup type (enabled setups only)
+  const setupTypes = ["MR_SHORT", "SQ_SHORT"] as const;
   const by_setup: Record<string, SetupStats> = {};
   for (const st of setupTypes) {
-    const subset = allSignals.filter((s) => s.setup_type === st);
+    const subset = liveSignals.filter((s) => s.setup_type === st);
     const subRs = subset.map(computeR);
     by_setup[st] = {
       count: subset.length,
@@ -184,23 +192,23 @@ export async function GET(request: NextRequest) {
     };
   }
 
-  // By regime
+  // By regime (live-equivalent only)
   const regimeTypes = ["bull", "bear", "sideways"] as const;
   const by_regime: Record<string, RegimeStats> = {};
   for (const rt of regimeTypes) {
-    const subset = allSignals.filter((s) => s.regime === rt);
+    const subset = liveSignals.filter((s) => s.regime === rt);
     by_regime[rt] = {
       count: subset.length,
       win_rate: subset.length > 0 ? subset.filter((s) => s.hit_tp1).length / subset.length : 0,
     };
   }
 
-  // By setup × regime
+  // By setup × regime (live-equivalent only)
   const by_setup_regime: Record<string, SetupStats> = {};
   for (const st of setupTypes) {
     for (const rt of regimeTypes) {
       const key = `${st}_${rt}`;
-      const subset = allSignals.filter((s) => s.setup_type === st && s.regime === rt);
+      const subset = liveSignals.filter((s) => s.setup_type === st && s.regime === rt);
       if (subset.length === 0) continue;
       const subRs = subset.map(computeR);
       by_setup_regime[key] = {
@@ -214,7 +222,7 @@ export async function GET(request: NextRequest) {
   // Reviewer shadow aggregation (deterministic approximation, NOT Claude parity)
   const shadowTiers = ["HIGH_CONFIDENCE", "MEDIUM_CONFIDENCE", "LOW_CONFIDENCE"] as const;
   const shadowActions = ["SEND", "REVIEW", "SKIP"] as const;
-  const signalsWithShadow = allSignals.filter((s) => s.reviewer_shadow);
+  const signalsWithShadow = liveSignals.filter((s) => s.reviewer_shadow);
 
   const by_reviewer_shadow: Record<string, SetupStats> = {};
   for (const tier of shadowTiers) {
@@ -286,9 +294,10 @@ export async function GET(request: NextRequest) {
 
     // ── Live-equivalent results ─────────────────────────
     // Signals that passed: detection → Gate B → 8h cooldown
-    // This is the closest deterministic approximation of what
-    // the live system would consider before Claude review.
+    // AND are from enabled setups per STRATEGY_PROFILE.
+    // This is what production would actually consider trading.
     live_equivalent: {
+      enabled_setups: [STRATEGY_PROFILE.primary_setup, STRATEGY_PROFILE.secondary_setup],
       total_signals: total,
       win_rate_tp1: total > 0 ? round(wins / total, 4) : 0,
       profit_factor: round(profitFactor, 2),
@@ -322,7 +331,24 @@ export async function GET(request: NextRequest) {
       total_detected: totalDetected || undefined,
       filtered_by_gate_b: totalFilteredByGateB || undefined,
       filtered_by_cooldown: totalFilteredByCooldown || undefined,
-      passed_to_grading: total,
+      passed_to_grading: allSignals.length,
+      disabled_setups: disabledSignals.length > 0 ? {
+        policy_source: "STRATEGY_PROFILE.disabled_setups",
+        disabled_list: Array.from(DISABLED_SETUPS),
+        total_excluded: disabledSignals.length,
+        by_setup: Object.fromEntries(
+          Array.from(new Set(disabledSignals.map((s) => s.setup_type))).map((st) => {
+            const subset = disabledSignals.filter((s) => s.setup_type === st);
+            const subRs = subset.map(computeR);
+            return [st, {
+              count: subset.length,
+              win_rate: round(subset.filter((s) => s.hit_tp1).length / subset.length, 4),
+              avg_r: round(subRs.reduce((a, b) => a + b, 0) / subset.length, 2),
+            }];
+          })
+        ),
+      } : undefined,
+      live_equivalent_count: total,
     },
   });
 }

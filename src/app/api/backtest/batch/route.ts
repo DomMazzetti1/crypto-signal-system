@@ -5,6 +5,7 @@ import { computeIndicators, detectSignals } from "@/lib/signals";
 import { classifyRegimeFromCandles, BTCRegime } from "@/lib/regime";
 import { runGateB } from "@/lib/gate-b";
 import { computeHTFTrend } from "@/lib/ta";
+import { STRATEGY_PROFILE } from "@/lib/reviewer";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -49,6 +50,7 @@ interface BacktestSignal {
   atr: number;
   reviewer_shadow: ReviewerShadow;
   reviewer_shadow_action: ReviewerShadowAction;
+  is_disabled_setup: boolean;
 }
 
 // ── Deterministic reviewer shadow classification ────────
@@ -682,6 +684,7 @@ export async function GET(request: NextRequest) {
           atr: atrVal,
           reviewer_shadow: shadowResult.shadow,
           reviewer_shadow_action: shadowResult.action,
+          is_disabled_setup: STRATEGY_PROFILE.disabled_setups.includes(sig.type as typeof STRATEGY_PROFILE.disabled_setups[number]),
         });
       }
     }
@@ -690,10 +693,15 @@ export async function GET(request: NextRequest) {
     console.log(`[backtest/batch] symbol ${symbolsDone}/${symbolsToProcess.length} ${symbol} complete (${allSignals.length} signals so far)`);
   });
 
-  // Calculate batch statistics
-  const total = allSignals.length;
-  const wins = allSignals.filter((s) => s.hit_tp1).length;
-  const rValues = allSignals.map(computeR);
+  // Separate enabled (live-equivalent) from disabled (research-only) signals
+  // Policy source: STRATEGY_PROFILE.disabled_setups in src/lib/reviewer.ts
+  const liveSignals = allSignals.filter((s) => !s.is_disabled_setup);
+  const disabledSignals = allSignals.filter((s) => s.is_disabled_setup);
+
+  // Calculate live-equivalent statistics (enabled setups only)
+  const total = liveSignals.length;
+  const wins = liveSignals.filter((s) => s.hit_tp1).length;
+  const rValues = liveSignals.map(computeR);
   const avgR = total > 0 ? rValues.reduce((a, b) => a + b, 0) / total : 0;
   const grossProfit = rValues.filter((r) => r > 0).reduce((a, b) => a + b, 0);
   const grossLoss = Math.abs(rValues.filter((r) => r < 0).reduce((a, b) => a + b, 0));
@@ -704,12 +712,18 @@ export async function GET(request: NextRequest) {
   const latestMs = candleTimes.length > 0 ? Math.max(...candleTimes) : 0;
   const tradingDays = candleTimes.length > 0 ? Math.round((latestMs - earliestMs) / (1000 * 60 * 60 * 24)) : 0;
 
-  // Shadow aggregation for batch response
+  // Shadow aggregation (live-equivalent signals only)
   const shadowCounts: Record<string, number> = {};
   const actionCounts: Record<string, number> = {};
-  for (const s of allSignals) {
+  for (const s of liveSignals) {
     shadowCounts[s.reviewer_shadow] = (shadowCounts[s.reviewer_shadow] || 0) + 1;
     actionCounts[s.reviewer_shadow_action] = (actionCounts[s.reviewer_shadow_action] || 0) + 1;
+  }
+
+  // Disabled setup counts for research_context
+  const disabledBySetup: Record<string, number> = {};
+  for (const s of disabledSignals) {
+    disabledBySetup[s.setup_type] = (disabledBySetup[s.setup_type] || 0) + 1;
   }
 
   const batchSummary = {
@@ -724,9 +738,10 @@ export async function GET(request: NextRequest) {
 
     // ── Live-equivalent results ─────────────────────────
     // Signals that passed: detection → Gate B → cooldown
-    // Closest deterministic approximation of what live would
-    // consider before Claude review
+    // AND are from enabled setups per STRATEGY_PROFILE.
+    // This is what production would actually consider trading.
     live_equivalent: {
+      enabled_setups: [STRATEGY_PROFILE.primary_setup, STRATEGY_PROFILE.secondary_setup],
       total_signals: total,
       win_rate_tp1: total > 0 ? round(wins / total, 4) : 0,
       profit_factor: round(profitFactor, 2),
@@ -734,7 +749,7 @@ export async function GET(request: NextRequest) {
     },
 
     // ── Reviewer shadow (NOT Claude parity) ─────────────
-    // Deterministic confidence classification of live-equivalent signals
+    // Deterministic confidence classification of live-equivalent signals only
     reviewer_shadow: {
       note: "Deterministic approximation only. Not Claude parity.",
       by_confidence: shadowCounts,
@@ -742,13 +757,21 @@ export async function GET(request: NextRequest) {
     },
 
     // ── Research context ────────────────────────────────
-    // Full funnel showing how each filter stage reduces signals
+    // Full funnel showing how each filter stage reduces signals.
+    // Disabled setups are graded but excluded from live_equivalent.
     research_context: {
       total_detected: totalDetected,
       filtered_by_gate_b: filteredByGateB,
       passed_gate_b: signalsBeforeCooldown,
       filtered_by_cooldown: filteredByCooldown,
-      passed_to_grading: total,
+      passed_to_grading: allSignals.length,
+      disabled_setups: disabledSignals.length > 0 ? {
+        policy_source: "STRATEGY_PROFILE.disabled_setups",
+        disabled_list: Array.from(STRATEGY_PROFILE.disabled_setups),
+        total_excluded: disabledSignals.length,
+        by_setup: disabledBySetup,
+      } : undefined,
+      live_equivalent_count: total,
     },
 
     symbol_errors: symbolErrors,
