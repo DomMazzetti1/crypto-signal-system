@@ -59,14 +59,14 @@ export async function GET(request: NextRequest) {
 
   let query = supabase
     .from("backtest_runs")
-    .select("id, created_at, symbols_tested, total_signals, results, summary, run_group_id")
-    .order("created_at", { ascending: true });
+    .select("id, run_at, symbols_tested, total_signals, results, summary, run_group_id")
+    .order("run_at", { ascending: true });
 
   if (runGroupId) {
     query = query.eq("run_group_id", runGroupId);
   } else {
     const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-    query = query.gte("created_at", since);
+    query = query.gte("run_at", since);
   }
 
   const { data: runs, error } = await query;
@@ -86,7 +86,7 @@ export async function GET(request: NextRequest) {
   // Combine all signals from all batches
   const allSignals: BacktestSignal[] = [];
   const allSymbols = new Set<string>();
-  const batchDetails: { id: number; created_at: string; symbols_tested: number; total_signals: number; batch_symbols?: string[] }[] = [];
+  const batchDetails: { id: string; run_at: string; symbols_tested: number; total_signals: number; batch_symbols?: string[] }[] = [];
 
   for (const run of runs) {
     const signals = (run.results ?? []) as BacktestSignal[];
@@ -96,7 +96,7 @@ export async function GET(request: NextRequest) {
     }
     batchDetails.push({
       id: run.id,
-      created_at: run.created_at,
+      run_at: run.run_at,
       symbols_tested: run.symbols_tested,
       total_signals: run.total_signals,
       batch_symbols: run.summary?.batch_symbols,
