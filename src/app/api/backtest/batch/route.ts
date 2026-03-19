@@ -70,22 +70,92 @@ const TARGET_CANDLES: Record<string, number> = {
 
 const BYBIT_BATCH = 1000;
 
-// ── Paginated kline fetch ───────────────────────────────
+// ── Candle cache freshness: candles older than this are stable ───
 
-async function fetchKlinesPaginated(
+const CACHE_FRESH_MS = 2 * 24 * 60 * 60 * 1000; // 2 days
+
+// ── Read candles from Supabase cache ────────────────────
+
+async function readCache(
+  symbol: string,
+  interval: string
+): Promise<Kline[]> {
+  const supabase = getSupabase();
+  const rows: Kline[] = [];
+  let offset = 0;
+  const PAGE = 1000;
+
+  // Paginate through all cached rows for this symbol+interval
+  while (true) {
+    const { data, error } = await supabase
+      .from("candle_cache")
+      .select("start_time, open, high, low, close, volume")
+      .eq("symbol", symbol)
+      .eq("interval", interval)
+      .order("start_time", { ascending: true })
+      .range(offset, offset + PAGE - 1);
+
+    if (error || !data) break;
+    for (const r of data) {
+      rows.push({
+        startTime: new Date(r.start_time).getTime(),
+        open: Number(r.open),
+        high: Number(r.high),
+        low: Number(r.low),
+        close: Number(r.close),
+        volume: Number(r.volume),
+      });
+    }
+    if (data.length < PAGE) break;
+    offset += PAGE;
+  }
+
+  return rows;
+}
+
+// ── Write candles to Supabase cache ─────────────────────
+
+async function writeCache(
   symbol: string,
   interval: string,
-  target?: number
-): Promise<Kline[]> {
-  const totalNeeded = target ?? TARGET_CANDLES[interval] ?? 1000;
-  const allCandles: Map<number, Kline> = new Map();
-  let endParam: number | undefined = undefined;
+  candles: Kline[]
+): Promise<void> {
+  if (candles.length === 0) return;
+  const supabase = getSupabase();
 
-  while (allCandles.size < totalNeeded) {
-    const batchSize = Math.min(BYBIT_BATCH, totalNeeded - allCandles.size);
+  for (let i = 0; i < candles.length; i += 500) {
+    const batch = candles.slice(i, i + 500).map((c) => ({
+      symbol,
+      interval,
+      start_time: new Date(c.startTime).toISOString(),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: c.volume,
+    }));
+    await supabase
+      .from("candle_cache")
+      .upsert(batch, { onConflict: "symbol,interval,start_time", ignoreDuplicates: true });
+  }
+}
+
+// ── Fetch from Bybit API (raw paginated, no cache) ─────
+
+async function fetchFromBybit(
+  symbol: string,
+  interval: string,
+  target: number,
+  endParam?: number
+): Promise<Kline[]> {
+  const allCandles: Map<number, Kline> = new Map();
+  let end = endParam;
+
+  while (allCandles.size < target) {
+    const batchSize = Math.min(BYBIT_BATCH, target - allCandles.size);
     let url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${batchSize}`;
-    if (endParam !== undefined) {
-      url += `&end=${endParam}`;
+    if (end !== undefined) {
+      url += `&end=${end}`;
     }
 
     let data: { retCode: number; retMsg: string; result: { list: string[][] } };
@@ -120,11 +190,63 @@ async function fetchKlinesPaginated(
     }
 
     const earliestTime = Number(batch[batch.length - 1][0]);
-    if (endParam !== undefined && earliestTime >= endParam) break;
-    endParam = earliestTime - 1;
+    if (end !== undefined && earliestTime >= end) break;
+    end = earliestTime - 1;
   }
 
   return Array.from(allCandles.values()).sort((a, b) => a.startTime - b.startTime);
+}
+
+// ── Paginated kline fetch with cache ────────────────────
+
+async function fetchKlinesPaginated(
+  symbol: string,
+  interval: string,
+  target?: number
+): Promise<Kline[]> {
+  const totalNeeded = target ?? TARGET_CANDLES[interval] ?? 1000;
+  const now = Date.now();
+  const freshBoundary = now - CACHE_FRESH_MS;
+
+  // 1. Read existing cache
+  const cached = await readCache(symbol, interval);
+
+  // 2. Split cached candles: stable (old enough) vs stale (recent, need refresh)
+  const stableCandles = cached.filter((c) => c.startTime < freshBoundary);
+  const staleCount = cached.length - stableCandles.length;
+
+  // 3. Determine what to fetch from Bybit
+  let freshCandles: Kline[] = [];
+
+  if (stableCandles.length >= totalNeeded) {
+    // Cache fully covers — only refresh recent candles
+    freshCandles = await fetchFromBybit(symbol, interval, Math.max(staleCount + 50, 100));
+    // Write refreshed candles to cache
+    await writeCache(symbol, interval, freshCandles);
+    console.log(`[cache] ${symbol}/${interval}: ${stableCandles.length} cached, refreshed ${freshCandles.length} recent candles`);
+  } else if (stableCandles.length > 0) {
+    // Partial cache — fetch only the gap (older candles we're missing)
+    const oldestCached = stableCandles[0].startTime;
+    const missingCount = totalNeeded - stableCandles.length;
+    // Fetch older candles ending before our earliest cached candle
+    const olderCandles = await fetchFromBybit(symbol, interval, missingCount, oldestCached - 1);
+    // Also refresh recent candles
+    const recentCandles = await fetchFromBybit(symbol, interval, Math.max(staleCount + 50, 100));
+    freshCandles = [...olderCandles, ...recentCandles];
+    await writeCache(symbol, interval, freshCandles);
+    console.log(`[cache] ${symbol}/${interval}: ${stableCandles.length} cached, fetched ${olderCandles.length} older + ${recentCandles.length} recent`);
+  } else {
+    // Empty cache — full fetch from Bybit
+    freshCandles = await fetchFromBybit(symbol, interval, totalNeeded);
+    await writeCache(symbol, interval, freshCandles);
+    console.log(`[cache] ${symbol}/${interval}: cold start, fetched ${freshCandles.length} candles`);
+  }
+
+  // 4. Merge cached + fresh, deduplicate by startTime, sort chronologically
+  const merged = new Map<number, Kline>();
+  for (const c of stableCandles) merged.set(c.startTime, c);
+  for (const c of freshCandles) merged.set(c.startTime, c); // fresh overwrites stale
+  return Array.from(merged.values()).sort((a, b) => a.startTime - b.startTime);
 }
 
 // ── Find candles up to a given timestamp ────────────────
