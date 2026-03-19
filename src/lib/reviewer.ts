@@ -80,20 +80,22 @@ export const STRATEGY_PROFILE = {
   secondary_setup: "MR_SHORT",
   disabled_setups: ["MR_LONG", "SQ_LONG"],
 
-  // Regime rules (must match gate-b.ts enforcement)
+  // Regime rules for ENABLED setups only (must match gate-b.ts enforcement)
+  // Disabled setups (MR_LONG, SQ_LONG) are excluded by strategy policy
+  // before reaching the reviewer — do not describe their Gate B rules here.
   regime_rules: {
     bear: {
       favored: "SQ_SHORT",
-      blocked: "MR_SHORT",
-      restricted: "MR_LONG requires RSI < 25",
+      blocked: "MR_SHORT is blocked by Gate B (0% historical win rate)",
+      enabled_note: "Only SQ_SHORT signals reach the reviewer in bear regime",
     },
     bull: {
-      favored: "MR_LONG",
-      restricted: "SQ_SHORT requires RSI > 75 and ADX < 15",
+      favored: "MR_SHORT (mean reversion into overbought conditions)",
+      restricted: "SQ_SHORT requires RSI > 75 and ADX < 15 to pass Gate B",
     },
     sideways: {
-      favored: "MR_SHORT, SQ_SHORT",
-      restricted: "SQ_SHORT requires volume > 2x SMA20",
+      favored: "MR_SHORT and SQ_SHORT",
+      restricted: "SQ_SHORT requires volume > 2x SMA20 to pass Gate B",
     },
   },
 } as const;
@@ -109,19 +111,19 @@ Use only supplied fields.
 Keep reasoning to 2 sentences maximum.
 Do not invent facts.
 
-Active setup types (ranked by validated backtest performance):
+Setup types you will see (only enabled setups reach you):
 - ${STRATEGY_PROFILE.primary_setup}: Primary setup. Strongest across all regimes.
-- ${STRATEGY_PROFILE.secondary_setup}: Secondary setup. Conditional on regime.
-- ${STRATEGY_PROFILE.disabled_setups.join(", ")}: Disabled — blocked by Gate B.
+- ${STRATEGY_PROFILE.secondary_setup}: Secondary setup. Performance varies by regime.
+- ${STRATEGY_PROFILE.disabled_setups.join(", ")}: Disabled by strategy policy. You should not receive these. If you do, return NO_TRADE.
 
 Regime-aware gating is active. BTC regime (bull/bear/sideways)
 is determined by BTC daily close vs EMA(200), EMA slope, and 4H ADX.
-Gate B enforces these rules before signals reach you:
-- BEAR regime: ${STRATEGY_PROFILE.regime_rules.bear.favored} is favored. ${STRATEGY_PROFILE.regime_rules.bear.blocked} is blocked. ${STRATEGY_PROFILE.regime_rules.bear.restricted}.
+Gate B enforces these restrictions on enabled setups before signals reach you:
+- BEAR regime: ${STRATEGY_PROFILE.regime_rules.bear.favored} is favored. ${STRATEGY_PROFILE.regime_rules.bear.blocked}. ${STRATEGY_PROFILE.regime_rules.bear.enabled_note}.
 - BULL regime: ${STRATEGY_PROFILE.regime_rules.bull.favored} is favored. ${STRATEGY_PROFILE.regime_rules.bull.restricted}.
 - SIDEWAYS regime: ${STRATEGY_PROFILE.regime_rules.sideways.favored} are favored. ${STRATEGY_PROFILE.regime_rules.sideways.restricted}.
 
-Since Gate B already enforces regime filters, your role is to assess:
+Your role is to assess signals that already passed detection, Gate B, and cooldown:
 1. Whether the setup is coherent (indicators align with the signal direction).
 2. Whether market microstructure supports the trade (spread, depth, funding, OI flow).
 3. Whether risk levels are sensible relative to current volatility.
