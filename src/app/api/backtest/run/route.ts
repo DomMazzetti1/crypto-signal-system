@@ -9,7 +9,7 @@ import { computeHTFTrend } from "@/lib/ta";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-const MAX_CONCURRENT = 6;
+const MAX_CONCURRENT = 4;
 const WARMUP_BARS = 150;
 const FORWARD_BARS = 48;
 const ATR_MULT = 1.5;
@@ -71,7 +71,77 @@ async function runWithConcurrency<T, R>(
   return results;
 }
 
-// ── Fetch with retry ────────────────────────────────────
+// ── Target candle counts for 1 year of data ────────────
+
+const TARGET_CANDLES: Record<string, number> = {
+  "60": 8760,    // 1H: 365 × 24
+  "240": 2190,   // 4H: 365 × 6
+  "D": 400,      // 1D: just over 1 year
+};
+
+const BYBIT_BATCH = 1000;
+
+// ── Paginated kline fetch (1 year of data) ──────────────
+
+async function fetchKlinesPaginated(
+  symbol: string,
+  interval: string,
+  target?: number
+): Promise<Kline[]> {
+  const totalNeeded = target ?? TARGET_CANDLES[interval] ?? 1000;
+  const allCandles: Map<number, Kline> = new Map();
+  let endParam: number | undefined = undefined;
+
+  while (allCandles.size < totalNeeded) {
+    const batchSize = Math.min(BYBIT_BATCH, totalNeeded - allCandles.size);
+    let url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${batchSize}`;
+    if (endParam !== undefined) {
+      url += `&end=${endParam}`;
+    }
+
+    let data: { retCode: number; retMsg: string; result: { list: string[][] } };
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      data = await res.json();
+    } catch {
+      // Retry once after delay
+      await new Promise((r) => setTimeout(r, 500));
+      const res = await fetch(url, { cache: "no-store" });
+      data = await res.json();
+    }
+
+    if (data.retCode !== 0) {
+      throw new Error(`Kline fetch failed for ${symbol} (${interval}): ${data.retMsg}`);
+    }
+
+    const batch = data.result.list;
+    if (batch.length === 0) break; // No more data available
+
+    for (const k of batch) {
+      const startTime = Number(k[0]);
+      if (!allCandles.has(startTime)) {
+        allCandles.set(startTime, {
+          startTime,
+          open: parseFloat(k[1]),
+          high: parseFloat(k[2]),
+          low: parseFloat(k[3]),
+          close: parseFloat(k[4]),
+          volume: parseFloat(k[5]),
+        });
+      }
+    }
+
+    // Bybit returns newest-first; last element is earliest
+    const earliestTime = Number(batch[batch.length - 1][0]);
+    if (endParam !== undefined && earliestTime >= endParam) break; // No progress
+    endParam = earliestTime; // Use earliest startTime as end for next batch
+  }
+
+  // Return in chronological order
+  return Array.from(allCandles.values()).sort((a, b) => a.startTime - b.startTime);
+}
+
+// ── Fetch with retry (small requests) ───────────────────
 
 async function fetchRetry(symbol: string, interval: string, limit: number): Promise<Kline[]> {
   try {
@@ -227,28 +297,32 @@ export async function GET() {
   const symbolErrors: { symbol: string; error: string }[] = [];
   let filteredByGateB = 0;
 
-  // 2. Fetch BTC data for regime classification
+  // 2. Fetch BTC data for regime classification (paginated for 1 year)
   let btc4h: Kline[], btc1d: Kline[];
   try {
     [btc4h, btc1d] = await Promise.all([
-      fetchRetry("BTCUSDT", "240", 1000),
-      fetchRetry("BTCUSDT", "D", 1000),
+      fetchKlinesPaginated("BTCUSDT", "240"),
+      fetchKlinesPaginated("BTCUSDT", "D"),
     ]);
+    console.log(`[backtest] BTC data loaded: ${btc4h.length} 4H candles, ${btc1d.length} 1D candles`);
   } catch (err) {
     return NextResponse.json({ error: "Failed to fetch BTC data", detail: String(err) }, { status: 502 });
   }
 
   // 3. Process each symbol
+  let symbolsDone = 0;
   await runWithConcurrency(symbols, MAX_CONCURRENT, async (symbol) => {
     let candles1h: Kline[], candles4h: Kline[], candles1d: Kline[];
     try {
       [candles1h, candles4h, candles1d] = await Promise.all([
-        fetchRetry(symbol, "60", 1000),
-        fetchRetry(symbol, "240", 1000),
-        fetchRetry(symbol, "D", 1000),
+        fetchKlinesPaginated(symbol, "60"),
+        fetchKlinesPaginated(symbol, "240"),
+        fetchKlinesPaginated(symbol, "D"),
       ]);
     } catch (err) {
       symbolErrors.push({ symbol, error: String(err) });
+      symbolsDone++;
+      console.log(`[backtest] symbol ${symbolsDone}/${symbols.length} ${symbol} ERROR`);
       return;
     }
 
@@ -335,6 +409,9 @@ export async function GET() {
         });
       }
     }
+
+    symbolsDone++;
+    console.log(`[backtest] symbol ${symbolsDone}/${symbols.length} ${symbol} complete`);
   });
 
   // 4. Calculate aggregate statistics
@@ -390,8 +467,19 @@ export async function GET() {
     }
   }
 
+  // Compute backtest period from signal timestamps
+  const candleTimes = allSignals.map((s) => new Date(s.candle_time).getTime());
+  const earliestMs = candleTimes.length > 0 ? Math.min(...candleTimes) : 0;
+  const latestMs = candleTimes.length > 0 ? Math.max(...candleTimes) : 0;
+  const tradingDays = candleTimes.length > 0 ? Math.round((latestMs - earliestMs) / (1000 * 60 * 60 * 24)) : 0;
+
   const summary = {
     symbols_tested: symbols.length,
+    backtest_period: {
+      from: earliestMs > 0 ? new Date(earliestMs).toISOString() : null,
+      to: latestMs > 0 ? new Date(latestMs).toISOString() : null,
+      trading_days: tradingDays,
+    },
     total_signals: total,
     win_rate_tp1: total > 0 ? round(wins / total, 4) : 0,
     profit_factor: round(profitFactor, 2),
