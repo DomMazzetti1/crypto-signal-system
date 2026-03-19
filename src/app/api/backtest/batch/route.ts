@@ -489,7 +489,14 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "No valid symbols provided" }, { status: 400 });
   }
 
-  const runGroupId = request.nextUrl.searchParams.get("run_group_id") ?? null;
+  const runGroupId = request.nextUrl.searchParams.get("run_group_id");
+  if (!runGroupId) {
+    return NextResponse.json(
+      { error: "Missing required ?run_group_id= parameter. Every batch must belong to a named experiment group." },
+      { status: 400 }
+    );
+  }
+
   const maxPerCallParam = request.nextUrl.searchParams.get("max_per_call");
   const maxPerCall = maxPerCallParam ? parseInt(maxPerCallParam, 10) : 2;
 
@@ -754,6 +761,7 @@ export async function GET(request: NextRequest) {
         atr: s.atr,
         reviewer_shadow: s.reviewer_shadow,
         reviewer_shadow_action: s.reviewer_shadow_action,
+        run_group_id: runGroupId,
       }));
       await supabase.from("backtest_signals").insert(batch);
     }

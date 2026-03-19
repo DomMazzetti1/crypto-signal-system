@@ -54,34 +54,30 @@ function round(n: number, dp: number): number {
 export async function GET(request: NextRequest) {
   const supabase = getSupabase();
 
-  // Filter by run_group_id (preferred) or fall back to time window
+  // run_group_id is required for integrity — prevents silent mixing of experiments
   const runGroupId = request.nextUrl.searchParams.get("run_group_id");
-  const hoursParam = request.nextUrl.searchParams.get("hours");
-  const hours = hoursParam ? parseInt(hoursParam, 10) : 24;
-
-  // Step 1: Fetch run metadata (without the large results JSONB)
-  let runsQuery = supabase
-    .from("backtest_runs")
-    .select("id, run_at, symbols_tested, total_signals, summary, run_group_id")
-    .order("run_at", { ascending: true });
-
-  if (runGroupId) {
-    runsQuery = runsQuery.eq("run_group_id", runGroupId);
-  } else {
-    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-    runsQuery = runsQuery.gte("run_at", since);
+  if (!runGroupId) {
+    return NextResponse.json(
+      { error: "Missing required ?run_group_id= parameter. Use a specific experiment group to prevent result contamination." },
+      { status: 400 }
+    );
   }
 
-  const { data: runs, error } = await runsQuery;
+  // Step 1: Fetch run metadata (without the large results JSONB)
+  const { data: runs, error } = await supabase
+    .from("backtest_runs")
+    .select("id, run_at, symbols_tested, total_signals, summary, run_group_id")
+    .eq("run_group_id", runGroupId)
+    .order("run_at", { ascending: true });
 
   if (error) {
     return NextResponse.json({ error: "Failed to fetch backtest runs", detail: error.message }, { status: 500 });
   }
 
   if (!runs || runs.length === 0) {
-    const filterDesc = runGroupId ? `run_group_id="${runGroupId}"` : `last ${hours} hours`;
     return NextResponse.json({
-      message: `No backtest runs found for ${filterDesc}`,
+      run_group_id: runGroupId,
+      message: `No backtest runs found for run_group_id="${runGroupId}"`,
       batches_found: 0,
     });
   }
@@ -132,20 +128,35 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // Build batch details and symbol set
+  // Build batch details, symbol coverage, and timing
   const allSymbols = new Set<string>();
   for (const s of allSignals) allSymbols.add(s.symbol);
 
+  // Collect all symbols that were requested across batches
+  const allRequestedSymbols = new Set<string>();
   const batchDetails: { id: string; run_at: string; symbols_tested: number; total_signals: number; batch_symbols?: string[] }[] = [];
   for (const run of runs) {
+    const batchSymbols = run.summary?.batch_symbols as string[] | undefined;
+    if (batchSymbols) {
+      for (const sym of batchSymbols) allRequestedSymbols.add(sym);
+    }
     batchDetails.push({
       id: run.id,
       run_at: run.run_at,
       symbols_tested: run.symbols_tested,
       total_signals: run.total_signals,
-      batch_symbols: run.summary?.batch_symbols,
+      batch_symbols: batchSymbols,
     });
   }
+
+  // Timing metadata
+  const runTimestamps = runs.map((r) => new Date(r.run_at).getTime());
+  const startedAt = new Date(Math.min(...runTimestamps)).toISOString();
+  const latestCompletedAt = new Date(Math.max(...runTimestamps)).toISOString();
+
+  // Coverage: symbols requested but producing no signals
+  const symbolsWithSignals = allSymbols;
+  const symbolsMissing = Array.from(allRequestedSymbols).filter((s) => !symbolsWithSignals.has(s)).sort();
 
   // Calculate combined statistics
   const total = allSignals.length;
@@ -236,11 +247,15 @@ export async function GET(request: NextRequest) {
   const tradingDays = candleTimes.length > 0 ? Math.round((latestMs - earliestMs) / (1000 * 60 * 60 * 24)) : 0;
 
   return NextResponse.json({
-    run_group_id: runGroupId ?? null,
-    combined_from_batches: runs.length,
-    batches: batchDetails,
-    symbols_tested: allSymbols.size,
+    run_group_id: runGroupId,
+    batch_count: runs.length,
+    started_at: startedAt,
+    latest_completed_at: latestCompletedAt,
+    symbols_requested: allRequestedSymbols.size,
+    symbols_with_signals: allSymbols.size,
+    symbols_missing: symbolsMissing.length > 0 ? symbolsMissing : undefined,
     symbols: Array.from(allSymbols).sort(),
+    batches: batchDetails,
     backtest_period: {
       from: earliestMs > 0 ? new Date(earliestMs).toISOString() : null,
       to: latestMs > 0 ? new Date(latestMs).toISOString() : null,
