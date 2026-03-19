@@ -52,25 +52,33 @@ function round(n: number, dp: number): number {
 export async function GET(request: NextRequest) {
   const supabase = getSupabase();
 
-  // Optional: ?hours=24 to limit how far back to look (default: 24h)
+  // Filter by run_group_id (preferred) or fall back to time window
+  const runGroupId = request.nextUrl.searchParams.get("run_group_id");
   const hoursParam = request.nextUrl.searchParams.get("hours");
   const hours = hoursParam ? parseInt(hoursParam, 10) : 24;
-  const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 
-  // Fetch all batch runs from the time window
-  const { data: runs, error } = await supabase
+  let query = supabase
     .from("backtest_runs")
-    .select("id, created_at, symbols_tested, total_signals, results, summary")
-    .gte("created_at", since)
+    .select("id, created_at, symbols_tested, total_signals, results, summary, run_group_id")
     .order("created_at", { ascending: true });
+
+  if (runGroupId) {
+    query = query.eq("run_group_id", runGroupId);
+  } else {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    query = query.gte("created_at", since);
+  }
+
+  const { data: runs, error } = await query;
 
   if (error) {
     return NextResponse.json({ error: "Failed to fetch backtest runs", detail: error.message }, { status: 500 });
   }
 
   if (!runs || runs.length === 0) {
+    const filterDesc = runGroupId ? `run_group_id="${runGroupId}"` : `last ${hours} hours`;
     return NextResponse.json({
-      message: `No backtest runs found in the last ${hours} hours`,
+      message: `No backtest runs found for ${filterDesc}`,
       batches_found: 0,
     });
   }
@@ -155,6 +163,7 @@ export async function GET(request: NextRequest) {
   const tradingDays = candleTimes.length > 0 ? Math.round((latestMs - earliestMs) / (1000 * 60 * 60 * 24)) : 0;
 
   return NextResponse.json({
+    run_group_id: runGroupId ?? null,
     combined_from_batches: runs.length,
     batches: batchDetails,
     symbols_tested: allSymbols.size,

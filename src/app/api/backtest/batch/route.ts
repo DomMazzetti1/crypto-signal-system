@@ -121,7 +121,7 @@ async function fetchKlinesPaginated(
 
     const earliestTime = Number(batch[batch.length - 1][0]);
     if (endParam !== undefined && earliestTime >= endParam) break;
-    endParam = earliestTime;
+    endParam = earliestTime - 1;
   }
 
   return Array.from(allCandles.values()).sort((a, b) => a.startTime - b.startTime);
@@ -267,7 +267,9 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "No valid symbols provided" }, { status: 400 });
   }
 
-  console.log(`[backtest/batch] Starting batch for ${symbols.length} symbols: ${symbols.join(", ")}`);
+  const runGroupId = request.nextUrl.searchParams.get("run_group_id") ?? null;
+
+  console.log(`[backtest/batch] Starting batch for ${symbols.length} symbols: ${symbols.join(", ")} (group: ${runGroupId ?? "none"})`);
 
   const allSignals: BacktestSignal[] = [];
   const symbolErrors: { symbol: string; error: string }[] = [];
@@ -424,6 +426,7 @@ export async function GET(request: NextRequest) {
       total_signals: total,
       results: allSignals,
       summary: batchSummary,
+      run_group_id: runGroupId,
     })
     .select("id")
     .maybeSingle();
@@ -456,6 +459,6 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  console.log(`[backtest/batch] Complete: ${symbols.join(",")} → ${total} signals, run_id=${runId}`);
-  return NextResponse.json({ run_id: runId, ...batchSummary });
+  console.log(`[backtest/batch] Complete: ${symbols.join(",")} → ${total} signals, run_id=${runId}, group=${runGroupId}`);
+  return NextResponse.json({ run_id: runId, run_group_id: runGroupId, ...batchSummary });
 }

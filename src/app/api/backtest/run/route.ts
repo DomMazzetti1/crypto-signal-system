@@ -134,7 +134,7 @@ async function fetchKlinesPaginated(
     // Bybit returns newest-first; last element is earliest
     const earliestTime = Number(batch[batch.length - 1][0]);
     if (endParam !== undefined && earliestTime >= endParam) break; // No progress
-    endParam = earliestTime; // Use earliest startTime as end for next batch
+    endParam = earliestTime - 1; // Exclude boundary candle from next batch
   }
 
   // Return in chronological order
