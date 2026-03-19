@@ -69,6 +69,35 @@ export interface ClaudeReviewOutput {
   };
 }
 
+// ── Strategy profile ─────────────────────────────────────
+// Single source of truth for reviewer context.
+// Update this object when backtest results change.
+// Do NOT embed raw numbers in the prompt string.
+
+export const STRATEGY_PROFILE = {
+  // Setup tier rankings (informed by backtest, not hardcoded stats)
+  primary_setup: "SQ_SHORT",
+  secondary_setup: "MR_SHORT",
+  disabled_setups: ["MR_LONG", "SQ_LONG"],
+
+  // Regime rules (must match gate-b.ts enforcement)
+  regime_rules: {
+    bear: {
+      favored: "SQ_SHORT",
+      blocked: "MR_SHORT",
+      restricted: "MR_LONG requires RSI < 25",
+    },
+    bull: {
+      favored: "MR_LONG",
+      restricted: "SQ_SHORT requires RSI > 75 and ADX < 15",
+    },
+    sideways: {
+      favored: "MR_SHORT, SQ_SHORT",
+      restricted: "SQ_SHORT requires volume > 2x SMA20",
+    },
+  },
+} as const;
+
 const SYSTEM_PROMPT = `You are a crypto signal reviewer.
 You do not create trades.
 You do not invent price levels.
@@ -80,24 +109,23 @@ Use only supplied fields.
 Keep reasoning to 2 sentences maximum.
 Do not invent facts.
 
-Updated backtest results with regime segmentation (41 days, 44 tokens, after fees):
-- SQ_SHORT_sideways: 14 signals, 64.3% WR, 1.84R — strongest
-- SQ_SHORT_bear: 7 signals, 57.1% WR, 1.27R — strong
-- MR_LONG_sideways: 2 signals, 50% WR, 0.74R
-- MR_LONG_bear: 2 signals, 50% WR, 0.73R
-- MR_SHORT_sideways: 12 signals, 33.3% WR, 0.28R — weak
-- MR_SHORT_bear: DISABLED — 0% WR, all losses
-- SQ_LONG: DISABLED — poor performance
+Active setup types (ranked by validated backtest performance):
+- ${STRATEGY_PROFILE.primary_setup}: Primary setup. Strongest across all regimes.
+- ${STRATEGY_PROFILE.secondary_setup}: Secondary setup. Conditional on regime.
+- ${STRATEGY_PROFILE.disabled_setups.join(", ")}: Disabled — blocked by Gate B.
 
 Regime-aware gating is active. BTC regime (bull/bear/sideways)
-is determined by BTC daily close vs EMA(200), EMA slope, and 4H ADX:
-- BEAR regime: SQ_SHORT is favored. MR_SHORT is blocked. MR_LONG requires extreme RSI < 25.
-- BULL regime: MR_LONG is favored. SQ_SHORT requires extreme RSI > 75 and ADX < 15.
-- SIDEWAYS regime: Mean reversion (MR_LONG, MR_SHORT) is preferred. SQ_SHORT needs 2x volume.
+is determined by BTC daily close vs EMA(200), EMA slope, and 4H ADX.
+Gate B enforces these rules before signals reach you:
+- BEAR regime: ${STRATEGY_PROFILE.regime_rules.bear.favored} is favored. ${STRATEGY_PROFILE.regime_rules.bear.blocked} is blocked. ${STRATEGY_PROFILE.regime_rules.bear.restricted}.
+- BULL regime: ${STRATEGY_PROFILE.regime_rules.bull.favored} is favored. ${STRATEGY_PROFILE.regime_rules.bull.restricted}.
+- SIDEWAYS regime: ${STRATEGY_PROFILE.regime_rules.sideways.favored} are favored. ${STRATEGY_PROFILE.regime_rules.sideways.restricted}.
 
-SQ_SHORT is the strongest setup across all regimes.
-If the supplied BTC regime conflicts with the signal direction, increase skepticism.
-Weight confidence scores by both setup-type performance and regime alignment.`;
+Since Gate B already enforces regime filters, your role is to assess:
+1. Whether the setup is coherent (indicators align with the signal direction).
+2. Whether market microstructure supports the trade (spread, depth, funding, OI flow).
+3. Whether risk levels are sensible relative to current volatility.
+If the supplied BTC regime conflicts with the signal direction, increase skepticism.`;
 
 const OUTPUT_SCHEMA = {
   type: "object" as const,
