@@ -527,6 +527,7 @@ export async function GET(request: NextRequest) {
 
   const allSignals: BacktestSignal[] = [];
   const symbolErrors: { symbol: string; error: string }[] = [];
+  let totalDetected = 0;
   let filteredByGateB = 0;
   let filteredByCooldown = 0;
   let signalsBeforeCooldown = 0;
@@ -607,6 +608,7 @@ export async function GET(request: NextRequest) {
       const futureBars = candles1h.slice(i + 1, i + 1 + FORWARD_BARS);
 
       for (const sig of signals) {
+        totalDetected++;
         const isLong = sig.type.includes("LONG");
         const rawEntry = indicators.close;
         const atrVal = indicators.atr_1h;
@@ -702,6 +704,14 @@ export async function GET(request: NextRequest) {
   const latestMs = candleTimes.length > 0 ? Math.max(...candleTimes) : 0;
   const tradingDays = candleTimes.length > 0 ? Math.round((latestMs - earliestMs) / (1000 * 60 * 60 * 24)) : 0;
 
+  // Shadow aggregation for batch response
+  const shadowCounts: Record<string, number> = {};
+  const actionCounts: Record<string, number> = {};
+  for (const s of allSignals) {
+    shadowCounts[s.reviewer_shadow] = (shadowCounts[s.reviewer_shadow] || 0) + 1;
+    actionCounts[s.reviewer_shadow_action] = (actionCounts[s.reviewer_shadow_action] || 0) + 1;
+  }
+
   const batchSummary = {
     batch_symbols: symbolsToProcess,
     symbols_tested: symbolsToProcess.length,
@@ -711,14 +721,36 @@ export async function GET(request: NextRequest) {
       to: latestMs > 0 ? new Date(latestMs).toISOString() : null,
       trading_days: tradingDays,
     },
-    total_signals: total,
-    win_rate_tp1: total > 0 ? round(wins / total, 4) : 0,
-    profit_factor: round(profitFactor, 2),
-    avg_r: round(avgR, 2),
-    filtered_by_gate_b: filteredByGateB,
-    filtered_by_cooldown: filteredByCooldown,
-    total_signals_before_cooldown: signalsBeforeCooldown,
-    total_signals_after_cooldown: total,
+
+    // ── Live-equivalent results ─────────────────────────
+    // Signals that passed: detection → Gate B → cooldown
+    // Closest deterministic approximation of what live would
+    // consider before Claude review
+    live_equivalent: {
+      total_signals: total,
+      win_rate_tp1: total > 0 ? round(wins / total, 4) : 0,
+      profit_factor: round(profitFactor, 2),
+      avg_r: round(avgR, 2),
+    },
+
+    // ── Reviewer shadow (NOT Claude parity) ─────────────
+    // Deterministic confidence classification of live-equivalent signals
+    reviewer_shadow: {
+      note: "Deterministic approximation only. Not Claude parity.",
+      by_confidence: shadowCounts,
+      by_action: actionCounts,
+    },
+
+    // ── Research context ────────────────────────────────
+    // Full funnel showing how each filter stage reduces signals
+    research_context: {
+      total_detected: totalDetected,
+      filtered_by_gate_b: filteredByGateB,
+      passed_gate_b: signalsBeforeCooldown,
+      filtered_by_cooldown: filteredByCooldown,
+      passed_to_grading: total,
+    },
+
     symbol_errors: symbolErrors,
     runtime_ms: Date.now() - startTime,
   };

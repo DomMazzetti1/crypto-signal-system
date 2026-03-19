@@ -246,7 +246,29 @@ export async function GET(request: NextRequest) {
   const latestMs = candleTimes.length > 0 ? Math.max(...candleTimes) : 0;
   const tradingDays = candleTimes.length > 0 ? Math.round((latestMs - earliestMs) / (1000 * 60 * 60 * 24)) : 0;
 
+  // Aggregate research_context from batch summaries
+  let totalDetected = 0;
+  let totalFilteredByGateB = 0;
+  let totalFilteredByCooldown = 0;
+  for (const run of runs) {
+    const rc = run.summary?.research_context;
+    if (rc) {
+      totalDetected += rc.total_detected ?? 0;
+      totalFilteredByGateB += rc.filtered_by_gate_b ?? 0;
+      totalFilteredByCooldown += rc.filtered_by_cooldown ?? 0;
+    }
+  }
+
+  const formatStats = (rec: Record<string, SetupStats>) =>
+    Object.fromEntries(
+      Object.entries(rec).map(([k, v]) => [
+        k,
+        { count: v.count, win_rate: round(v.win_rate, 4), avg_r: round(v.avg_r, 2) },
+      ])
+    );
+
   return NextResponse.json({
+    // ── Experiment metadata ─────────────────────────────
     run_group_id: runGroupId,
     batch_count: runs.length,
     started_at: startedAt,
@@ -261,45 +283,46 @@ export async function GET(request: NextRequest) {
       to: latestMs > 0 ? new Date(latestMs).toISOString() : null,
       trading_days: tradingDays,
     },
-    total_signals: total,
-    win_rate_tp1: total > 0 ? round(wins / total, 4) : 0,
-    profit_factor: round(profitFactor, 2),
-    expectancy: round(expectancy, 4),
-    avg_r: round(avgR, 2),
-    by_setup: Object.fromEntries(
-      Object.entries(by_setup).map(([k, v]) => [
-        k,
-        { count: v.count, win_rate: round(v.win_rate, 4), avg_r: round(v.avg_r, 2) },
-      ])
-    ),
-    by_regime: Object.fromEntries(
-      Object.entries(by_regime).map(([k, v]) => [
-        k,
-        { count: v.count, win_rate: round(v.win_rate, 4) },
-      ])
-    ),
-    by_setup_regime: Object.fromEntries(
-      Object.entries(by_setup_regime).map(([k, v]) => [
-        k,
-        { count: v.count, win_rate: round(v.win_rate, 4), avg_r: round(v.avg_r, 2) },
-      ])
-    ),
-    // Deterministic reviewer shadow (NOT Claude parity — rule-based approximation)
+
+    // ── Live-equivalent results ─────────────────────────
+    // Signals that passed: detection → Gate B → 8h cooldown
+    // This is the closest deterministic approximation of what
+    // the live system would consider before Claude review.
+    live_equivalent: {
+      total_signals: total,
+      win_rate_tp1: total > 0 ? round(wins / total, 4) : 0,
+      profit_factor: round(profitFactor, 2),
+      expectancy: round(expectancy, 4),
+      avg_r: round(avgR, 2),
+      by_setup: formatStats(by_setup),
+      by_regime: Object.fromEntries(
+        Object.entries(by_regime).map(([k, v]) => [
+          k,
+          { count: v.count, win_rate: round(v.win_rate, 4) },
+        ])
+      ),
+      by_setup_regime: formatStats(by_setup_regime),
+    },
+
+    // ── Reviewer shadow (NOT Claude parity) ─────────────
+    // Deterministic confidence classification of live-equivalent
+    // signals. Rule-based approximation only.
     reviewer_shadow: signalsWithShadow.length > 0 ? {
       note: "Deterministic approximation only. Not Claude parity.",
       signals_classified: signalsWithShadow.length,
-      by_confidence: Object.fromEntries(
-        Object.entries(by_reviewer_shadow).map(([k, v]) => [
-          k,
-          { count: v.count, win_rate: round(v.win_rate, 4), avg_r: round(v.avg_r, 2) },
-        ])
-      ),
-      by_action: Object.fromEntries(
-        Object.entries(by_reviewer_action).map(([k, v]) => [
-          k,
-          { count: v.count, win_rate: round(v.win_rate, 4), avg_r: round(v.avg_r, 2) },
-        ])
-      ),
+      by_confidence: formatStats(by_reviewer_shadow),
+      by_action: formatStats(by_reviewer_action),
     } : undefined,
+
+    // ── Research context ────────────────────────────────
+    // Full funnel from raw detection through each filter stage.
+    // These numbers include signals that were rejected and are
+    // NOT part of live_equivalent results.
+    research_context: {
+      total_detected: totalDetected || undefined,
+      filtered_by_gate_b: totalFilteredByGateB || undefined,
+      filtered_by_cooldown: totalFilteredByCooldown || undefined,
+      passed_to_grading: total,
+    },
   });
 }
