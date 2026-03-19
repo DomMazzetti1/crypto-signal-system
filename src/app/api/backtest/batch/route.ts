@@ -18,7 +18,109 @@ const ATR_MULT = 1.5;
 // Friction model (Bybit perps)
 const TAKER_FEE = 0.00055;
 const SLIPPAGE = 0.0005;
-const COOLDOWN_MS = 8 * 60 * 60 * 1000; // 8 hours in milliseconds (mirrors live Redis TTL)
+// ── Variant configuration for frequency expansion experiments ──
+// baseline = exact live parity. relaxed/aggressive = controlled expansion.
+// NEVER applied to production code — backtest experimentation only.
+
+interface VariantConfig {
+  cooldown_hours: number;
+  sideways_sq_volume_mult: number;
+  allow_counter_trend: boolean;
+}
+
+const VARIANT_CONFIGS: Record<string, VariantConfig> = {
+  baseline: {
+    cooldown_hours: 8,
+    sideways_sq_volume_mult: 2.0,
+    allow_counter_trend: false,
+  },
+  relaxed: {
+    cooldown_hours: 4,
+    sideways_sq_volume_mult: 1.5,
+    allow_counter_trend: false,
+  },
+  aggressive: {
+    cooldown_hours: 2,
+    sideways_sq_volume_mult: 1.2,
+    allow_counter_trend: true,
+  },
+};
+
+const VALID_VARIANTS = Object.keys(VARIANT_CONFIGS);
+
+// ── Variant-aware Gate B ─────────────────────────────────
+// Reimplements Gate B checks with configurable knobs.
+// For baseline variant, behavior is identical to production gate-b.ts.
+// For other variants, only the three knobs differ.
+// Does NOT call production runGateB — avoids double-check conflicts.
+
+function runGateBWithVariant(
+  input: Parameters<typeof runGateB>[0],
+  variant: VariantConfig
+): ReturnType<typeof runGateB> {
+  const { alertType, trend4h, btcRegime, atr1h, markPrice, rrTp1, rsi, adx1h, volume, sma20Volume } = input;
+  const lowerType = alertType.toLowerCase();
+
+  // ── Knob 1: Directional trend filter ──────────────────
+  // Production: always blocks counter-trend (gate-b.ts:31-37)
+  // aggressive variant: allows counter-trend
+  if (!variant.allow_counter_trend) {
+    if (lowerType.includes("long") && trend4h === "bearish") {
+      return { passed: false, reason: "LONG signal but 4H trend is bearish" };
+    }
+    if (lowerType.includes("short") && trend4h === "bullish") {
+      return { passed: false, reason: "SHORT signal but 4H trend is bullish" };
+    }
+  }
+
+  // ── ATR too low (unchanged across variants, gate-b.ts:40-45)
+  if (atr1h < 0.001 * markPrice) {
+    return { passed: false, reason: `ATR too low: ${atr1h.toFixed(4)} < ${(0.001 * markPrice).toFixed(4)}` };
+  }
+
+  // ── R:R minimum (unchanged across variants, gate-b.ts:48-54)
+  const rrRounded = Math.round(rrTp1 * 100) / 100;
+  if (rrRounded < 1.5) {
+    return { passed: false, reason: `R:R to TP1 too low: ${rrRounded} < 1.5` };
+  }
+
+  // ── Regime-aware gating (gate-b.ts:58-106) ────────────
+
+  if (btcRegime === "bear") {
+    if (lowerType.includes("mr_short")) {
+      return { passed: false, reason: "MR_SHORT historically fails in bear regime" };
+    }
+    if (lowerType.includes("mr_long") && rsi !== undefined && rsi >= 25) {
+      return { passed: false, reason: `MR_LONG in BEAR regime requires RSI < 25, got ${rsi.toFixed(1)}` };
+    }
+  }
+
+  if (btcRegime === "bull") {
+    if (lowerType.includes("sq_short")) {
+      if (rsi !== undefined && rsi <= 75) {
+        return { passed: false, reason: `SQ_SHORT in BULL regime requires RSI > 75, got ${rsi.toFixed(1)}` };
+      }
+      if (adx1h !== undefined && adx1h >= 15) {
+        return { passed: false, reason: `SQ_SHORT in BULL regime requires ADX < 15, got ${adx1h.toFixed(1)}` };
+      }
+    }
+  }
+
+  // ── Knob 2: Sideways SQ_SHORT volume multiplier ───────
+  // Production: 2.0x (gate-b.ts:99). Variants may use 1.5x or 1.2x.
+  if (btcRegime === "sideways") {
+    if (lowerType.includes("sq_short") && volume !== undefined && sma20Volume !== undefined) {
+      if (volume <= sma20Volume * variant.sideways_sq_volume_mult) {
+        return {
+          passed: false,
+          reason: `SQ_SHORT in SIDEWAYS requires volume > ${variant.sideways_sq_volume_mult}x SMA20 (${Math.round(volume)} <= ${Math.round(sma20Volume * variant.sideways_sq_volume_mult)})`,
+        };
+      }
+    }
+  }
+
+  return { passed: true, reason: null };
+}
 
 // Fixed BTC candle windows for regime classification
 // Must match live classifyRegime() in regime.ts:19-21
@@ -499,6 +601,16 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  const variantParam = request.nextUrl.searchParams.get("variant") ?? "baseline";
+  if (!VALID_VARIANTS.includes(variantParam)) {
+    return NextResponse.json(
+      { error: `Invalid variant "${variantParam}". Valid: ${VALID_VARIANTS.join(", ")}` },
+      { status: 400 }
+    );
+  }
+  const variantConfig = VARIANT_CONFIGS[variantParam];
+  const cooldownMs = variantConfig.cooldown_hours * 60 * 60 * 1000;
+
   const maxPerCallParam = request.nextUrl.searchParams.get("max_per_call");
   const maxPerCall = maxPerCallParam ? parseInt(maxPerCallParam, 10) : 2;
 
@@ -615,7 +727,7 @@ export async function GET(request: NextRequest) {
         const rawEntry = indicators.close;
         const atrVal = indicators.atr_1h;
 
-        const gateB = runGateB({
+        const gateB = runGateBWithVariant({
           alertType: sig.type,
           trend4h: trend4h.trend,
           btcRegime: regime,
@@ -626,7 +738,7 @@ export async function GET(request: NextRequest) {
           adx1h: indicators.adx_1h,
           volume: indicators.volume,
           sma20Volume: indicators.sma20_volume,
-        });
+        }, variantConfig);
 
         if (!gateB.passed) {
           filteredByGateB++;
@@ -647,7 +759,7 @@ export async function GET(request: NextRequest) {
         // Signal accepted — set cooldown (mirrors live pipeline.ts:397-398)
         // Live sets cooldown only when final decision is LONG or SHORT
         // In backtest, passing Gate B = trade decision (no Claude override)
-        cooldownUntil.set(cooldownKey, currentBarTime + COOLDOWN_MS);
+        cooldownUntil.set(cooldownKey, currentBarTime + cooldownMs);
 
         const grade = gradeSignal(rawEntry, atrVal, isLong, futureBars);
 
@@ -727,6 +839,8 @@ export async function GET(request: NextRequest) {
   }
 
   const batchSummary = {
+    variant: variantParam,
+    variant_config: variantConfig,
     batch_symbols: symbolsToProcess,
     symbols_tested: symbolsToProcess.length,
     symbols_skipped: coldSkipped.length > 0 ? coldSkipped : undefined,
@@ -787,6 +901,7 @@ export async function GET(request: NextRequest) {
       results: allSignals,
       summary: batchSummary,
       run_group_id: runGroupId,
+      variant: variantParam,
     })
     .select("id")
     .maybeSingle();

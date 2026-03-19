@@ -69,7 +69,7 @@ export async function GET(request: NextRequest) {
   // Step 1: Fetch run metadata (without the large results JSONB)
   const { data: runs, error } = await supabase
     .from("backtest_runs")
-    .select("id, run_at, symbols_tested, total_signals, summary, run_group_id")
+    .select("id, run_at, symbols_tested, total_signals, summary, run_group_id, variant")
     .eq("run_group_id", runGroupId)
     .order("run_at", { ascending: true });
 
@@ -151,6 +151,11 @@ export async function GET(request: NextRequest) {
       batch_symbols: batchSymbols,
     });
   }
+
+  // Variant detection — all batches in a group should use the same variant
+  const variants = Array.from(new Set(runs.map((r) => r.variant ?? "baseline")));
+  const variant = variants.length === 1 ? variants[0] : "mixed";
+  const variantConfig = runs[0]?.summary?.variant_config ?? null;
 
   // Timing metadata
   const runTimestamps = runs.map((r) => new Date(r.run_at).getTime());
@@ -278,6 +283,9 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     // ── Experiment metadata ─────────────────────────────
     run_group_id: runGroupId,
+    variant,
+    variant_config: variantConfig,
+    variant_warning: variant === "mixed" ? "Batches in this group used different variants — results may be inconsistent" : undefined,
     batch_count: runs.length,
     started_at: startedAt,
     latest_completed_at: latestCompletedAt,
