@@ -19,6 +19,11 @@ const TAKER_FEE = 0.00055;
 const SLIPPAGE = 0.0005;
 const COOLDOWN_MS = 8 * 60 * 60 * 1000; // 8 hours in milliseconds (mirrors live Redis TTL)
 
+// Fixed BTC candle windows for regime classification
+// Must match live classifyRegime() in regime.ts:19-21
+const BTC_4H_WINDOW = 50;   // regime.ts:20 — fetchKlines("BTCUSDT", "240", 50)
+const BTC_1D_WINDOW = 220;  // regime.ts:21 — fetchKlines("BTCUSDT", "D", 220)
+
 // ── Types ───────────────────────────────────────────────
 
 interface BacktestSignal {
@@ -479,8 +484,18 @@ export async function GET(request: NextRequest) {
       const signals = detectSignals(symbol, indicators);
       if (signals.length === 0) continue;
 
-      const btc4hSlice = candlesUpTo(btc4h, currentBarTime + 1);
-      const btc1dSlice = candlesUpTo(btc1d, currentBarTime + 1);
+      // Fixed-window BTC slicing for regime classification
+      // Mirrors live: classifyRegime() fetches exactly 50 4H + 220 1D candles
+      // 1. Get all BTC candles up to current bar (no future leakage)
+      // 2. Take only the last N candles (fixed window, not growing)
+      const btc4hAll = candlesUpTo(btc4h, currentBarTime + 1);
+      const btc1dAll = candlesUpTo(btc1d, currentBarTime + 1);
+      const btc4hSlice = btc4hAll.slice(-BTC_4H_WINDOW);
+      const btc1dSlice = btc1dAll.slice(-BTC_1D_WINDOW);
+
+      // EMA(200) needs 210+ candles for both currentEma200 and ema200_10ago
+      // With < 210 1D candles, regime falls back to trend-based (regime.ts:63-71)
+      // With < 14 candles on either timeframe, skip regime entirely
       let regime: BTCRegime = "sideways";
       if (btc4hSlice.length >= 14 && btc1dSlice.length >= 14) {
         const regimeResult = classifyRegimeFromCandles(btc4hSlice, btc1dSlice);
