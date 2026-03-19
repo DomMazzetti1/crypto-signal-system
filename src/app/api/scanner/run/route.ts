@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const LOCK_KEY = "scanner:lock";
-const LOCK_TTL = 300;
+const LOCK_TTL = 600; // 10 minutes — prevents overlap for hourly cron
 const MAX_CONCURRENT = 8;
 
 // ── Bucket helpers ──────────────────────────────────────
@@ -111,6 +111,8 @@ export async function GET() {
     const hourBucket = currentHourBucket();
     const fourHBucket = current4hBucket();
     const dayBucket = currentDayBucket();
+
+    console.log(`[scanner] Started at ${new Date().toISOString()} | 1H bucket=${new Date(hourBucket).toISOString()} | symbols=${symbols.length}`);
 
     // 3-7. Process symbols with concurrency limit
     await runWithConcurrency(symbols, MAX_CONCURRENT, async (symbol) => {
@@ -330,16 +332,19 @@ export async function GET() {
     });
 
     const summary = {
+      started_at: new Date(startTime).toISOString(),
+      completed_at: new Date().toISOString(),
+      candle_bucket: new Date(hourBucket).toISOString(),
       scanned: symbols.length,
       candidates_found: candidatesFound,
       candidates_queued: candidatesQueued,
       skipped_cooldown: skippedCooldown,
       skipped_idempotency: skippedIdempotency,
-      symbol_errors: symbolErrors,
+      symbol_errors: symbolErrors.length > 0 ? symbolErrors : undefined,
       runtime_ms: runtimeMs,
     };
 
-    console.log("[scanner] Complete:", JSON.stringify(summary));
+    console.log(`[scanner] Complete: ${candidatesQueued} queued, ${candidatesFound} found, ${symbols.length} scanned, ${runtimeMs}ms`);
     return NextResponse.json(summary);
   } finally {
     // 8. Release lock

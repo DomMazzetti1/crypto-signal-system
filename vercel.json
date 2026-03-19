@@ -7,7 +7,7 @@
     },
     {
       "path": "/api/scanner/run",
-      "schedule": "0 1 * * *"
+      "schedule": "2 * * * *"
     },
     {
       "path": "/api/shadow/grade",
