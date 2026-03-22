@@ -181,7 +181,7 @@ export async function GET() {
       try {
         [candles1h, candles4h, candles1d] = await Promise.all([
           fetchKlinesRetry(symbol, "60", 150),
-          fetchKlinesRetry(symbol, "240", 50),
+          fetchKlinesRetry(symbol, "240", 60),
           fetchKlinesRetry(symbol, "D", 60),
         ]);
       } catch (err) {
