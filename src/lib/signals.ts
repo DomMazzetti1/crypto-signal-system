@@ -184,9 +184,37 @@ export function computeIndicators(
   };
 }
 
+// ── Signal params (backtest-tunable) ────────────────────
+
+export interface SignalParams {
+  mr_adx_1h_max: number;
+  mr_adx_4h_max: number;
+}
+
+export const DEFAULT_SIGNAL_PARAMS: SignalParams = {
+  mr_adx_1h_max: 18,
+  mr_adx_4h_max: 22,
+};
+
 // ── Signal conditions ───────────────────────────────────
 
+/**
+ * Production detector — uses hardcoded default thresholds.
+ * Called by the live scanner. Do NOT modify thresholds here.
+ */
 export function detectSignals(symbol: string, ind: SymbolIndicators): Signal[] {
+  return detectSignalsWithParams(symbol, ind, DEFAULT_SIGNAL_PARAMS);
+}
+
+/**
+ * Parameterized detector — for backtest use only.
+ * Allows overriding MR ADX thresholds without touching production.
+ */
+export function detectSignalsWithParams(
+  symbol: string,
+  ind: SymbolIndicators,
+  params: SignalParams
+): Signal[] {
   const signals: Signal[] = [];
 
   // MR_LONG
@@ -196,8 +224,8 @@ export function detectSignals(symbol: string, ind: SymbolIndicators): Signal[] {
     ind.z_score < -2.0 &&
     ind.close_off_low >= 0.25 &&
     ind.volume > ind.sma20_volume * 1.2 &&
-    ind.adx_1h < 18 &&
-    ind.adx_4h < 22 &&
+    ind.adx_1h < params.mr_adx_1h_max &&
+    ind.adx_4h < params.mr_adx_4h_max &&
     (ind.ema50_1d === null || ind.close > ind.ema50_1d - 2.2 * ind.atr_1d)
   ) {
     signals.push({ type: "MR_LONG", symbol, indicators: ind });
@@ -210,8 +238,8 @@ export function detectSignals(symbol: string, ind: SymbolIndicators): Signal[] {
     ind.z_score > 2.0 &&
     ind.close_off_high >= 0.25 &&
     ind.volume > ind.sma20_volume * 1.2 &&
-    ind.adx_1h < 18 &&
-    ind.adx_4h < 22 &&
+    ind.adx_1h < params.mr_adx_1h_max &&
+    ind.adx_4h < params.mr_adx_4h_max &&
     (ind.ema50_1d === null || ind.close < ind.ema50_1d + 2.2 * ind.atr_1d)
   ) {
     signals.push({ type: "MR_SHORT", symbol, indicators: ind });
