@@ -240,3 +240,100 @@ export function detectSignals(symbol: string, ind: SymbolIndicators): Signal[] {
 
   return signals;
 }
+
+// ── Near-miss condition evaluation ────────────────────
+
+export interface ConditionResult {
+  name: string;
+  passed: boolean;
+  actual: number;
+  threshold: number;
+  /** "lt" = actual must be < threshold, "gt" = actual must be > threshold, etc. */
+  op: "lt" | "gt" | "gte" | "lte";
+}
+
+export interface NearMissResult {
+  setup_type: string;
+  conditions: ConditionResult[];
+  passed_count: number;
+  total_count: number;
+  /** The first failing condition (most setups short-circuit, so this is the "blocking" one) */
+  first_fail: string | null;
+}
+
+/**
+ * Evaluates every individual condition for all enabled setups,
+ * without short-circuiting. Returns per-condition pass/fail
+ * with actual vs threshold values.
+ *
+ * Pure function — no side effects, no DB calls.
+ */
+export function evaluateNearMisses(ind: SymbolIndicators): NearMissResult[] {
+  const results: NearMissResult[] = [];
+
+  // ── MR_LONG ──
+  const mrLongConds: ConditionResult[] = [
+    { name: "close_below_bb_lower", passed: ind.close < ind.bb_lower, actual: ind.close, threshold: ind.bb_lower, op: "lt" },
+    { name: "rsi_lt_29", passed: ind.rsi < 29, actual: ind.rsi, threshold: 29, op: "lt" },
+    { name: "z_score_lt_neg2", passed: ind.z_score < -2.0, actual: ind.z_score, threshold: -2.0, op: "lt" },
+    { name: "close_off_low_gte_0.25", passed: ind.close_off_low >= 0.25, actual: ind.close_off_low, threshold: 0.25, op: "gte" },
+    { name: "volume_gt_1.2x_sma", passed: ind.volume > ind.sma20_volume * 1.2, actual: ind.sma20_volume > 0 ? ind.volume / ind.sma20_volume : 0, threshold: 1.2, op: "gt" },
+    { name: "adx_1h_lt_18", passed: ind.adx_1h < 18, actual: ind.adx_1h, threshold: 18, op: "lt" },
+    { name: "adx_4h_lt_22", passed: ind.adx_4h < 22, actual: ind.adx_4h, threshold: 22, op: "lt" },
+    { name: "above_1d_floor", passed: ind.ema50_1d === null || ind.close > ind.ema50_1d - 2.2 * ind.atr_1d, actual: ind.close, threshold: ind.ema50_1d !== null ? ind.ema50_1d - 2.2 * ind.atr_1d : 0, op: "gt" },
+  ];
+  const mrLongPassed = mrLongConds.filter(c => c.passed).length;
+  results.push({
+    setup_type: "MR_LONG",
+    conditions: mrLongConds,
+    passed_count: mrLongPassed,
+    total_count: mrLongConds.length,
+    first_fail: mrLongConds.find(c => !c.passed)?.name ?? null,
+  });
+
+  // ── MR_SHORT ──
+  const mrShortConds: ConditionResult[] = [
+    { name: "close_above_bb_upper", passed: ind.close > ind.bb_upper, actual: ind.close, threshold: ind.bb_upper, op: "gt" },
+    { name: "rsi_gt_71", passed: ind.rsi > 71, actual: ind.rsi, threshold: 71, op: "gt" },
+    { name: "z_score_gt_2", passed: ind.z_score > 2.0, actual: ind.z_score, threshold: 2.0, op: "gt" },
+    { name: "close_off_high_gte_0.25", passed: ind.close_off_high >= 0.25, actual: ind.close_off_high, threshold: 0.25, op: "gte" },
+    { name: "volume_gt_1.2x_sma", passed: ind.volume > ind.sma20_volume * 1.2, actual: ind.sma20_volume > 0 ? ind.volume / ind.sma20_volume : 0, threshold: 1.2, op: "gt" },
+    { name: "adx_1h_lt_18", passed: ind.adx_1h < 18, actual: ind.adx_1h, threshold: 18, op: "lt" },
+    { name: "adx_4h_lt_22", passed: ind.adx_4h < 22, actual: ind.adx_4h, threshold: 22, op: "lt" },
+    { name: "below_1d_ceiling", passed: ind.ema50_1d === null || ind.close < ind.ema50_1d + 2.2 * ind.atr_1d, actual: ind.close, threshold: ind.ema50_1d !== null ? ind.ema50_1d + 2.2 * ind.atr_1d : Infinity, op: "lt" },
+  ];
+  const mrShortPassed = mrShortConds.filter(c => c.passed).length;
+  results.push({
+    setup_type: "MR_SHORT",
+    conditions: mrShortConds,
+    passed_count: mrShortPassed,
+    total_count: mrShortConds.length,
+    first_fail: mrShortConds.find(c => !c.passed)?.name ?? null,
+  });
+
+  // ── SQ_SHORT ──
+  const crossedBelowBasis = ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis;
+  const rsiCrossedBelow48 = ind.prev_rsi >= 48 && ind.rsi < 48;
+  const sqShortConds: ConditionResult[] = [
+    { name: "bb_width_lt_0.06", passed: ind.bb_width_ratio < 0.06, actual: ind.bb_width_ratio, threshold: 0.06, op: "lt" },
+    { name: "bb_width_near_min", passed: ind.bb_width_near_min, actual: ind.bb_width_ratio, threshold: 0, op: "lte" },
+    { name: "crossed_below_basis", passed: crossedBelowBasis, actual: ind.close - ind.bb_basis, threshold: 0, op: "lt" },
+    { name: "close_lt_ema20", passed: ind.close < ind.ema20, actual: ind.close, threshold: ind.ema20, op: "lt" },
+    { name: "rsi_crossed_below_48", passed: rsiCrossedBelow48, actual: ind.rsi, threshold: 48, op: "lt" },
+    { name: "volume_gt_1.5x_sma", passed: ind.volume > ind.sma20_volume * 1.5, actual: ind.sma20_volume > 0 ? ind.volume / ind.sma20_volume : 0, threshold: 1.5, op: "gt" },
+    { name: "adx_1h_lt_30", passed: ind.adx_1h < 30, actual: ind.adx_1h, threshold: 30, op: "lt" },
+    { name: "close_4h_lt_ema50_4h", passed: ind.close_4h < ind.ema50_4h, actual: ind.close_4h, threshold: ind.ema50_4h, op: "lt" },
+    { name: "range_lt_2.2x_atr", passed: ind.candle_range < ind.atr_1h * 2.2, actual: ind.atr_1h > 0 ? ind.candle_range / ind.atr_1h : 0, threshold: 2.2, op: "lt" },
+    { name: "close_near_ema20", passed: Math.abs(ind.close - ind.ema20) < ind.atr_1h * 1.5, actual: ind.atr_1h > 0 ? Math.abs(ind.close - ind.ema20) / ind.atr_1h : 0, threshold: 1.5, op: "lt" },
+  ];
+  const sqShortPassed = sqShortConds.filter(c => c.passed).length;
+  results.push({
+    setup_type: "SQ_SHORT",
+    conditions: sqShortConds,
+    passed_count: sqShortPassed,
+    total_count: sqShortConds.length,
+    first_fail: sqShortConds.find(c => !c.passed)?.name ?? null,
+  });
+
+  return results;
+}

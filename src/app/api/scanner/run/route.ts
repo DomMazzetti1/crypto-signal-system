@@ -3,7 +3,7 @@ import { getSupabase } from "@/lib/supabase";
 import { getRedis, ALERTS_QUEUE_KEY } from "@/lib/redis";
 import { fetchKlines, Kline } from "@/lib/bybit";
 import { runPipeline, AlertPayload } from "@/lib/pipeline";
-import { computeIndicators, detectSignals } from "@/lib/signals";
+import { computeIndicators, detectSignals, evaluateNearMisses, NearMissResult } from "@/lib/signals";
 import { runGateBRelaxed, isShadowCooldownActive, setShadowCooldown } from "@/lib/shadow-relaxed";
 import { runGateB } from "@/lib/gate-b";
 import { computeHTFTrend } from "@/lib/ta";
@@ -107,6 +107,67 @@ export async function GET() {
     let candidatesQueued = 0;
     let skippedCooldown = 0;
     let skippedIdempotency = 0;
+    let symbolsEvaluated = 0;
+
+    // ── Near-miss aggregation (in-memory, one write at end) ──
+    const passCountHist: Record<string, Record<string, number>> = {};
+    const condFailCounts: Record<string, Record<string, number>> = {};
+    const condPassCounts: Record<string, Record<string, number>> = {};
+    const firstFailCounts: Record<string, Record<string, number>> = {};
+    const metricSamples: Record<string, number[]> = {
+      adx_1h: [], adx_4h: [], rsi: [], z_score: [],
+      volume_sma_ratio: [], bb_width_ratio: [],
+    };
+    // Track best near-miss per setup (highest pass_count < total)
+    const bestNearMiss: Record<string, { symbol: string; passed: number; total: number; first_fail: string | null; metrics: Record<string, number> }> = {};
+
+    const accumulateNearMiss = (symbol: string, nm: NearMissResult, ind: { rsi: number; adx_1h: number; adx_4h: number; z_score: number; volume: number; sma20_volume: number; bb_width_ratio: number }) => {
+      const st = nm.setup_type;
+      // Pass count histogram
+      if (!passCountHist[st]) passCountHist[st] = {};
+      const key = String(nm.passed_count);
+      passCountHist[st][key] = (passCountHist[st][key] || 0) + 1;
+
+      // Per-condition fail/pass counts
+      if (!condFailCounts[st]) condFailCounts[st] = {};
+      if (!condPassCounts[st]) condPassCounts[st] = {};
+      for (const c of nm.conditions) {
+        if (c.passed) {
+          condPassCounts[st][c.name] = (condPassCounts[st][c.name] || 0) + 1;
+        } else {
+          condFailCounts[st][c.name] = (condFailCounts[st][c.name] || 0) + 1;
+        }
+      }
+
+      // First-fail counts
+      if (nm.first_fail) {
+        if (!firstFailCounts[st]) firstFailCounts[st] = {};
+        firstFailCounts[st][nm.first_fail] = (firstFailCounts[st][nm.first_fail] || 0) + 1;
+      }
+
+      // Best near-miss tracking
+      if (nm.passed_count < nm.total_count) {
+        if (!bestNearMiss[st] || nm.passed_count > bestNearMiss[st].passed) {
+          bestNearMiss[st] = {
+            symbol,
+            passed: nm.passed_count,
+            total: nm.total_count,
+            first_fail: nm.first_fail,
+            metrics: {
+              rsi: round2(ind.rsi),
+              adx_1h: round2(ind.adx_1h),
+              adx_4h: round2(ind.adx_4h),
+              z_score: round2(ind.z_score),
+              volume_sma_ratio: round2(ind.sma20_volume > 0 ? ind.volume / ind.sma20_volume : 0),
+              bb_width_ratio: round4(ind.bb_width_ratio),
+            },
+          };
+        }
+      }
+    };
+
+    const round2 = (n: number): number => Math.round(n * 100) / 100;
+    const round4 = (n: number): number => Math.round(n * 10000) / 10000;
 
     const hourBucket = currentHourBucket();
     const fourHBucket = current4hBucket();
@@ -138,6 +199,20 @@ export async function GET() {
       // 5. Calculate indicators
       const indicators = computeIndicators(candles1h, candles4h, candles1d);
       if (!indicators) return;
+
+      // 5b. Near-miss evaluation (pure computation, no I/O)
+      symbolsEvaluated++;
+      const nearMisses = evaluateNearMisses(indicators);
+      for (const nm of nearMisses) {
+        accumulateNearMiss(symbol, nm, indicators);
+      }
+      // Collect metric samples (once per symbol, not per setup)
+      metricSamples.adx_1h.push(indicators.adx_1h);
+      metricSamples.adx_4h.push(indicators.adx_4h);
+      metricSamples.rsi.push(indicators.rsi);
+      metricSamples.z_score.push(indicators.z_score);
+      metricSamples.volume_sma_ratio.push(indicators.sma20_volume > 0 ? indicators.volume / indicators.sma20_volume : 0);
+      metricSamples.bb_width_ratio.push(indicators.bb_width_ratio);
 
       // 6. Detect signals
       const signals = detectSignals(symbol, indicators);
@@ -225,7 +300,7 @@ export async function GET() {
         }
 
         // Store shadow comparison row
-        await supabase.from("shadow_signals").upsert({
+        const { error: shadowUpsertError } = await supabase.from("shadow_signals").upsert({
           symbol,
           setup_type: sig.type,
           candle_time: candleTime,
@@ -243,6 +318,9 @@ export async function GET() {
           relaxed_block_reason: relaxedBlockReason,
           shadow_only: relaxedPass && !baselinePass,
         }, { onConflict: "symbol,setup_type,candle_time" });
+        if (shadowUpsertError) {
+          console.error(`[scanner] shadow_signals upsert failed for ${symbol} ${sig.type}:`, shadowUpsertError);
+        }
 
         // 7a. Cooldown check (PRODUCTION — unchanged)
         const cooldownKey = `cooldown:${symbol}:${sig.type}`;
@@ -260,7 +338,7 @@ export async function GET() {
           .eq("setup_type", sig.type)
           .eq("candle_start_time", candleTime)
           .limit(1)
-          .single();
+          .maybeSingle();
 
         if (existing) {
           skippedIdempotency++;
@@ -282,11 +360,14 @@ export async function GET() {
         };
 
         // Store in alerts_raw
-        const { data: rawRow } = await supabase
+        const { data: rawRow, error: rawInsertError } = await supabase
           .from("alerts_raw")
           .insert({ payload: alertPayload })
           .select("id")
           .single();
+        if (rawInsertError) {
+          console.error(`[scanner] alerts_raw insert failed for ${symbol} ${sig.type}:`, rawInsertError);
+        }
 
         // Push to Redis queue
         await redis.lpush(ALERTS_QUEUE_KEY, JSON.stringify(alertPayload));
@@ -298,20 +379,26 @@ export async function GET() {
           // Only set cooldown and record idempotency on tradable decision
           if (result.decision === "LONG" || result.decision === "SHORT") {
             await redis.set(cooldownKey, Date.now(), { ex: 8 * 60 * 60 });
-            await supabase.from("candle_signals").insert({
+            const { error: candleInsertError } = await supabase.from("candle_signals").insert({
               symbol,
               setup_type: sig.type,
               candle_start_time: candleTime,
             });
+            if (candleInsertError) {
+              console.error(`[scanner] candle_signals insert failed for ${symbol} ${sig.type}:`, candleInsertError);
+            }
             candidatesQueued++;
             console.log(`[scanner] Queued: ${symbol} ${sig.type} close=${indicators.close}`);
           }
           // Update shadow row with baseline final decision (includes Claude override)
-          await supabase.from("shadow_signals")
+          const { error: shadowUpdateError } = await supabase.from("shadow_signals")
             .update({ baseline_decision: result.decision })
             .eq("symbol", symbol)
             .eq("setup_type", sig.type)
             .eq("candle_time", candleTime);
+          if (shadowUpdateError) {
+            console.error(`[scanner] shadow_signals decision update failed for ${symbol} ${sig.type}:`, shadowUpdateError);
+          }
         } catch (err) {
           console.error(`[scanner] Pipeline error for ${symbol} ${sig.type}:`, err);
         }
@@ -321,7 +408,7 @@ export async function GET() {
     const runtimeMs = Date.now() - startTime;
 
     // 9. Store scanner run
-    await supabase.from("scanner_runs").insert({
+    const { error: runInsertError } = await supabase.from("scanner_runs").insert({
       completed_at: new Date().toISOString(),
       symbols_scanned: symbols.length,
       candidates_found: candidatesFound,
@@ -330,6 +417,45 @@ export async function GET() {
       runtime_ms: runtimeMs,
       status: "completed",
     });
+    if (runInsertError) {
+      console.error("[scanner] scanner_runs insert failed:", runInsertError);
+    }
+
+    // 9b. Store near-miss diagnostics (one compact row per run)
+    const percentiles = (arr: number[]): Record<string, number> => {
+      if (arr.length === 0) return {};
+      const sorted = [...arr].sort((a, b) => a - b);
+      const p = (pct: number) => {
+        const idx = Math.floor(pct / 100 * (sorted.length - 1));
+        return round2(sorted[idx]);
+      };
+      return { min: round2(sorted[0]), p10: p(10), p25: p(25), p50: p(50), p75: p(75), p90: p(90), max: round2(sorted[sorted.length - 1]) };
+    };
+
+    const metricDist: Record<string, Record<string, number>> = {};
+    for (const [metric, samples] of Object.entries(metricSamples)) {
+      metricDist[metric] = percentiles(samples);
+    }
+
+    const bestNearMissArray = Object.entries(bestNearMiss).map(([setup_type, data]) => ({
+      setup_type, ...data,
+    }));
+
+    if (symbolsEvaluated > 0) {
+      const { error: nmInsertError } = await supabase.from("near_miss_scans").insert({
+        candle_bucket: new Date(hourBucket).toISOString(),
+        symbols_evaluated: symbolsEvaluated,
+        pass_count_histograms: passCountHist,
+        condition_fail_counts: condFailCounts,
+        condition_pass_counts: condPassCounts,
+        first_fail_counts: firstFailCounts,
+        metric_distributions: metricDist,
+        best_near_misses: bestNearMissArray,
+      });
+      if (nmInsertError) {
+        console.error("[scanner] near_miss_scans insert failed:", nmInsertError);
+      }
+    }
 
     const summary = {
       started_at: new Date(startTime).toISOString(),
