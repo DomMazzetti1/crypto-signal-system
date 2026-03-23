@@ -212,46 +212,43 @@ function runVariant(
   };
 }
 
-// ── Main handler ─────────────────────────────────────────
+// ── ADX sensitivity matrix ───────────────────────────────
 
-export async function POST(request: NextRequest) {
-  const startTime = Date.now();
+const ADX_MATRIX: { label: string; params: SignalParams }[] = [
+  { label: "baseline (18/22)", params: { mr_adx_1h_max: 18, mr_adx_4h_max: 22 } },
+  { label: "v1 (20/22)",       params: { mr_adx_1h_max: 20, mr_adx_4h_max: 22 } },
+  { label: "v2 (22/22)",       params: { mr_adx_1h_max: 22, mr_adx_4h_max: 22 } },
+  { label: "v3 (18/24)",       params: { mr_adx_1h_max: 18, mr_adx_4h_max: 24 } },
+  { label: "v4 (18/26)",       params: { mr_adx_1h_max: 18, mr_adx_4h_max: 26 } },
+  { label: "v5 (20/24)",       params: { mr_adx_1h_max: 20, mr_adx_4h_max: 24 } },
+];
 
-  let body: {
-    symbols?: string[];
-    baseline?: SignalParams;
-    relaxed?: SignalParams;
-  };
-  try {
-    body = await request.json();
-  } catch {
-    body = {};
-  }
+interface VariantDelta {
+  signal_count_delta: number;
+  win_rate_tp1_delta: number;
+  avg_r_delta: number;
+  mr_long_count_delta: number;
+  mr_short_count_delta: number;
+}
 
-  const supabase = getSupabase();
+interface RankedVariant {
+  rank: number;
+  label: string;
+  params: SignalParams;
+  total_signals: number;
+  mr_long: number;
+  mr_short: number;
+  sq_short: number;
+  win_rate_tp1: number;
+  avg_r_multiple: number;
+  delta_vs_baseline: VariantDelta;
+}
 
-  // Resolve symbols
-  let symbols: string[];
-  if (body.symbols && body.symbols.length > 0) {
-    symbols = body.symbols;
-  } else {
-    const { data: rows, error } = await supabase
-      .from("universe")
-      .select("symbol")
-      .eq("is_eligible", true)
-      .order("symbol");
-    if (error || !rows) {
-      return NextResponse.json({ error: "Failed to read universe" }, { status: 500 });
-    }
-    symbols = rows.map((r) => r.symbol);
-  }
+// ── Shared data fetcher ──────────────────────────────────
 
-  const baselineParams = body.baseline ?? DEFAULT_SIGNAL_PARAMS;
-  const relaxedParams = body.relaxed ?? { mr_adx_1h_max: 25, mr_adx_4h_max: 30 };
-
-  console.log(`[adx-compare] Starting: ${symbols.length} symbols, baseline=${JSON.stringify(baselineParams)}, relaxed=${JSON.stringify(relaxedParams)}`);
-
-  // Fetch all data once (shared between variants)
+async function fetchSymbolData(
+  symbols: string[]
+): Promise<{ symbolData: Map<string, { c1h: Kline[]; c4h: Kline[]; c1d: Kline[] }>; errors: string[] }> {
   const symbolData = new Map<string, { c1h: Kline[]; c4h: Kline[]; c1d: Kline[] }>();
   const errors: string[] = [];
   let fetched = 0;
@@ -273,13 +270,62 @@ export async function POST(request: NextRequest) {
     }
   });
 
+  return { symbolData, errors };
+}
+
+async function resolveSymbols(body: { symbols?: string[] }): Promise<string[] | NextResponse> {
+  if (body.symbols && body.symbols.length > 0) return body.symbols;
+  const supabase = getSupabase();
+  const { data: rows, error } = await supabase
+    .from("universe")
+    .select("symbol")
+    .eq("is_eligible", true)
+    .order("symbol");
+  if (error || !rows) {
+    return NextResponse.json({ error: "Failed to read universe" }, { status: 500 });
+  }
+  return rows.map((r) => r.symbol);
+}
+
+// ── Main handler ─────────────────────────────────────────
+
+export async function POST(request: NextRequest) {
+  const startTime = Date.now();
+
+  let body: {
+    mode?: "compare" | "matrix";
+    symbols?: string[];
+    baseline?: SignalParams;
+    relaxed?: SignalParams;
+  };
+  try {
+    body = await request.json();
+  } catch {
+    body = {};
+  }
+
+  const resolved = await resolveSymbols(body);
+  if (resolved instanceof NextResponse) return resolved;
+  const symbols = resolved;
+
+  // Route to matrix mode
+  if (body.mode === "matrix") {
+    return runMatrix(symbols, startTime);
+  }
+
+  // Default: two-variant compare (existing behavior)
+  const baselineParams = body.baseline ?? DEFAULT_SIGNAL_PARAMS;
+  const relaxedParams = body.relaxed ?? { mr_adx_1h_max: 25, mr_adx_4h_max: 30 };
+
+  console.log(`[adx-compare] Starting: ${symbols.length} symbols, baseline=${JSON.stringify(baselineParams)}, relaxed=${JSON.stringify(relaxedParams)}`);
+
+  const { symbolData, errors } = await fetchSymbolData(symbols);
+
   console.log(`[adx-compare] Data fetched: ${symbolData.size} symbols, ${errors.length} errors. Running variants...`);
 
-  // Run both variants on the same data
   const baseline = runVariant("baseline", baselineParams, symbolData);
   const relaxed = runVariant("relaxed", relaxedParams, symbolData);
 
-  // Compute deltas
   const delta = {
     signal_count: `${baseline.total_signals} → ${relaxed.total_signals} (${relaxed.total_signals > baseline.total_signals ? "+" : ""}${relaxed.total_signals - baseline.total_signals})`,
     win_rate_tp1: `${baseline.win_rate_tp1} → ${relaxed.win_rate_tp1} (${round(relaxed.win_rate_tp1 - baseline.win_rate_tp1, 4) > 0 ? "+" : ""}${round(relaxed.win_rate_tp1 - baseline.win_rate_tp1, 4)})`,
@@ -300,12 +346,90 @@ export async function POST(request: NextRequest) {
   const runtimeMs = Date.now() - startTime;
 
   return NextResponse.json({
+    mode: "compare",
     symbols_tested: symbolData.size,
     fetch_errors: errors.length > 0 ? errors.slice(0, 10) : undefined,
     runtime_ms: runtimeMs,
     baseline,
     relaxed,
     delta,
+    note: runtimeMs > 250000 ? "Approaching Vercel timeout. Consider fewer symbols or running locally." : undefined,
+  });
+}
+
+// ── Matrix mode ──────────────────────────────────────────
+
+async function runMatrix(symbols: string[], startTime: number): Promise<NextResponse> {
+  console.log(`[adx-matrix] Starting: ${symbols.length} symbols, ${ADX_MATRIX.length} variants`);
+
+  const { symbolData, errors } = await fetchSymbolData(symbols);
+
+  console.log(`[adx-matrix] Data fetched: ${symbolData.size} symbols, ${errors.length} errors. Running ${ADX_MATRIX.length} variants...`);
+
+  // Run all variants on the same data
+  const results: VariantResult[] = [];
+  for (const { label, params } of ADX_MATRIX) {
+    const variantStart = Date.now();
+    const result = runVariant(label, params, symbolData);
+    console.log(`[adx-matrix] ${label}: ${result.total_signals} signals, ${Date.now() - variantStart}ms`);
+    results.push(result);
+  }
+
+  const baselineResult = results[0];
+
+  // Build ranked table with deltas
+  const ranked: RankedVariant[] = results.map((r) => {
+    const mrLong = r.by_setup["MR_LONG"]?.count ?? 0;
+    const mrShort = r.by_setup["MR_SHORT"]?.count ?? 0;
+    const sqShort = r.by_setup["SQ_SHORT"]?.count ?? 0;
+    const bMrLong = baselineResult.by_setup["MR_LONG"]?.count ?? 0;
+    const bMrShort = baselineResult.by_setup["MR_SHORT"]?.count ?? 0;
+
+    return {
+      rank: 0, // set below
+      label: r.label,
+      params: r.params,
+      total_signals: r.total_signals,
+      mr_long: mrLong,
+      mr_short: mrShort,
+      sq_short: sqShort,
+      win_rate_tp1: r.win_rate_tp1,
+      avg_r_multiple: r.avg_r_multiple,
+      delta_vs_baseline: {
+        signal_count_delta: r.total_signals - baselineResult.total_signals,
+        win_rate_tp1_delta: round(r.win_rate_tp1 - baselineResult.win_rate_tp1, 4),
+        avg_r_delta: round(r.avg_r_multiple - baselineResult.avg_r_multiple, 2),
+        mr_long_count_delta: mrLong - bMrLong,
+        mr_short_count_delta: mrShort - bMrShort,
+      },
+    };
+  });
+
+  // Rank: first by avg_r preservation (higher is better), then by signal count increase
+  ranked.sort((a, b) => {
+    // Primary: avg_r (descending — higher/less negative is better)
+    if (a.avg_r_multiple !== b.avg_r_multiple) return b.avg_r_multiple - a.avg_r_multiple;
+    // Secondary: signal count (descending — more signals is better)
+    return b.total_signals - a.total_signals;
+  });
+  ranked.forEach((r, i) => (r.rank = i + 1));
+
+  // SQ_SHORT should be identical across variants (ADX params don't affect it)
+  const sqConsistent = results.every(
+    (r) => (r.by_setup["SQ_SHORT"]?.count ?? 0) === (baselineResult.by_setup["SQ_SHORT"]?.count ?? 0)
+  );
+
+  const runtimeMs = Date.now() - startTime;
+
+  return NextResponse.json({
+    mode: "matrix",
+    symbols_tested: symbolData.size,
+    fetch_errors: errors.length > 0 ? errors.slice(0, 10) : undefined,
+    runtime_ms: runtimeMs,
+    variants_tested: ADX_MATRIX.length,
+    sq_short_unchanged: sqConsistent,
+    ranking: ranked,
+    full_results: results,
     note: runtimeMs > 250000 ? "Approaching Vercel timeout. Consider fewer symbols or running locally." : undefined,
   });
 }
