@@ -189,11 +189,13 @@ export function computeIndicators(
 export interface SignalParams {
   mr_adx_1h_max: number;
   mr_adx_4h_max: number;
+  sq_adx_1h_max: number;
 }
 
 export const DEFAULT_SIGNAL_PARAMS: SignalParams = {
   mr_adx_1h_max: 18,
   mr_adx_4h_max: 22,
+  sq_adx_1h_max: 30,
 };
 
 // ── Signal conditions ───────────────────────────────────
@@ -257,7 +259,7 @@ export function detectSignalsWithParams(
     ind.close < ind.ema20 &&
     rsiCrossedBelow48 &&
     ind.volume > ind.sma20_volume * 1.5 &&
-    ind.adx_1h < 30 &&
+    ind.adx_1h < params.sq_adx_1h_max &&
     ind.close_4h < ind.ema50_4h &&
     ind.candle_range < ind.atr_1h * 2.2 &&
     Math.abs(ind.close - ind.ema20) < ind.atr_1h * 1.5

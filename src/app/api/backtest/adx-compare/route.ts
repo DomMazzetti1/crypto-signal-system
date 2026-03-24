@@ -339,12 +339,12 @@ function runVariant(
 // ── ADX sensitivity matrix ───────────────────────────────
 
 const ADX_MATRIX: { label: string; params: SignalParams }[] = [
-  { label: "baseline (18/22)", params: { mr_adx_1h_max: 18, mr_adx_4h_max: 22 } },
-  { label: "v1 (20/22)",       params: { mr_adx_1h_max: 20, mr_adx_4h_max: 22 } },
-  { label: "v2 (22/22)",       params: { mr_adx_1h_max: 22, mr_adx_4h_max: 22 } },
-  { label: "v3 (18/24)",       params: { mr_adx_1h_max: 18, mr_adx_4h_max: 24 } },
-  { label: "v4 (18/26)",       params: { mr_adx_1h_max: 18, mr_adx_4h_max: 26 } },
-  { label: "v5 (20/24)",       params: { mr_adx_1h_max: 20, mr_adx_4h_max: 24 } },
+  { label: "baseline (18/22)", params: { mr_adx_1h_max: 18, mr_adx_4h_max: 22, sq_adx_1h_max: 30 } },
+  { label: "v1 (20/22)",       params: { mr_adx_1h_max: 20, mr_adx_4h_max: 22, sq_adx_1h_max: 30 } },
+  { label: "v2 (22/22)",       params: { mr_adx_1h_max: 22, mr_adx_4h_max: 22, sq_adx_1h_max: 30 } },
+  { label: "v3 (18/24)",       params: { mr_adx_1h_max: 18, mr_adx_4h_max: 24, sq_adx_1h_max: 30 } },
+  { label: "v4 (18/26)",       params: { mr_adx_1h_max: 18, mr_adx_4h_max: 26, sq_adx_1h_max: 30 } },
+  { label: "v5 (20/24)",       params: { mr_adx_1h_max: 20, mr_adx_4h_max: 24, sq_adx_1h_max: 30 } },
 ];
 
 interface VariantDelta {
@@ -445,7 +445,7 @@ export async function POST(request: NextRequest) {
 
   // Default: two-variant compare (existing behavior)
   const baselineParams = body.baseline ?? DEFAULT_SIGNAL_PARAMS;
-  const relaxedParams = body.relaxed ?? { mr_adx_1h_max: 25, mr_adx_4h_max: 30 };
+  const relaxedParams = body.relaxed ?? { mr_adx_1h_max: 25, mr_adx_4h_max: 30, sq_adx_1h_max: 30 };
 
   console.log(`[adx-compare] Starting: ${symbols.length} symbols, cache_only=${cacheOnly}, baseline=${JSON.stringify(baselineParams)}, relaxed=${JSON.stringify(relaxedParams)}`);
 
