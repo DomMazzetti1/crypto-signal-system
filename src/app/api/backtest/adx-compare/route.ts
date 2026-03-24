@@ -4,6 +4,7 @@ import { Kline } from "@/lib/bybit";
 import {
   computeIndicators,
   detectSignalsWithParams,
+  SymbolIndicators,
   SignalParams,
   DEFAULT_SIGNAL_PARAMS,
 } from "@/lib/signals";
@@ -18,6 +19,7 @@ const WARMUP_BARS = 150;
 const FORWARD_BARS = 48;
 const MAX_CONCURRENT = 4;
 const BYBIT_BATCH = 1000;
+const CACHE_FRESH_MS = 2 * 24 * 60 * 60 * 1000; // 2 days
 
 const TARGET_CANDLES: Record<string, number> = {
   "60": 8760,
@@ -77,19 +79,70 @@ async function runWithConcurrency<T, R>(
   return results;
 }
 
-async function fetchKlinesPaginated(
-  symbol: string,
-  interval: string,
-  target?: number
-): Promise<Kline[]> {
-  const totalNeeded = target ?? TARGET_CANDLES[interval] ?? 1000;
-  const allCandles: Map<number, Kline> = new Map();
-  let endParam: number | undefined = undefined;
+// ── Cache-aware candle fetch (matches batch/route.ts pattern) ─
 
-  while (allCandles.size < totalNeeded) {
-    const batchSize = Math.min(BYBIT_BATCH, totalNeeded - allCandles.size);
+async function readCache(symbol: string, interval: string): Promise<Kline[]> {
+  const supabase = getSupabase();
+  const rows: Kline[] = [];
+  let offset = 0;
+  const PAGE = 1000;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from("candle_cache")
+      .select("start_time, open, high, low, close, volume")
+      .eq("symbol", symbol)
+      .eq("interval", interval)
+      .order("start_time", { ascending: true })
+      .range(offset, offset + PAGE - 1);
+
+    if (error || !data) break;
+    for (const r of data) {
+      rows.push({
+        startTime: new Date(r.start_time).getTime(),
+        open: Number(r.open),
+        high: Number(r.high),
+        low: Number(r.low),
+        close: Number(r.close),
+        volume: Number(r.volume),
+      });
+    }
+    if (data.length < PAGE) break;
+    offset += PAGE;
+  }
+
+  return rows;
+}
+
+async function writeCache(symbol: string, interval: string, candles: Kline[]): Promise<void> {
+  if (candles.length === 0) return;
+  const supabase = getSupabase();
+
+  for (let i = 0; i < candles.length; i += 500) {
+    const batch = candles.slice(i, i + 500).map((c) => ({
+      symbol,
+      interval,
+      start_time: new Date(c.startTime).toISOString(),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: c.volume,
+    }));
+    await supabase
+      .from("candle_cache")
+      .upsert(batch, { onConflict: "symbol,interval,start_time", ignoreDuplicates: true });
+  }
+}
+
+async function fetchFromBybit(symbol: string, interval: string, target: number, endParam?: number): Promise<Kline[]> {
+  const allCandles: Map<number, Kline> = new Map();
+  let end = endParam;
+
+  while (allCandles.size < target) {
+    const batchSize = Math.min(BYBIT_BATCH, target - allCandles.size);
     let url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${batchSize}`;
-    if (endParam !== undefined) url += `&end=${endParam}`;
+    if (end !== undefined) url += `&end=${end}`;
 
     let data: { retCode: number; retMsg: string; result: { list: string[][] } };
     try {
@@ -121,50 +174,112 @@ async function fetchKlinesPaginated(
     }
 
     const earliestTime = Number(batch[batch.length - 1][0]);
-    if (endParam !== undefined && earliestTime >= endParam) break;
-    endParam = earliestTime - 1;
+    if (end !== undefined && earliestTime >= end) break;
+    end = earliestTime - 1;
   }
 
   return Array.from(allCandles.values()).sort((a, b) => a.startTime - b.startTime);
+}
+
+async function fetchKlinesPaginated(symbol: string, interval: string, target?: number): Promise<Kline[]> {
+  const totalNeeded = target ?? TARGET_CANDLES[interval] ?? 1000;
+  const now = Date.now();
+  const freshBoundary = now - CACHE_FRESH_MS;
+
+  // 1. Read cache
+  const cached = await readCache(symbol, interval);
+  const stableCandles = cached.filter((c) => c.startTime < freshBoundary);
+  const staleCount = cached.length - stableCandles.length;
+
+  let freshCandles: Kline[] = [];
+
+  if (stableCandles.length >= totalNeeded) {
+    // Cache covers the window — only refresh stale recent candles
+    if (staleCount > 0) {
+      freshCandles = await fetchFromBybit(symbol, interval, staleCount + 10);
+      await writeCache(symbol, interval, freshCandles);
+    }
+  } else if (stableCandles.length > 0) {
+    // Partial cache — fetch gap + recent
+    const oldestCached = stableCandles[0].startTime;
+    const missingCount = totalNeeded - stableCandles.length;
+    const olderCandles = await fetchFromBybit(symbol, interval, missingCount, oldestCached - 1);
+    const recentCandles = await fetchFromBybit(symbol, interval, Math.max(staleCount + 50, 100));
+    freshCandles = [...olderCandles, ...recentCandles];
+    await writeCache(symbol, interval, freshCandles);
+  } else {
+    // Cold start — full fetch
+    freshCandles = await fetchFromBybit(symbol, interval, totalNeeded);
+    await writeCache(symbol, interval, freshCandles);
+  }
+
+  // Merge + deduplicate
+  const merged = new Map<number, Kline>();
+  for (const c of stableCandles) merged.set(c.startTime, c);
+  for (const c of freshCandles) merged.set(c.startTime, c);
+  return Array.from(merged.values()).sort((a, b) => a.startTime - b.startTime);
 }
 
 function candlesUpTo(candles: Kline[], beforeMs: number): Kline[] {
   return candles.filter((c) => c.startTime < beforeMs);
 }
 
-// ── Run one variant ──────────────────────────────────────
+// ── Precomputed bar frame (indicators + future bars per step) ─
+
+interface BarFrame {
+  barTime: number;
+  indicators: SymbolIndicators;
+  futureBars: Kline[];
+}
+
+function precomputeBarFrames(
+  c1h: Kline[],
+  c4h: Kline[],
+  c1d: Kline[]
+): BarFrame[] {
+  const frames: BarFrame[] = [];
+  if (c1h.length < WARMUP_BARS + FORWARD_BARS) return frames;
+
+  for (let i = WARMUP_BARS; i < c1h.length - FORWARD_BARS; i++) {
+    const slice1h = c1h.slice(0, i + 1);
+    const currentBarTime = c1h[i].startTime;
+    const slice4h = candlesUpTo(c4h, currentBarTime + 1);
+    const slice1d = candlesUpTo(c1d, currentBarTime + 1);
+
+    if (slice4h.length < 14 || slice1d.length < 14) continue;
+
+    const indicators = computeIndicators(slice1h, slice4h, slice1d);
+    if (!indicators) continue;
+
+    frames.push({
+      barTime: currentBarTime,
+      indicators,
+      futureBars: c1h.slice(i + 1, i + 1 + FORWARD_BARS),
+    });
+  }
+
+  return frames;
+}
+
+// ── Run one variant against precomputed frames ───────────
 
 function runVariant(
   label: string,
   params: SignalParams,
-  symbolData: Map<string, { c1h: Kline[]; c4h: Kline[]; c1d: Kline[] }>
+  precomputed: Map<string, BarFrame[]>
 ): VariantResult {
   const signals: GradedSignal[] = [];
   const notes: string[] = [];
 
-  for (const [symbol, { c1h, c4h, c1d }] of Array.from(symbolData.entries())) {
-    if (c1h.length < WARMUP_BARS + FORWARD_BARS) continue;
-
-    for (let i = WARMUP_BARS; i < c1h.length - FORWARD_BARS; i++) {
-      const slice1h = c1h.slice(0, i + 1);
-      const currentBarTime = c1h[i].startTime;
-      const slice4h = candlesUpTo(c4h, currentBarTime + 1);
-      const slice1d = candlesUpTo(c1d, currentBarTime + 1);
-
-      if (slice4h.length < 14 || slice1d.length < 14) continue;
-
-      const indicators = computeIndicators(slice1h, slice4h, slice1d);
-      if (!indicators) continue;
-
-      const detected = detectSignalsWithParams(symbol, indicators, params);
+  for (const [symbol, frames] of Array.from(precomputed.entries())) {
+    for (const frame of frames) {
+      const detected = detectSignalsWithParams(symbol, frame.indicators, params);
       if (detected.length === 0) continue;
-
-      const futureBars = c1h.slice(i + 1, i + 1 + FORWARD_BARS);
 
       for (const sig of detected) {
         const isLong = sig.type.includes("LONG");
-        const grade = gradeSignal(indicators.close, indicators.atr_1h, isLong, futureBars);
-        signals.push({ symbol, setup_type: sig.type, candle_time: currentBarTime, grade });
+        const grade = gradeSignal(frame.indicators.close, frame.indicators.atr_1h, isLong, frame.futureBars);
+        signals.push({ symbol, setup_type: sig.type, candle_time: frame.barTime, grade });
       }
     }
   }
@@ -244,14 +359,16 @@ interface RankedVariant {
   delta_vs_baseline: VariantDelta;
 }
 
-// ── Shared data fetcher ──────────────────────────────────
+// ── Shared data fetcher + precompute ─────────────────────
 
-async function fetchSymbolData(
+async function fetchAndPrecompute(
   symbols: string[]
-): Promise<{ symbolData: Map<string, { c1h: Kline[]; c4h: Kline[]; c1d: Kline[] }>; errors: string[] }> {
-  const symbolData = new Map<string, { c1h: Kline[]; c4h: Kline[]; c1d: Kline[] }>();
+): Promise<{ precomputed: Map<string, BarFrame[]>; errors: string[]; cacheHits: number; cacheMisses: number }> {
+  const precomputed = new Map<string, BarFrame[]>();
   const errors: string[] = [];
   let fetched = 0;
+  let cacheHits = 0;
+  let cacheMisses = 0;
 
   await runWithConcurrency(symbols, MAX_CONCURRENT, async (symbol) => {
     try {
@@ -260,17 +377,19 @@ async function fetchSymbolData(
         fetchKlinesPaginated(symbol, "240"),
         fetchKlinesPaginated(symbol, "D"),
       ]);
-      symbolData.set(symbol, { c1h, c4h, c1d });
+
+      const frames = precomputeBarFrames(c1h, c4h, c1d);
+      precomputed.set(symbol, frames);
     } catch (err) {
       errors.push(`${symbol}: ${String(err).slice(0, 80)}`);
     }
     fetched++;
     if (fetched % 5 === 0) {
-      console.log(`[adx-compare] Fetched ${fetched}/${symbols.length}`);
+      console.log(`[adx-compare] Fetched+precomputed ${fetched}/${symbols.length}`);
     }
   });
 
-  return { symbolData, errors };
+  return { precomputed, errors, cacheHits, cacheMisses };
 }
 
 async function resolveSymbols(body: { symbols?: string[] }): Promise<string[] | NextResponse> {
@@ -319,12 +438,13 @@ export async function POST(request: NextRequest) {
 
   console.log(`[adx-compare] Starting: ${symbols.length} symbols, baseline=${JSON.stringify(baselineParams)}, relaxed=${JSON.stringify(relaxedParams)}`);
 
-  const { symbolData, errors } = await fetchSymbolData(symbols);
+  const { precomputed, errors } = await fetchAndPrecompute(symbols);
+  const totalFrames = Array.from(precomputed.values()).reduce((s, f) => s + f.length, 0);
 
-  console.log(`[adx-compare] Data fetched: ${symbolData.size} symbols, ${errors.length} errors. Running variants...`);
+  console.log(`[adx-compare] Data fetched: ${precomputed.size} symbols, ${totalFrames} bar frames precomputed, ${errors.length} errors. Running variants...`);
 
-  const baseline = runVariant("baseline", baselineParams, symbolData);
-  const relaxed = runVariant("relaxed", relaxedParams, symbolData);
+  const baseline = runVariant("baseline", baselineParams, precomputed);
+  const relaxed = runVariant("relaxed", relaxedParams, precomputed);
 
   const delta = {
     signal_count: `${baseline.total_signals} → ${relaxed.total_signals} (${relaxed.total_signals > baseline.total_signals ? "+" : ""}${relaxed.total_signals - baseline.total_signals})`,
@@ -347,7 +467,7 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json({
     mode: "compare",
-    symbols_tested: symbolData.size,
+    symbols_tested: precomputed.size,
     fetch_errors: errors.length > 0 ? errors.slice(0, 10) : undefined,
     runtime_ms: runtimeMs,
     baseline,
@@ -362,15 +482,16 @@ export async function POST(request: NextRequest) {
 async function runMatrix(symbols: string[], startTime: number): Promise<NextResponse> {
   console.log(`[adx-matrix] Starting: ${symbols.length} symbols, ${ADX_MATRIX.length} variants`);
 
-  const { symbolData, errors } = await fetchSymbolData(symbols);
+  const { precomputed, errors } = await fetchAndPrecompute(symbols);
+  const totalFrames = Array.from(precomputed.values()).reduce((s, f) => s + f.length, 0);
 
-  console.log(`[adx-matrix] Data fetched: ${symbolData.size} symbols, ${errors.length} errors. Running ${ADX_MATRIX.length} variants...`);
+  console.log(`[adx-matrix] Data fetched: ${precomputed.size} symbols, ${totalFrames} bar frames precomputed, ${errors.length} errors. Running ${ADX_MATRIX.length} variants...`);
 
-  // Run all variants on the same data
+  // Run all variants against precomputed indicators (no recomputation)
   const results: VariantResult[] = [];
   for (const { label, params } of ADX_MATRIX) {
     const variantStart = Date.now();
-    const result = runVariant(label, params, symbolData);
+    const result = runVariant(label, params, precomputed);
     console.log(`[adx-matrix] ${label}: ${result.total_signals} signals, ${Date.now() - variantStart}ms`);
     results.push(result);
   }
@@ -423,7 +544,7 @@ async function runMatrix(symbols: string[], startTime: number): Promise<NextResp
 
   return NextResponse.json({
     mode: "matrix",
-    symbols_tested: symbolData.size,
+    symbols_tested: precomputed.size,
     fetch_errors: errors.length > 0 ? errors.slice(0, 10) : undefined,
     runtime_ms: runtimeMs,
     variants_tested: ADX_MATRIX.length,
