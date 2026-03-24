@@ -3,7 +3,7 @@ import { getSupabase } from "@/lib/supabase";
 import { getRedis, ALERTS_QUEUE_KEY } from "@/lib/redis";
 import { fetchKlines, Kline } from "@/lib/bybit";
 import { runPipeline, AlertPayload } from "@/lib/pipeline";
-import { computeIndicators, detectSignals, evaluateNearMisses, NearMissResult } from "@/lib/signals";
+import { computeIndicators, detectSignals, detectSignalsWithParams, evaluateNearMisses, NearMissResult, DEFAULT_SIGNAL_PARAMS } from "@/lib/signals";
 import { runGateBRelaxed, isShadowCooldownActive, setShadowCooldown } from "@/lib/shadow-relaxed";
 import { runGateB } from "@/lib/gate-b";
 import { computeHTFTrend } from "@/lib/ta";
@@ -214,8 +214,44 @@ export async function GET() {
       metricSamples.volume_sma_ratio.push(indicators.sma20_volume > 0 ? indicators.volume / indicators.sma20_volume : 0);
       metricSamples.bb_width_ratio.push(indicators.bb_width_ratio);
 
-      // 6. Detect signals
-      const signals = detectSignals(symbol, indicators);
+      // 5c. SQ_SHORT ADX shadow comparison (strict=15 vs production=30)
+      // Runs for every symbol, not just those that pass baseline detection.
+      const sqStrictParams = { ...DEFAULT_SIGNAL_PARAMS, sq_adx_1h_max: 15 };
+      const baselineSigs = detectSignals(symbol, indicators);
+      const strictSigs = detectSignalsWithParams(symbol, indicators, sqStrictParams);
+
+      const baselineSQ = baselineSigs.some(s => s.type === "SQ_SHORT");
+      const strictSQ = strictSigs.some(s => s.type === "SQ_SHORT");
+
+      // Log when there's a difference (baseline fires but strict wouldn't, or vice versa)
+      if (baselineSQ || strictSQ) {
+        const candleTime = new Date(indicators.candle_start_time).toISOString();
+        const { error: sqShadowErr } = await supabase.from("shadow_signals").upsert({
+          symbol,
+          setup_type: "SQ_SHORT_ADX_SHADOW",
+          candle_time: candleTime,
+          regime: "n/a",
+          trend_4h: "n/a",
+          rsi: indicators.rsi,
+          adx_1h: indicators.adx_1h,
+          volume: indicators.volume,
+          sma20_volume: indicators.sma20_volume,
+          close_price: indicators.close,
+          atr_1h: indicators.atr_1h,
+          baseline_pass: baselineSQ,
+          baseline_block_reason: baselineSQ ? null : `adx_1h=${round2(indicators.adx_1h)} (prod threshold 30)`,
+          relaxed_pass: strictSQ,
+          relaxed_block_reason: strictSQ ? null : `adx_1h=${round2(indicators.adx_1h)} >= 15 (strict threshold)`,
+          shadow_only: baselineSQ && !strictSQ,
+          baseline_decision: null,
+        }, { onConflict: "symbol,setup_type,candle_time" });
+        if (sqShadowErr) {
+          console.error(`[scanner] SQ shadow upsert failed for ${symbol}:`, sqShadowErr);
+        }
+      }
+
+      // 6. Detect signals (production path — unchanged)
+      const signals = baselineSigs;
       if (signals.length === 0) return;
 
       candidatesFound += signals.length;
