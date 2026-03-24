@@ -101,40 +101,128 @@ async function writeCache(
   return written;
 }
 
+// ── Single-symbol warmup ────────────────────────────────
+
+async function warmSymbol(symbol: string): Promise<{
+  symbol: string;
+  intervals: Record<string, { fetched: number; cached: number }>;
+  runtime_ms: number;
+  error?: string;
+}> {
+  const t0 = Date.now();
+  const intervals: Record<string, { fetched: number; cached: number }> = {};
+
+  try {
+    for (const interval of INTERVALS) {
+      const target = TARGET_CANDLES[interval];
+      const candles = await fetchFromBybit(symbol, interval, target);
+      const written = await writeCache(symbol, interval, candles);
+      intervals[interval] = { fetched: candles.length, cached: written };
+      // Small delay between timeframes to avoid rate limits
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  } catch (err) {
+    return { symbol, intervals, runtime_ms: Date.now() - t0, error: String(err).slice(0, 120) };
+  }
+
+  return { symbol, intervals, runtime_ms: Date.now() - t0 };
+}
+
 // ── Main handler ────────────────────────────────────────
 
 export async function GET(request: NextRequest) {
   const startTime = Date.now();
-
   const symbol = request.nextUrl.searchParams.get("symbol")?.toUpperCase();
+  const mode = request.nextUrl.searchParams.get("mode");
+
+  // Bulk mode: warm all eligible symbols sequentially
+  if (mode === "bulk") {
+    return runBulkWarmup(startTime);
+  }
+
+  // Single-symbol mode (existing behavior)
   if (!symbol) {
     return NextResponse.json(
-      { error: "Missing ?symbol= parameter, e.g. ?symbol=BTCUSDT" },
+      { error: "Missing ?symbol= parameter. Use ?symbol=BTCUSDT or ?mode=bulk for all." },
       { status: 400 }
     );
   }
 
   console.log(`[warmup] Starting cache warmup for ${symbol}`);
+  const result = await warmSymbol(symbol);
+  console.log(`[warmup] ${symbol} complete in ${(result.runtime_ms / 1000).toFixed(1)}s`);
 
-  const results: Record<string, { fetched: number; cached: number }> = {};
+  return NextResponse.json(result);
+}
 
-  for (const interval of INTERVALS) {
-    const target = TARGET_CANDLES[interval];
-    console.log(`[warmup] ${symbol}/${interval}: fetching ${target} candles...`);
+// ── Bulk warmup ─────────────────────────────────────────
 
-    const candles = await fetchFromBybit(symbol, interval, target);
-    const written = await writeCache(symbol, interval, candles);
+async function runBulkWarmup(startTime: number): Promise<NextResponse> {
+  const supabase = getSupabase();
 
-    results[interval] = { fetched: candles.length, cached: written };
-    console.log(`[warmup] ${symbol}/${interval}: ${candles.length} fetched, ${written} cached`);
+  const { data: rows, error: uniErr } = await supabase
+    .from("universe")
+    .select("symbol")
+    .eq("is_eligible", true)
+    .order("symbol");
+
+  if (uniErr || !rows) {
+    return NextResponse.json({ error: "Failed to read universe" }, { status: 500 });
   }
 
-  const elapsed = Date.now() - startTime;
-  console.log(`[warmup] ${symbol} complete in ${(elapsed / 1000).toFixed(1)}s`);
+  const symbols = rows.map((r) => r.symbol);
+  const completed: { symbol: string; intervals: Record<string, { fetched: number; cached: number }>; runtime_ms: number }[] = [];
+  const failed: { symbol: string; error: string }[] = [];
+
+  console.log(`[warmup-bulk] Starting: ${symbols.length} symbols`);
+
+  // Process 2 symbols at a time to stay under rate limits
+  for (let i = 0; i < symbols.length; i += 2) {
+    const batch = symbols.slice(i, i + 2);
+    const results = await Promise.all(batch.map(warmSymbol));
+
+    for (const r of results) {
+      if (r.error) {
+        failed.push({ symbol: r.symbol, error: r.error });
+        console.log(`[warmup-bulk] ${r.symbol} FAILED: ${r.error}`);
+      } else {
+        completed.push({ symbol: r.symbol, intervals: r.intervals, runtime_ms: r.runtime_ms });
+        console.log(`[warmup-bulk] ${r.symbol} done (${(r.runtime_ms / 1000).toFixed(1)}s) — ${completed.length}/${symbols.length}`);
+      }
+    }
+
+    // Check if approaching Vercel timeout (leave 15s buffer)
+    if (Date.now() - startTime > 280_000) {
+      const remaining = symbols.slice(i + 2);
+      console.log(`[warmup-bulk] Timeout approaching, stopping with ${remaining.length} symbols remaining`);
+      return NextResponse.json({
+        status: "partial",
+        completed: completed.length,
+        failed: failed.length,
+        remaining: remaining.length,
+        remaining_symbols: remaining,
+        results: completed,
+        errors: failed,
+        runtime_ms: Date.now() - startTime,
+        hint: "Re-run ?mode=bulk to continue. Already-cached symbols will be fast on next backtest.",
+      });
+    }
+
+    // Small delay between batches
+    if (i + 2 < symbols.length) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  const runtimeMs = Date.now() - startTime;
+  console.log(`[warmup-bulk] Complete: ${completed.length} warmed, ${failed.length} failed, ${(runtimeMs / 1000).toFixed(1)}s`);
 
   return NextResponse.json({
-    symbol,
-    intervals: results,
-    runtime_ms: elapsed,
+    status: "complete",
+    completed: completed.length,
+    failed: failed.length,
+    results: completed,
+    errors: failed.length > 0 ? failed : undefined,
+    runtime_ms: runtimeMs,
   });
 }
