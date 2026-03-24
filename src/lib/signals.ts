@@ -252,8 +252,7 @@ export function detectSignalsWithParams(
   const rsiCrossedBelow48 = ind.prev_rsi >= 48 && ind.rsi < 48;
 
   if (
-    ind.bb_width_ratio < 0.06 &&
-    ind.bb_width_near_min &&
+    ind.bb_width_ratio < 0.08 &&
     crossedBelowBasis &&
     ind.close < ind.ema20 &&
     rsiCrossedBelow48 &&
@@ -343,8 +342,7 @@ export function evaluateNearMisses(ind: SymbolIndicators): NearMissResult[] {
   const crossedBelowBasis = ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis;
   const rsiCrossedBelow48 = ind.prev_rsi >= 48 && ind.rsi < 48;
   const sqShortConds: ConditionResult[] = [
-    { name: "bb_width_lt_0.06", passed: ind.bb_width_ratio < 0.06, actual: ind.bb_width_ratio, threshold: 0.06, op: "lt" },
-    { name: "bb_width_near_min", passed: ind.bb_width_near_min, actual: ind.bb_width_ratio, threshold: 0, op: "lte" },
+    { name: "bb_width_lt_0.08", passed: ind.bb_width_ratio < 0.08, actual: ind.bb_width_ratio, threshold: 0.08, op: "lt" },
     { name: "crossed_below_basis", passed: crossedBelowBasis, actual: ind.close - ind.bb_basis, threshold: 0, op: "lt" },
     { name: "close_lt_ema20", passed: ind.close < ind.ema20, actual: ind.close, threshold: ind.ema20, op: "lt" },
     { name: "rsi_crossed_below_48", passed: rsiCrossedBelow48, actual: ind.rsi, threshold: 48, op: "lt" },
