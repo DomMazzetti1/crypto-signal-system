@@ -181,13 +181,22 @@ async function fetchFromBybit(symbol: string, interval: string, target: number, 
   return Array.from(allCandles.values()).sort((a, b) => a.startTime - b.startTime);
 }
 
-async function fetchKlinesPaginated(symbol: string, interval: string, target?: number): Promise<Kline[]> {
+async function fetchKlinesPaginated(symbol: string, interval: string, target?: number, cacheOnly?: boolean): Promise<Kline[]> {
   const totalNeeded = target ?? TARGET_CANDLES[interval] ?? 1000;
-  const now = Date.now();
-  const freshBoundary = now - CACHE_FRESH_MS;
 
   // 1. Read cache
   const cached = await readCache(symbol, interval);
+
+  // Cache-only mode: return whatever we have, no Bybit calls
+  if (cacheOnly) {
+    if (cached.length === 0) {
+      throw new Error(`Cache empty for ${symbol}/${interval} — run /api/backtest/warmup?symbol=${symbol} first`);
+    }
+    return cached;
+  }
+
+  const now = Date.now();
+  const freshBoundary = now - CACHE_FRESH_MS;
   const stableCandles = cached.filter((c) => c.startTime < freshBoundary);
   const staleCount = cached.length - stableCandles.length;
 
@@ -362,20 +371,19 @@ interface RankedVariant {
 // ── Shared data fetcher + precompute ─────────────────────
 
 async function fetchAndPrecompute(
-  symbols: string[]
-): Promise<{ precomputed: Map<string, BarFrame[]>; errors: string[]; cacheHits: number; cacheMisses: number }> {
+  symbols: string[],
+  cacheOnly?: boolean
+): Promise<{ precomputed: Map<string, BarFrame[]>; errors: string[] }> {
   const precomputed = new Map<string, BarFrame[]>();
   const errors: string[] = [];
   let fetched = 0;
-  let cacheHits = 0;
-  let cacheMisses = 0;
 
   await runWithConcurrency(symbols, MAX_CONCURRENT, async (symbol) => {
     try {
       const [c1h, c4h, c1d] = await Promise.all([
-        fetchKlinesPaginated(symbol, "60"),
-        fetchKlinesPaginated(symbol, "240"),
-        fetchKlinesPaginated(symbol, "D"),
+        fetchKlinesPaginated(symbol, "60", undefined, cacheOnly),
+        fetchKlinesPaginated(symbol, "240", undefined, cacheOnly),
+        fetchKlinesPaginated(symbol, "D", undefined, cacheOnly),
       ]);
 
       const frames = precomputeBarFrames(c1h, c4h, c1d);
@@ -389,7 +397,7 @@ async function fetchAndPrecompute(
     }
   });
 
-  return { precomputed, errors, cacheHits, cacheMisses };
+  return { precomputed, errors };
 }
 
 async function resolveSymbols(body: { symbols?: string[] }): Promise<string[] | NextResponse> {
@@ -416,6 +424,7 @@ export async function POST(request: NextRequest) {
     symbols?: string[];
     baseline?: SignalParams;
     relaxed?: SignalParams;
+    cache_only?: boolean;
   };
   try {
     body = await request.json();
@@ -427,18 +436,20 @@ export async function POST(request: NextRequest) {
   if (resolved instanceof NextResponse) return resolved;
   const symbols = resolved;
 
+  const cacheOnly = body.cache_only ?? false;
+
   // Route to matrix mode
   if (body.mode === "matrix") {
-    return runMatrix(symbols, startTime);
+    return runMatrix(symbols, startTime, cacheOnly);
   }
 
   // Default: two-variant compare (existing behavior)
   const baselineParams = body.baseline ?? DEFAULT_SIGNAL_PARAMS;
   const relaxedParams = body.relaxed ?? { mr_adx_1h_max: 25, mr_adx_4h_max: 30 };
 
-  console.log(`[adx-compare] Starting: ${symbols.length} symbols, baseline=${JSON.stringify(baselineParams)}, relaxed=${JSON.stringify(relaxedParams)}`);
+  console.log(`[adx-compare] Starting: ${symbols.length} symbols, cache_only=${cacheOnly}, baseline=${JSON.stringify(baselineParams)}, relaxed=${JSON.stringify(relaxedParams)}`);
 
-  const { precomputed, errors } = await fetchAndPrecompute(symbols);
+  const { precomputed, errors } = await fetchAndPrecompute(symbols, cacheOnly);
   const totalFrames = Array.from(precomputed.values()).reduce((s, f) => s + f.length, 0);
 
   console.log(`[adx-compare] Data fetched: ${precomputed.size} symbols, ${totalFrames} bar frames precomputed, ${errors.length} errors. Running variants...`);
@@ -479,10 +490,10 @@ export async function POST(request: NextRequest) {
 
 // ── Matrix mode ──────────────────────────────────────────
 
-async function runMatrix(symbols: string[], startTime: number): Promise<NextResponse> {
-  console.log(`[adx-matrix] Starting: ${symbols.length} symbols, ${ADX_MATRIX.length} variants`);
+async function runMatrix(symbols: string[], startTime: number, cacheOnly?: boolean): Promise<NextResponse> {
+  console.log(`[adx-matrix] Starting: ${symbols.length} symbols, ${ADX_MATRIX.length} variants, cache_only=${!!cacheOnly}`);
 
-  const { precomputed, errors } = await fetchAndPrecompute(symbols);
+  const { precomputed, errors } = await fetchAndPrecompute(symbols, cacheOnly);
   const totalFrames = Array.from(precomputed.values()).reduce((s, f) => s + f.length, 0);
 
   console.log(`[adx-matrix] Data fetched: ${precomputed.size} symbols, ${totalFrames} bar frames precomputed, ${errors.length} errors. Running ${ADX_MATRIX.length} variants...`);
