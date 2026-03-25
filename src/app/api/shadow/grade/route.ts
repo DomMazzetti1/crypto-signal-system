@@ -26,7 +26,7 @@ export async function GET() {
     .lte("candle_time", cutoff)
     .or("baseline_pass.eq.true,relaxed_pass.eq.true")
     .order("candle_time", { ascending: true })
-    .limit(20); // Process max 20 per call to stay within timeout
+    .limit(50); // Process max 50 per call to stay within timeout
 
   if (error) {
     return NextResponse.json({ error: "Failed to fetch pending signals", detail: error.message }, { status: 500 });
@@ -47,7 +47,7 @@ export async function GET() {
     const atrVal = Number(row.atr_1h);
 
     // Validate required fields
-    if (!rawEntry || !atrVal || atrVal <= 0) {
+    if (!Number.isFinite(rawEntry) || !Number.isFinite(atrVal) || rawEntry <= 0 || atrVal <= 0) {
       await supabase.from("shadow_signals")
         .update({ grade_status: "FAILED", graded_at: new Date().toISOString() })
         .eq("id", row.id);
@@ -103,7 +103,7 @@ export async function GET() {
     const outcomeR = computeR(grade);
 
     // Update shadow_signals with graded outcome
-    await supabase.from("shadow_signals")
+    const { error: gradeUpdateError } = await supabase.from("shadow_signals")
       .update({
         grade_status: "GRADED",
         graded_at: new Date().toISOString(),
@@ -122,6 +122,9 @@ export async function GET() {
         bars_to_resolution: grade.bars_to_resolution,
       })
       .eq("id", row.id);
+    if (gradeUpdateError) {
+      console.error(`[shadow/grade] Failed to update graded result for ${row.symbol} ${row.setup_type}:`, gradeUpdateError);
+    }
 
     graded++;
     results.push({
