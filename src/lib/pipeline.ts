@@ -404,7 +404,12 @@ export async function runPipeline(
         decision = "NO_TRADE";
       }
     } catch (err) {
-      console.error("[pipeline] Claude review failed:", err);
+      // EXPLICIT POLICY: if Claude review fails, block the trade.
+      // Rationale: Claude is the final safety gate. Sending trades
+      // without AI review risks unfiltered signals reaching Telegram.
+      console.error("[pipeline] Claude review failed — blocking trade:", err);
+      decision = "NO_TRADE";
+      reasoning = "Claude review unavailable";
     }
   }
 

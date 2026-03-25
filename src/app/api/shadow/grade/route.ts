@@ -48,6 +48,7 @@ export async function GET() {
 
     // Validate required fields
     if (!Number.isFinite(rawEntry) || !Number.isFinite(atrVal) || rawEntry <= 0 || atrVal <= 0) {
+      console.error(`[shadow/grade] Invalid fields for ${row.symbol} ${row.setup_type}: entry=${row.close_price} atr=${row.atr_1h}`);
       await supabase.from("shadow_signals")
         .update({ grade_status: "FAILED", graded_at: new Date().toISOString() })
         .eq("id", row.id);
@@ -66,6 +67,7 @@ export async function GET() {
       const data = await res.json();
 
       if (data.retCode !== 0 || !data.result?.list?.length) {
+        console.error(`[shadow/grade] Bybit kline fetch failed for ${row.symbol} ${row.setup_type}: retCode=${data.retCode}`);
         await supabase.from("shadow_signals")
           .update({ grade_status: "FAILED", graded_at: new Date().toISOString() })
           .eq("id", row.id);
@@ -85,7 +87,8 @@ export async function GET() {
         }))
         .reverse()
         .filter((k: Kline) => k.startTime > candleMs); // Only bars AFTER signal bar
-    } catch {
+    } catch (err) {
+      console.error(`[shadow/grade] Fetch error for ${row.symbol} ${row.setup_type} (candle=${row.candle_time}):`, err);
       await supabase.from("shadow_signals")
         .update({ grade_status: "FAILED", graded_at: new Date().toISOString() })
         .eq("id", row.id);

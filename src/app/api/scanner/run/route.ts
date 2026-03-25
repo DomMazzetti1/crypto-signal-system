@@ -366,18 +366,26 @@ export async function GET() {
           continue;
         }
 
-        // 7b. Idempotency check (PRODUCTION — unchanged)
-        const { data: existing } = await supabase
+        // 7b. Atomic idempotency: attempt insert, skip on conflict.
+        // candle_signals has UNIQUE(symbol, setup_type, candle_start_time).
+        // This eliminates the SELECT-then-INSERT race window.
+        const { error: idempotencyErr } = await supabase
           .from("candle_signals")
+          .insert({
+            symbol,
+            setup_type: sig.type,
+            candle_start_time: candleTime,
+          })
           .select("id")
-          .eq("symbol", symbol)
-          .eq("setup_type", sig.type)
-          .eq("candle_start_time", candleTime)
-          .limit(1)
-          .maybeSingle();
+          .single();
 
-        if (existing) {
-          skippedIdempotency++;
+        if (idempotencyErr) {
+          // 23505 = unique_violation (already processed this candle)
+          if (idempotencyErr.code === "23505") {
+            skippedIdempotency++;
+            continue;
+          }
+          console.error(`[scanner] candle_signals insert failed for ${symbol} ${sig.type}:`, idempotencyErr);
           continue;
         }
 
@@ -412,17 +420,9 @@ export async function GET() {
         const alertId = rawRow?.id ?? null;
         try {
           const result = await runPipeline(alertPayload, alertId);
-          // Only set cooldown and record idempotency on tradable decision
+          // Only set cooldown on tradable decision (idempotency already recorded above)
           if (result.decision === "LONG" || result.decision === "SHORT") {
             await redis.set(cooldownKey, Date.now(), { ex: 8 * 60 * 60 });
-            const { error: candleInsertError } = await supabase.from("candle_signals").insert({
-              symbol,
-              setup_type: sig.type,
-              candle_start_time: candleTime,
-            });
-            if (candleInsertError) {
-              console.error(`[scanner] candle_signals insert failed for ${symbol} ${sig.type}:`, candleInsertError);
-            }
             candidatesQueued++;
             console.log(`[scanner] Queued: ${symbol} ${sig.type} close=${indicators.close}`);
           }
