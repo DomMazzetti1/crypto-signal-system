@@ -190,12 +190,15 @@ export interface SignalParams {
   mr_adx_1h_max: number;
   mr_adx_4h_max: number;
   sq_adx_1h_max: number;
+  /** "event" = production crossover logic, "state" = relaxed state-based logic */
+  sq_trigger_mode: "event" | "state";
 }
 
 export const DEFAULT_SIGNAL_PARAMS: SignalParams = {
   mr_adx_1h_max: 18,
   mr_adx_4h_max: 22,
   sq_adx_1h_max: 30,
+  sq_trigger_mode: "event",
 };
 
 // ── Signal conditions ───────────────────────────────────
@@ -250,15 +253,24 @@ export function detectSignalsWithParams(
   // SQ_LONG — disabled: 20% win rate, -0.20R avg over 41-day backtest
 
   // SQ_SHORT
-  const crossedBelowBasis = ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis;
-  const rsiCrossedBelow48 = ind.prev_rsi >= 48 && ind.rsi < 48;
+  // Event mode (production): requires candle-to-candle crossovers + strong volume
+  // State mode (backtest candidate): requires current state below thresholds + moderate volume
+  const sqBasis = params.sq_trigger_mode === "event"
+    ? (ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis)
+    : (ind.close < ind.bb_basis);
+  const sqRsi = params.sq_trigger_mode === "event"
+    ? (ind.prev_rsi >= 48 && ind.rsi < 48)
+    : (ind.rsi < 48);
+  const sqVolume = params.sq_trigger_mode === "event"
+    ? (ind.volume > ind.sma20_volume * 1.5)
+    : (ind.volume > ind.sma20_volume * 1.2);
 
   if (
     ind.bb_width_ratio < 0.08 &&
-    crossedBelowBasis &&
+    sqBasis &&
     ind.close < ind.ema20 &&
-    rsiCrossedBelow48 &&
-    ind.volume > ind.sma20_volume * 1.5 &&
+    sqRsi &&
+    sqVolume &&
     ind.adx_1h < params.sq_adx_1h_max &&
     ind.close_4h < ind.ema50_4h &&
     ind.candle_range < ind.atr_1h * 2.2 &&
