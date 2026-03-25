@@ -65,32 +65,44 @@ export async function readCache(symbol: string, interval: string): Promise<Kline
 // ── Production guardrails ───────────────────────────────
 
 const isVercel = !!process.env.VERCEL;
-const MAX_SYMBOLS_VERCEL = 5;
+export const MAX_SYMBOLS_VERCEL = 5;
 
 /**
- * Validates request parameters for heavy research endpoints running on Vercel.
- * Returns null if OK, or a NextResponse error to return immediately.
+ * Core guardrail logic, testable with explicit isProduction flag.
+ */
+export function checkProductionLimits(
+  symbols: string[],
+  cacheOnly: boolean,
+  isProduction: boolean
+): { error: string; hint: string } | null {
+  if (!isProduction) return null;
+
+  if (!cacheOnly) {
+    return {
+      error: "cache_only is required on Vercel to avoid Bybit timeouts",
+      hint: 'Add "cache_only": true to your request body. Run locally for live fetches.',
+    };
+  }
+
+  if (symbols.length > MAX_SYMBOLS_VERCEL) {
+    return {
+      error: `Too many symbols (${symbols.length}) for Vercel. Max ${MAX_SYMBOLS_VERCEL} in production.`,
+      hint: "Run locally for full-universe backtests, or pass a smaller symbols array.",
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Route-level wrapper — auto-detects Vercel and returns NextResponse.
  */
 export function enforceProductionLimits(
   symbols: string[],
   cacheOnly: boolean
 ): NextResponse | null {
-  if (!isVercel) return null; // No limits locally
-
-  if (!cacheOnly) {
-    return NextResponse.json({
-      error: "cache_only is required on Vercel to avoid Bybit timeouts",
-      hint: 'Add "cache_only": true to your request body. Run locally for live fetches.',
-    }, { status: 400 });
-  }
-
-  if (symbols.length > MAX_SYMBOLS_VERCEL) {
-    return NextResponse.json({
-      error: `Too many symbols (${symbols.length}) for Vercel. Max ${MAX_SYMBOLS_VERCEL} in production.`,
-      hint: "Run locally for full-universe backtests, or pass a smaller symbols array.",
-    }, { status: 400 });
-  }
-
+  const result = checkProductionLimits(symbols, cacheOnly, isVercel);
+  if (result) return NextResponse.json(result, { status: 400 });
   return null;
 }
 

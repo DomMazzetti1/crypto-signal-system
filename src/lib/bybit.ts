@@ -2,7 +2,7 @@ const BYBIT_BASE = "https://api.bybit.com/v5/market";
 
 // ── Safe JSON parser for Bybit responses ────────────────
 
-async function parseBybitResponse(
+export async function parseBybitResponse(
   res: Response,
   label: string
 ): Promise<{ retCode: number; retMsg: string; result: Record<string, unknown> }> {
