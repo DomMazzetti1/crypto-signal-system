@@ -1,5 +1,28 @@
 const BYBIT_BASE = "https://api.bybit.com/v5/market";
 
+// ── Safe JSON parser for Bybit responses ────────────────
+
+async function parseBybitResponse(
+  res: Response,
+  label: string
+): Promise<{ retCode: number; retMsg: string; result: Record<string, unknown> }> {
+  if (!res.ok) {
+    throw new Error(`${label}: HTTP ${res.status}`);
+  }
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    const preview = (await res.text()).slice(0, 200);
+    throw new Error(`${label}: expected JSON, got ${contentType}: ${preview}`);
+  }
+  let data: { retCode: number; retMsg: string; result: Record<string, unknown> };
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error(`${label}: invalid JSON body`);
+  }
+  return data;
+}
+
 // ── Ticker ──────────────────────────────────────────────
 
 export interface TickerData {
@@ -19,11 +42,12 @@ export async function fetchTicker(symbol: string): Promise<TickerData> {
     `${BYBIT_BASE}/tickers?category=linear&symbol=${symbol}`,
     { cache: "no-store" }
   );
-  const data = await res.json();
-  if (data.retCode !== 0 || !data.result.list.length) {
+  const data = await parseBybitResponse(res, `Ticker ${symbol}`);
+  const list = data.result.list as unknown[];
+  if (data.retCode !== 0 || !list?.length) {
     throw new Error(`Ticker fetch failed for ${symbol}: ${data.retMsg}`);
   }
-  return data.result.list[0];
+  return (list as TickerData[])[0];
 }
 
 // ── Orderbook ───────────────────────────────────────────
@@ -44,14 +68,14 @@ export async function fetchOrderbook(symbol: string): Promise<OrderbookData> {
     `${BYBIT_BASE}/orderbook?category=linear&symbol=${symbol}&limit=20`,
     { cache: "no-store" }
   );
-  const data = await res.json();
+  const data = await parseBybitResponse(res, `Orderbook ${symbol}`);
   if (data.retCode !== 0) {
     throw new Error(`Orderbook fetch failed for ${symbol}: ${data.retMsg}`);
   }
   return {
-    ts: data.result.ts,
-    bids: data.result.b,
-    asks: data.result.a,
+    ts: data.result.ts as number,
+    bids: data.result.b as OrderbookLevel[],
+    asks: data.result.a as OrderbookLevel[],
   };
 }
 
@@ -70,11 +94,11 @@ export async function fetchOIHistory(
     `${BYBIT_BASE}/open-interest?category=linear&symbol=${symbol}&intervalTime=${intervalTime}&limit=2`,
     { cache: "no-store" }
   );
-  const data = await res.json();
+  const data = await parseBybitResponse(res, `OI ${symbol} (${intervalTime})`);
   if (data.retCode !== 0) {
     throw new Error(`OI fetch failed for ${symbol} (${intervalTime}): ${data.retMsg}`);
   }
-  return data.result.list;
+  return data.result.list as OIRecord[];
 }
 
 // ── Derived calculations ────────────────────────────────
@@ -82,7 +106,7 @@ export async function fetchOIHistory(
 export function computeSpreadBps(bid: string, ask: string): number {
   const b = parseFloat(bid);
   const a = parseFloat(ask);
-  if (b === 0 || a === 0) return 0;
+  if (!Number.isFinite(b) || !Number.isFinite(a) || b === 0 || a === 0) return 0;
   const mid = (b + a) / 2;
   return ((a - b) / mid) * 10_000;
 }
@@ -125,13 +149,14 @@ export async function fetchKlines(
     `${BYBIT_BASE}/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${limit}`,
     { cache: "no-store" }
   );
-  const data = await res.json();
+  const data = await parseBybitResponse(res, `Kline ${symbol} (${interval})`);
   if (data.retCode !== 0) {
     throw new Error(`Kline fetch failed for ${symbol} (${interval}): ${data.retMsg}`);
   }
+  const list = data.result.list as string[][];
   // Bybit returns [startTime, open, high, low, close, volume, turnover]
   // Results are newest-first, reverse to chronological order
-  return data.result.list
+  return list
     .map((k: string[]) => ({
       startTime: Number(k[0]),
       open: parseFloat(k[1]),

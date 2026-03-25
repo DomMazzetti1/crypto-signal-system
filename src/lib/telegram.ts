@@ -15,6 +15,13 @@ export interface TelegramMessageInput {
   reasoning: string;
 }
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function formatPrice(price: number): string {
   if (price >= 1000) return price.toFixed(2);
   if (price >= 1) return price.toFixed(4);
@@ -31,10 +38,10 @@ export function buildMessage(input: TelegramMessageInput): string {
 
   const fundingPct = (input.funding_rate * 100).toFixed(4);
   const flags = input.risk_flags.length > 0
-    ? input.risk_flags.join(", ")
+    ? input.risk_flags.map(escapeHtml).join(", ")
     : "none";
 
-  return `${icon} ${input.decision} — $${input.symbol}
+  return `${icon} ${escapeHtml(input.decision)} — $${escapeHtml(input.symbol)}
 
 Entry:  ${formatPrice(input.entry)}
 SL:     ${formatPrice(input.stop)}
@@ -43,13 +50,13 @@ TP2:    ${formatPrice(input.tp2)}
 TP3:    ${formatPrice(input.tp3)}
 
 Confidence: ${input.confidence}/10
-Setup: ${input.setup_type}
-Regime: ${input.btc_regime} / ${input.alt_environment}
+Setup: ${escapeHtml(input.setup_type)}
+Regime: ${escapeHtml(input.btc_regime)} / ${escapeHtml(input.alt_environment)}
 Funding: ${fundingPct}%
 
 Risk: ${flags}
 
-${input.reasoning}`;
+${escapeHtml(input.reasoning)}`;
 }
 
 export async function sendTelegram(text: string): Promise<boolean> {

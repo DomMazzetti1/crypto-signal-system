@@ -108,7 +108,7 @@ export function gradeSignal(
 
 export function computeR(grade: GradeResult): number {
   const risk = Math.abs(grade.entry_price - grade.stop_loss);
-  if (risk === 0) return 0;
+  if (!Number.isFinite(risk) || risk === 0) return 0;
   if (grade.hit_tp3) return Math.abs(grade.tp3 - grade.entry_price) / risk;
   if (grade.hit_tp2) return Math.abs(grade.tp2 - grade.entry_price) / risk;
   if (grade.hit_tp1) return Math.abs(grade.tp1 - grade.entry_price) / risk;

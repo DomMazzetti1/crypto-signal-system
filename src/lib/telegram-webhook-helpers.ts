@@ -42,7 +42,18 @@ export async function downloadPhoto(
     return null;
   }
 
+  // Reject files larger than 5MB to prevent OOM
+  const contentLength = Number(downloadRes.headers.get("content-length") ?? 0);
+  if (contentLength > 5 * 1024 * 1024) {
+    console.error(`[tg-webhook] file too large (${contentLength} bytes), skipping`);
+    return null;
+  }
+
   const arrayBuf = await downloadRes.arrayBuffer();
+  if (arrayBuf.byteLength > 5 * 1024 * 1024) {
+    console.error(`[tg-webhook] downloaded file too large (${arrayBuf.byteLength} bytes), discarding`);
+    return null;
+  }
   const buffer = Buffer.from(arrayBuf);
 
   // Derive MIME from extension

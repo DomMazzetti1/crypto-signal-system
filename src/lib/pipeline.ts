@@ -140,6 +140,19 @@ export async function runPipeline(
   const markPrice = parseFloat(ticker.markPrice);
   const turnover24h = parseFloat(ticker.turnover24h);
   const fundingRate = parseFloat(ticker.fundingRate);
+
+  if (!Number.isFinite(markPrice) || !Number.isFinite(turnover24h)) {
+    console.error(`[pipeline] Invalid ticker values for ${alert.symbol}: markPrice=${ticker.markPrice}, turnover24h=${ticker.turnover24h}`);
+    return {
+      status: "error",
+      symbol: alert.symbol,
+      decision: "NO_TRADE",
+      gate_a: { passed: false, quality: "low", reject_reason: "Invalid ticker data (NaN)" },
+      error: "Invalid ticker data (NaN)",
+      http_status: 502,
+    };
+  }
+
   const spreadBps = computeSpreadBps(ticker.bid1Price, ticker.ask1Price);
   const bookDepthBidUsd = computeBookDepthUsd(orderbook.bids, markPrice);
   const bookDepthAskUsd = computeBookDepthUsd(orderbook.asks, markPrice);
@@ -166,7 +179,9 @@ export async function runPipeline(
       mark_price: markPrice,
       index_price: parseFloat(ticker.indexPrice),
       funding_rate: fundingRate,
-      next_funding_time: new Date(Number(ticker.nextFundingTime)).toISOString(),
+      next_funding_time: Number.isFinite(Number(ticker.nextFundingTime))
+        ? new Date(Number(ticker.nextFundingTime)).toISOString()
+        : null,
       open_interest: parseFloat(ticker.openInterest),
       open_interest_value: parseFloat(ticker.openInterestValue),
       turnover_24h: turnover24h,
@@ -329,7 +344,7 @@ export async function runPipeline(
       .select("id")
       .eq("is_production", true)
       .limit(1)
-      .single();
+      .maybeSingle();
 
     promptVersionId = promptRow?.id ?? null;
 

@@ -93,6 +93,7 @@ export function computeHTFTrend(candles: Kline[]): HTFTrendResult {
 
 export function latestATR(candles: Kline[], period: number = 14): number {
   const atrValues = atr(candles, period);
+  if (atrValues.length === 0) return 0;
   return atrValues[atrValues.length - 1];
 }
 

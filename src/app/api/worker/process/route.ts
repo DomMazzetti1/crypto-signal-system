@@ -29,7 +29,7 @@ export async function POST() {
     .contains("payload", { symbol: alert.symbol, type: alert.type })
     .order("received_at", { ascending: true })
     .limit(1)
-    .single();
+    .maybeSingle();
 
   const alertId: string | null = rawRow?.id ?? null;
 
