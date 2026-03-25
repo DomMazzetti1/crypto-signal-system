@@ -214,40 +214,56 @@ export async function GET() {
       metricSamples.volume_sma_ratio.push(indicators.sma20_volume > 0 ? indicators.volume / indicators.sma20_volume : 0);
       metricSamples.bb_width_ratio.push(indicators.bb_width_ratio);
 
-      // 5c. SQ_SHORT ADX shadow comparison (strict=15 vs production=30)
-      // Runs for every symbol, not just those that pass baseline detection.
-      const sqStrictParams = { ...DEFAULT_SIGNAL_PARAMS, sq_adx_1h_max: 15 };
+      // 5c. SQ shadow comparisons
+      // Run all shadow variants from the same indicators, before production detection.
+      const candleTimeIso = new Date(indicators.candle_start_time).toISOString();
       const baselineSigs = detectSignals(symbol, indicators);
-      const strictSigs = detectSignalsWithParams(symbol, indicators, sqStrictParams);
 
-      const baselineSQ = baselineSigs.some(s => s.type === "SQ_SHORT");
-      const strictSQ = strictSigs.some(s => s.type === "SQ_SHORT");
+      // Shadow 1: ADX threshold (strict=15 vs production=30)
+      const sqAdxStrictParams = { ...DEFAULT_SIGNAL_PARAMS, sq_adx_1h_max: 15 };
+      const adxStrictSigs = detectSignalsWithParams(symbol, indicators, sqAdxStrictParams);
+      const baselineSQ_adx = baselineSigs.some(s => s.type === "SQ_SHORT");
+      const strictSQ_adx = adxStrictSigs.some(s => s.type === "SQ_SHORT");
 
-      // Log when there's a difference (baseline fires but strict wouldn't, or vice versa)
-      if (baselineSQ || strictSQ) {
-        const candleTime = new Date(indicators.candle_start_time).toISOString();
-        const { error: sqShadowErr } = await supabase.from("shadow_signals").upsert({
-          symbol,
-          setup_type: "SQ_SHORT_ADX_SHADOW",
-          candle_time: candleTime,
-          regime: "n/a",
-          trend_4h: "n/a",
-          rsi: indicators.rsi,
-          adx_1h: indicators.adx_1h,
-          volume: indicators.volume,
-          sma20_volume: indicators.sma20_volume,
-          close_price: indicators.close,
-          atr_1h: indicators.atr_1h,
-          baseline_pass: baselineSQ,
-          baseline_block_reason: baselineSQ ? null : `adx_1h=${round2(indicators.adx_1h)} (prod threshold 30)`,
-          relaxed_pass: strictSQ,
-          relaxed_block_reason: strictSQ ? null : `adx_1h=${round2(indicators.adx_1h)} >= 15 (strict threshold)`,
-          shadow_only: baselineSQ && !strictSQ,
+      if (baselineSQ_adx || strictSQ_adx) {
+        const { error: sqAdxErr } = await supabase.from("shadow_signals").upsert({
+          symbol, setup_type: "SQ_SHORT_ADX_SHADOW", candle_time: candleTimeIso,
+          regime: "n/a", trend_4h: "n/a",
+          rsi: indicators.rsi, adx_1h: indicators.adx_1h,
+          volume: indicators.volume, sma20_volume: indicators.sma20_volume,
+          close_price: indicators.close, atr_1h: indicators.atr_1h,
+          baseline_pass: baselineSQ_adx,
+          baseline_block_reason: baselineSQ_adx ? null : `adx_1h=${round2(indicators.adx_1h)} (prod threshold 30)`,
+          relaxed_pass: strictSQ_adx,
+          relaxed_block_reason: strictSQ_adx ? null : `adx_1h=${round2(indicators.adx_1h)} >= 15 (strict threshold)`,
+          shadow_only: baselineSQ_adx && !strictSQ_adx,
           baseline_decision: null,
         }, { onConflict: "symbol,setup_type,candle_time" });
-        if (sqShadowErr) {
-          console.error(`[scanner] SQ shadow upsert failed for ${symbol}:`, sqShadowErr);
-        }
+        if (sqAdxErr) console.error(`[scanner] SQ ADX shadow upsert failed for ${symbol}:`, sqAdxErr);
+      }
+
+      // Shadow 2: Trigger mode (event vs state, both with 1.5x volume)
+      const sqStateParams = { ...DEFAULT_SIGNAL_PARAMS, sq_trigger_mode: "state" as const };
+      const stateSigs = detectSignalsWithParams(symbol, indicators, sqStateParams);
+      const eventSQ = baselineSigs.some(s => s.type === "SQ_SHORT");
+      const stateSQ = stateSigs.some(s => s.type === "SQ_SHORT");
+
+      if (eventSQ || stateSQ) {
+        const volRatio = indicators.sma20_volume > 0 ? round2(indicators.volume / indicators.sma20_volume) : 0;
+        const { error: sqTrigErr } = await supabase.from("shadow_signals").upsert({
+          symbol, setup_type: "SQ_SHORT_TRIGGER_SHADOW", candle_time: candleTimeIso,
+          regime: "n/a", trend_4h: "n/a",
+          rsi: indicators.rsi, adx_1h: indicators.adx_1h,
+          volume: indicators.volume, sma20_volume: indicators.sma20_volume,
+          close_price: indicators.close, atr_1h: indicators.atr_1h,
+          baseline_pass: eventSQ,
+          baseline_block_reason: eventSQ ? null : "event trigger not met",
+          relaxed_pass: stateSQ,
+          relaxed_block_reason: stateSQ ? null : `state trigger not met (rsi=${round2(indicators.rsi)}, vol_ratio=${volRatio})`,
+          shadow_only: stateSQ && !eventSQ,
+          baseline_decision: null,
+        }, { onConflict: "symbol,setup_type,candle_time" });
+        if (sqTrigErr) console.error(`[scanner] SQ trigger shadow upsert failed for ${symbol}:`, sqTrigErr);
       }
 
       // 6. Detect signals (production path — unchanged)
