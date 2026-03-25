@@ -192,6 +192,8 @@ export interface SignalParams {
   sq_adx_1h_max: number;
   /** "event" = production crossover logic, "state" = relaxed state-based logic */
   sq_trigger_mode: "event" | "state";
+  /** SQ volume multiplier vs SMA20. Production = 1.5 */
+  sq_volume_mult: number;
 }
 
 export const DEFAULT_SIGNAL_PARAMS: SignalParams = {
@@ -199,6 +201,7 @@ export const DEFAULT_SIGNAL_PARAMS: SignalParams = {
   mr_adx_4h_max: 22,
   sq_adx_1h_max: 30,
   sq_trigger_mode: "event",
+  sq_volume_mult: 1.5,
 };
 
 // ── Signal conditions ───────────────────────────────────
@@ -261,9 +264,7 @@ export function detectSignalsWithParams(
   const sqRsi = params.sq_trigger_mode === "event"
     ? (ind.prev_rsi >= 48 && ind.rsi < 48)
     : (ind.rsi < 48);
-  const sqVolume = params.sq_trigger_mode === "event"
-    ? (ind.volume > ind.sma20_volume * 1.5)
-    : (ind.volume > ind.sma20_volume * 1.2);
+  const sqVolume = ind.volume > ind.sma20_volume * params.sq_volume_mult;
 
   if (
     ind.bb_width_ratio < 0.08 &&

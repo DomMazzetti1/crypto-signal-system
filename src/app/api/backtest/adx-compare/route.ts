@@ -284,12 +284,12 @@ function runVariant(
 // ── ADX sensitivity matrix ───────────────────────────────
 
 const ADX_MATRIX: { label: string; params: SignalParams }[] = [
-  { label: "baseline (18/22)", params: { mr_adx_1h_max: 18, mr_adx_4h_max: 22, sq_adx_1h_max: 30, sq_trigger_mode: "event" } },
-  { label: "v1 (20/22)",       params: { mr_adx_1h_max: 20, mr_adx_4h_max: 22, sq_adx_1h_max: 30, sq_trigger_mode: "event" } },
-  { label: "v2 (22/22)",       params: { mr_adx_1h_max: 22, mr_adx_4h_max: 22, sq_adx_1h_max: 30, sq_trigger_mode: "event" } },
-  { label: "v3 (18/24)",       params: { mr_adx_1h_max: 18, mr_adx_4h_max: 24, sq_adx_1h_max: 30, sq_trigger_mode: "event" } },
-  { label: "v4 (18/26)",       params: { mr_adx_1h_max: 18, mr_adx_4h_max: 26, sq_adx_1h_max: 30, sq_trigger_mode: "event" } },
-  { label: "v5 (20/24)",       params: { mr_adx_1h_max: 20, mr_adx_4h_max: 24, sq_adx_1h_max: 30, sq_trigger_mode: "event" } },
+  { label: "baseline (18/22)", params: { mr_adx_1h_max: 18, mr_adx_4h_max: 22, sq_adx_1h_max: 30, sq_trigger_mode: "event", sq_volume_mult: 1.5 } },
+  { label: "v1 (20/22)",       params: { mr_adx_1h_max: 20, mr_adx_4h_max: 22, sq_adx_1h_max: 30, sq_trigger_mode: "event", sq_volume_mult: 1.5 } },
+  { label: "v2 (22/22)",       params: { mr_adx_1h_max: 22, mr_adx_4h_max: 22, sq_adx_1h_max: 30, sq_trigger_mode: "event", sq_volume_mult: 1.5 } },
+  { label: "v3 (18/24)",       params: { mr_adx_1h_max: 18, mr_adx_4h_max: 24, sq_adx_1h_max: 30, sq_trigger_mode: "event", sq_volume_mult: 1.5 } },
+  { label: "v4 (18/26)",       params: { mr_adx_1h_max: 18, mr_adx_4h_max: 26, sq_adx_1h_max: 30, sq_trigger_mode: "event", sq_volume_mult: 1.5 } },
+  { label: "v5 (20/24)",       params: { mr_adx_1h_max: 20, mr_adx_4h_max: 24, sq_adx_1h_max: 30, sq_trigger_mode: "event", sq_volume_mult: 1.5 } },
 ];
 
 interface VariantDelta {
@@ -394,7 +394,7 @@ export async function POST(request: NextRequest) {
 
   // Default: two-variant compare (existing behavior)
   const baselineParams = body.baseline ?? DEFAULT_SIGNAL_PARAMS;
-  const relaxedParams = body.relaxed ?? { mr_adx_1h_max: 25, mr_adx_4h_max: 30, sq_adx_1h_max: 30, sq_trigger_mode: "event" as const };
+  const relaxedParams = body.relaxed ?? { mr_adx_1h_max: 25, mr_adx_4h_max: 30, sq_adx_1h_max: 30, sq_trigger_mode: "event" as const, sq_volume_mult: 1.5 };
 
   console.log(`[adx-compare] Starting: ${symbols.length} symbols, cache_only=${cacheOnly}, baseline=${JSON.stringify(baselineParams)}, relaxed=${JSON.stringify(relaxedParams)}`);
 
