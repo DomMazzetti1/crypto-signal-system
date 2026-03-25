@@ -99,8 +99,8 @@ export async function GET(req: Request) {
         daily_veto: { ema50_1d: ind.ema50_1d, atr_1d: ind.atr_1d, pass: ind.ema50_1d === null || ind.close < ind.ema50_1d + 2.2 * ind.atr_1d },
       },
       SQ_SHORT: {
-        bb_width_lt_006: { value: ind.bb_width_ratio, threshold: 0.06, pass: ind.bb_width_ratio < 0.06 },
-        bb_width_near_min: { value: ind.bb_width_near_min, pass: ind.bb_width_near_min },
+        bb_width_lt_008: { value: ind.bb_width_ratio, threshold: 0.08, pass: ind.bb_width_ratio < 0.08 },
+        bb_width_near_min_legacy: { value: ind.bb_width_near_min, note: "no longer used in detection" },
         crossed_below_basis: { prev_close: ind.prev_close, prev_bb_basis: ind.prev_bb_basis, close: ind.close, bb_basis: ind.bb_basis, pass: ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis },
         close_lt_ema20: { value: ind.close, threshold: ind.ema20, pass: ind.close < ind.ema20 },
         rsi_crossed_below_48: { prev_rsi: ind.prev_rsi, rsi: ind.rsi, pass: ind.prev_rsi >= 48 && ind.rsi < 48 },
