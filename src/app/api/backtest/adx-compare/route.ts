@@ -9,6 +9,7 @@ import {
   DEFAULT_SIGNAL_PARAMS,
 } from "@/lib/signals";
 import { gradeSignal, computeR, GradeResult } from "@/lib/grade-signal";
+import { runWithConcurrency, readCache, enforceProductionLimits, round } from "@/lib/backtest-utils";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -56,63 +57,7 @@ interface GradedSignal {
 
 // ── Helpers ──────────────────────────────────────────────
 
-function round(n: number, dp: number): number {
-  const f = 10 ** dp;
-  return Math.round(n * f) / f;
-}
-
-async function runWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results: R[] = [];
-  let index = 0;
-  async function worker() {
-    while (index < items.length) {
-      const i = index++;
-      results[i] = await fn(items[i]);
-    }
-  }
-  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
-  await Promise.all(workers);
-  return results;
-}
-
-// ── Cache-aware candle fetch (matches batch/route.ts pattern) ─
-
-async function readCache(symbol: string, interval: string): Promise<Kline[]> {
-  const supabase = getSupabase();
-  const rows: Kline[] = [];
-  let offset = 0;
-  const PAGE = 1000;
-
-  while (true) {
-    const { data, error } = await supabase
-      .from("candle_cache")
-      .select("start_time, open, high, low, close, volume")
-      .eq("symbol", symbol)
-      .eq("interval", interval)
-      .order("start_time", { ascending: true })
-      .range(offset, offset + PAGE - 1);
-
-    if (error || !data) break;
-    for (const r of data) {
-      rows.push({
-        startTime: new Date(r.start_time).getTime(),
-        open: Number(r.open),
-        high: Number(r.high),
-        low: Number(r.low),
-        close: Number(r.close),
-        volume: Number(r.volume),
-      });
-    }
-    if (data.length < PAGE) break;
-    offset += PAGE;
-  }
-
-  return rows;
-}
+// ── Cache-aware candle fetch ─────────────────────────────
 
 async function writeCache(symbol: string, interval: string, candles: Kline[]): Promise<void> {
   if (candles.length === 0) return;
@@ -437,6 +382,10 @@ export async function POST(request: NextRequest) {
   const symbols = resolved;
 
   const cacheOnly = body.cache_only ?? false;
+
+  // Production guardrails
+  const guardrailErr = enforceProductionLimits(symbols, cacheOnly);
+  if (guardrailErr) return guardrailErr;
 
   // Route to matrix mode
   if (body.mode === "matrix") {

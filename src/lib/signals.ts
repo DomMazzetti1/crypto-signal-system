@@ -349,7 +349,7 @@ export function evaluateNearMisses(ind: SymbolIndicators): NearMissResult[] {
     { name: "close_lt_ema20", passed: ind.close < ind.ema20, actual: ind.close, threshold: ind.ema20, op: "lt" },
     { name: "rsi_crossed_below_48", passed: rsiCrossedBelow48, actual: ind.rsi, threshold: 48, op: "lt" },
     { name: "volume_gt_1.5x_sma", passed: ind.volume > ind.sma20_volume * 1.5, actual: ind.sma20_volume > 0 ? ind.volume / ind.sma20_volume : 0, threshold: 1.5, op: "gt" },
-    { name: "adx_1h_lt_30", passed: ind.adx_1h < 30, actual: ind.adx_1h, threshold: 30, op: "lt" },
+    { name: `adx_1h_lt_${DEFAULT_SIGNAL_PARAMS.sq_adx_1h_max}`, passed: ind.adx_1h < DEFAULT_SIGNAL_PARAMS.sq_adx_1h_max, actual: ind.adx_1h, threshold: DEFAULT_SIGNAL_PARAMS.sq_adx_1h_max, op: "lt" },
     { name: "close_4h_lt_ema50_4h", passed: ind.close_4h < ind.ema50_4h, actual: ind.close_4h, threshold: ind.ema50_4h, op: "lt" },
     { name: "range_lt_2.2x_atr", passed: ind.candle_range < ind.atr_1h * 2.2, actual: ind.atr_1h > 0 ? ind.candle_range / ind.atr_1h : 0, threshold: 2.2, op: "lt" },
     { name: "close_near_ema20", passed: Math.abs(ind.close - ind.ema20) < ind.atr_1h * 1.5, actual: ind.atr_1h > 0 ? Math.abs(ind.close - ind.ema20) / ind.atr_1h : 0, threshold: 1.5, op: "lt" },

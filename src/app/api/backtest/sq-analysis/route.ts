@@ -3,6 +3,7 @@ import { getSupabase } from "@/lib/supabase";
 import { Kline } from "@/lib/bybit";
 import { computeIndicators, detectSignals } from "@/lib/signals";
 import { gradeSignal, computeR, GradeResult } from "@/lib/grade-signal";
+import { runWithConcurrency, readCache, enforceProductionLimits, round } from "@/lib/backtest-utils";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -41,54 +42,6 @@ interface BucketStats {
 }
 
 // ── Helpers ──────────────────────────────────────────────
-
-function round(n: number, dp: number): number {
-  const f = 10 ** dp;
-  return Math.round(n * f) / f;
-}
-
-async function runWithConcurrency<T, R>(
-  items: T[], limit: number, fn: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results: R[] = [];
-  let index = 0;
-  async function worker() {
-    while (index < items.length) {
-      const i = index++;
-      results[i] = await fn(items[i]);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
-  return results;
-}
-
-async function readCache(symbol: string, interval: string): Promise<Kline[]> {
-  const supabase = getSupabase();
-  const rows: Kline[] = [];
-  let offset = 0;
-  const PAGE = 1000;
-  while (true) {
-    const { data, error } = await supabase
-      .from("candle_cache")
-      .select("start_time, open, high, low, close, volume")
-      .eq("symbol", symbol)
-      .eq("interval", interval)
-      .order("start_time", { ascending: true })
-      .range(offset, offset + PAGE - 1);
-    if (error || !data) break;
-    for (const r of data) {
-      rows.push({
-        startTime: new Date(r.start_time).getTime(),
-        open: Number(r.open), high: Number(r.high),
-        low: Number(r.low), close: Number(r.close),
-        volume: Number(r.volume),
-      });
-    }
-    if (data.length < PAGE) break;
-    offset += PAGE;
-  }
-  return rows;
-}
 
 function candlesUpTo(candles: Kline[], beforeMs: number): Kline[] {
   return candles.filter((c) => c.startTime < beforeMs);
@@ -140,6 +93,10 @@ export async function POST(request: NextRequest) {
     if (error || !rows) return NextResponse.json({ error: "Failed to read universe" }, { status: 500 });
     symbols = rows.map((r) => r.symbol);
   }
+
+  // Production guardrails (this route always reads from cache)
+  const guardrailErr = enforceProductionLimits(symbols, true);
+  if (guardrailErr) return guardrailErr;
 
   const allSignals: SQSignal[] = [];
   const errors: string[] = [];
