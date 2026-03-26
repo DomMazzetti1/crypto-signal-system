@@ -1,17 +1,22 @@
 import { NextResponse } from "next/server";
-import { getSupabase } from "@/lib/supabase";
+import { createClient } from "@supabase/supabase-js";
 import { DEFAULT_SIGNAL_PARAMS } from "@/lib/signals";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 /**
  * GET /api/debug/production-health
  *
  * Quick snapshot of live production signal config, recent signals,
- * and delivery health. Safe to call — read-only.
+ * and delivery health. Uses a fresh Supabase client per request
+ * to avoid stale data from warm serverless instances.
  */
 export async function GET() {
-  const supabase = getSupabase();
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
 
   // Current live config
   const liveConfig = {
