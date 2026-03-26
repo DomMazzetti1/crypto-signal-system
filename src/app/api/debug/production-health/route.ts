@@ -32,21 +32,39 @@ export async function GET() {
   // Recent decisions (last 7 days)
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-  const { data: recentDecisions } = await supabase
+  // Query only columns that exist in the live schema.
+  // Migration 013 (telegram_attempted, telegram_sent, telegram_error, blocked_reason)
+  // may not be applied yet — try with delivery columns first, fall back without.
+  let decisions: Record<string, unknown>[] = [];
+  let hasDeliveryColumns = false;
+
+  const { data: withDelivery, error: delErr } = await supabase
     .from("decisions")
     .select("id, symbol, alert_type, decision, gate_a_passed, gate_b_passed, gate_b_reason, btc_regime, telegram_attempted, telegram_sent, telegram_error, blocked_reason, created_at")
     .gte("created_at", sevenDaysAgo)
     .order("created_at", { ascending: false })
     .limit(20);
 
-  const decisions = recentDecisions ?? [];
+  if (!delErr && withDelivery) {
+    decisions = withDelivery;
+    hasDeliveryColumns = true;
+  } else {
+    // Fall back to base columns only
+    const { data: base } = await supabase
+      .from("decisions")
+      .select("id, symbol, alert_type, decision, gate_a_passed, gate_b_passed, gate_b_reason, btc_regime, created_at")
+      .gte("created_at", sevenDaysAgo)
+      .order("created_at", { ascending: false })
+      .limit(20);
+    decisions = base ?? [];
+  }
 
   // Delivery stats
   const trades = decisions.filter(d => d.decision === "LONG" || d.decision === "SHORT");
   const noTrades = decisions.filter(d => d.decision === "NO_TRADE");
-  const attempted = decisions.filter(d => d.telegram_attempted);
-  const sent = decisions.filter(d => d.telegram_sent);
-  const sendFails = decisions.filter(d => d.telegram_attempted && !d.telegram_sent);
+  const attempted = hasDeliveryColumns ? decisions.filter(d => d.telegram_attempted) : [];
+  const sent = hasDeliveryColumns ? decisions.filter(d => d.telegram_sent) : [];
+  const sendFails = hasDeliveryColumns ? decisions.filter(d => d.telegram_attempted && !d.telegram_sent) : [];
 
   // Recent scanner runs
   const { data: recentRuns } = await supabase

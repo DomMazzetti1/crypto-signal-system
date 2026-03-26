@@ -419,6 +419,10 @@ export async function runPipeline(
   }
 
   // ── 10. Store decision ────────────────────────────────
+  // NOTE: claude columns (prompt_version_id, claude_request, claude_response,
+  // claude_decision, claude_confidence) are omitted because migration 004
+  // has not been applied to the live database. Including non-existent columns
+  // causes the entire insert to fail silently.
   const decisionId = await storeDecision(supabase, {
     snapshot_id: snapshotId,
     alert_id: alertId,
@@ -451,11 +455,6 @@ export async function runPipeline(
     rr_tp2: levels.rr_tp2,
     rr_tp3: levels.rr_tp3,
     cooldown_active: cooldownActive,
-    prompt_version_id: promptVersionId,
-    claude_request: claudeRequest,
-    claude_response: claudeResponse,
-    claude_decision: claudeDecision,
-    claude_confidence: claudeConfidence,
   });
 
   console.log(`[pipeline] Decision stored: ${decisionId} ${alert.symbol} ${decision}`);
