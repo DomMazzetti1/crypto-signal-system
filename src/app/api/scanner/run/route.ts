@@ -266,8 +266,10 @@ export async function GET() {
         if (sqTrigErr) console.error(`[scanner] SQ trigger shadow upsert failed for ${symbol}:`, sqTrigErr);
       }
 
-      // Shadow 3: Hybrid candidate (state trigger + 1.5x vol + 5% below 4H EMA50)
-      const sqHybridParams = { ...DEFAULT_SIGNAL_PARAMS, sq_trigger_mode: "state" as const, sq_4h_distance_pct: 5 };
+      // Shadow 3: Hybrid candidate (state trigger + 1.5x vol, no distance filter at detection)
+      // Records 4H distance as metadata so the status endpoint can bucket by distance threshold.
+      // Uses state trigger with 0% distance to maximize signal capture, then filters in analysis.
+      const sqHybridParams = { ...DEFAULT_SIGNAL_PARAMS, sq_trigger_mode: "state" as const, sq_4h_distance_pct: 0 };
       const hybridSigs = detectSignalsWithParams(symbol, indicators, sqHybridParams);
       const prodSQ = baselineSigs.some(s => s.type === "SQ_SHORT");
       const hybridSQ = hybridSigs.some(s => s.type === "SQ_SHORT");
@@ -279,14 +281,14 @@ export async function GET() {
         const volRatio = indicators.sma20_volume > 0 ? round2(indicators.volume / indicators.sma20_volume) : 0;
         const { error: sqHybridErr } = await supabase.from("shadow_signals").upsert({
           symbol, setup_type: "SQ_SHORT_HYBRID_SHADOW", candle_time: candleTimeIso,
-          regime: "n/a", trend_4h: "n/a",
+          regime: `dist4h=${dist4hPct}%`, trend_4h: "n/a",
           rsi: indicators.rsi, adx_1h: indicators.adx_1h,
           volume: indicators.volume, sma20_volume: indicators.sma20_volume,
           close_price: indicators.close, atr_1h: indicators.atr_1h,
           baseline_pass: prodSQ,
           baseline_block_reason: prodSQ ? null : "event trigger not met",
           relaxed_pass: hybridSQ,
-          relaxed_block_reason: hybridSQ ? null : `hybrid not met (mode=state, dist4h=${dist4hPct}%, vol_ratio=${volRatio})`,
+          relaxed_block_reason: hybridSQ ? null : `state trigger not met (rsi=${round2(indicators.rsi)}, vol_ratio=${volRatio}, dist4h=${dist4hPct}%)`,
           shadow_only: hybridSQ && !prodSQ,
           baseline_decision: null,
         }, { onConflict: "symbol,setup_type,candle_time" });
