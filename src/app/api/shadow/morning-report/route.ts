@@ -1,70 +1,23 @@
 import { NextResponse } from "next/server";
-import { getSupabase } from "@/lib/supabase";
-import { computeShadowSummary, ShadowSummary } from "@/lib/shadow-summary";
+import {
+  computeShadowSummary,
+  computeProductionGradeSummary,
+  computeClaudeStats,
+  ShadowSummary,
+  ProductionGradeSummary,
+  ClaudeReviewerStats,
+} from "@/lib/shadow-summary";
+import { EXPERIMENTS, DECISION_THRESHOLDS } from "@/lib/experiment-registry";
 
 export const dynamic = "force-dynamic";
 
-const EXPERIMENTS = [
-  { key: "adx_shadow", setupType: "SQ_SHORT_ADX_SHADOW", label: "ADX threshold (strict=15 vs prod=30)" },
-  { key: "trigger_shadow", setupType: "SQ_SHORT_TRIGGER_SHADOW", label: "Trigger mode (state vs event)" },
-  { key: "hybrid_shadow", setupType: "SQ_SHORT_HYBRID_SHADOW", label: "Hybrid (state trigger, records 4H distance)" },
-] as const;
+type SectionStatus = "ok" | "error" | "no_table";
 
-type ExperimentKey = typeof EXPERIMENTS[number]["key"];
-
-interface SectionResult {
-  status: "ok" | "error";
+interface ShadowSection {
+  status: SectionStatus;
   label: string;
   message?: string;
   summary?: ShadowSummary;
-}
-
-// ── Production signal summary ────────────────────────────
-
-interface ProductionSummary {
-  total_trades: number;
-  by_setup: Record<string, number>;
-  by_regime: Record<string, number>;
-  recent_trades: { symbol: string; alert_type: string; decision: string; btc_regime: string; created_at: string; rr_tp1: number }[];
-  note: string;
-}
-
-async function computeProductionSummary(): Promise<ProductionSummary> {
-  const supabase = getSupabase();
-
-  const { data: rows, error } = await supabase
-    .from("decisions")
-    .select("symbol, alert_type, decision, btc_regime, created_at, rr_tp1, entry_price, stop_price, tp1_price")
-    .in("decision", ["LONG", "SHORT", "MR_LONG", "MR_SHORT", "SQ_SHORT"])
-    .order("created_at", { ascending: false });
-
-  if (error) throw new Error(`decisions query failed: ${error.message}`);
-
-  const trades = rows ?? [];
-
-  const bySetup: Record<string, number> = {};
-  const byRegime: Record<string, number> = {};
-  for (const t of trades) {
-    const st = t.alert_type ?? "unknown";
-    bySetup[st] = (bySetup[st] || 0) + 1;
-    const reg = t.btc_regime ?? "unknown";
-    byRegime[reg] = (byRegime[reg] || 0) + 1;
-  }
-
-  return {
-    total_trades: trades.length,
-    by_setup: bySetup,
-    by_regime: byRegime,
-    recent_trades: trades.slice(0, 5).map(t => ({
-      symbol: t.symbol,
-      alert_type: t.alert_type,
-      decision: t.decision,
-      btc_regime: t.btc_regime,
-      created_at: t.created_at,
-      rr_tp1: t.rr_tp1,
-    })),
-    note: "Production decisions are not graded (no outcome_r/hit_tp1). Win rate requires manual review or separate grading pipeline.",
-  };
 }
 
 function decisionToVerdict(decision: string): "improving" | "neutral" | "worse" | "insufficient data" {
@@ -75,40 +28,74 @@ function decisionToVerdict(decision: string): "improving" | "neutral" | "worse" 
 }
 
 export async function GET() {
-  const sections: Record<string, SectionResult> = {};
   let hasError = false;
+
+  // ── Shadow experiments ─────────────────────────────────
+
+  const shadowSections: Record<string, ShadowSection> = {};
 
   for (const exp of EXPERIMENTS) {
     try {
-      const summary = await computeShadowSummary(exp.setupType);
-      sections[exp.key] = { status: "ok", label: exp.label, summary };
+      const summary = await computeShadowSummary(exp.setup_type);
+      shadowSections[exp.setup_type] = { status: "ok", label: exp.name, summary };
     } catch (err) {
       hasError = true;
-      sections[exp.key] = {
-        status: "error",
-        label: exp.label,
-        message: String(err).slice(0, 200),
-      };
+      shadowSections[exp.setup_type] = { status: "error", label: exp.name, message: String(err).slice(0, 200) };
     }
   }
 
-  // Build bottom line
-  const verdicts: Record<ExperimentKey, string> = {
-    adx_shadow: "insufficient data",
-    trigger_shadow: "insufficient data",
-    hybrid_shadow: "insufficient data",
-  };
+  // ── Production graded performance ──────────────────────
 
+  let productionSection: { status: SectionStatus; summary?: ProductionGradeSummary; message?: string };
+  try {
+    const prodSummary = await computeProductionGradeSummary();
+    productionSection = { status: "ok", summary: prodSummary };
+  } catch (err) {
+    hasError = true;
+    const msg = String(err);
+    productionSection = {
+      status: msg.includes("Could not find") ? "no_table" : "error",
+      message: msg.includes("Could not find")
+        ? "production_signal_grades table not yet created. Run migration 012."
+        : msg.slice(0, 200),
+    };
+  }
+
+  // ── Claude reviewer stats ──────────────────────────────
+
+  let claudeSection: { status: SectionStatus; stats?: ClaudeReviewerStats; message?: string };
+  try {
+    const stats = await computeClaudeStats();
+    claudeSection = { status: "ok", stats };
+  } catch (err) {
+    hasError = true;
+    claudeSection = { status: "error", message: String(err).slice(0, 200) };
+  }
+
+  // ── Build verdicts and bottom line ─────────────────────
+
+  const verdicts: Record<string, string> = {};
   for (const exp of EXPERIMENTS) {
-    const section = sections[exp.key];
-    if (section.status === "ok" && section.summary) {
-      verdicts[exp.key] = decisionToVerdict(section.summary.decision);
-    }
+    const section = shadowSections[exp.setup_type];
+    verdicts[exp.setup_type] = section.status === "ok" && section.summary
+      ? decisionToVerdict(section.summary.decision)
+      : "insufficient data";
   }
 
   const allInsufficient = Object.values(verdicts).every(v => v === "insufficient data");
   const anyWorse = Object.values(verdicts).some(v => v === "worse");
   const anyImproving = Object.values(verdicts).some(v => v === "improving");
+
+  // Hybrid is the promotion candidate
+  const hybridSection = shadowSections["SQ_SHORT_HYBRID_SHADOW"];
+  const hybridSummary = hybridSection?.status === "ok" ? hybridSection.summary : null;
+  const hybridVerdict = verdicts["SQ_SHORT_HYBRID_SHADOW"] ?? "insufficient data";
+
+  // Production comparison for promotion readiness
+  const prodGraded = productionSection.status === "ok" && productionSection.summary
+    ? productionSection.summary.graded : 0;
+  const prodAvgR = productionSection.status === "ok" && productionSection.summary
+    ? productionSection.summary.avg_r : 0;
 
   let promotionReady = false;
   let note: string;
@@ -117,51 +104,59 @@ export async function GET() {
     note = "All experiments need more graded data before drawing conclusions.";
   } else if (anyWorse) {
     note = "At least one experiment shows degradation vs baseline — hold on promotion.";
-  } else if (anyImproving) {
-    // Check if hybrid (the candidate for promotion) is improving with enough data
-    const hybrid = sections.hybrid_shadow;
-    if (hybrid.status === "ok" && hybrid.summary && hybrid.summary.graded_rows >= 10 && verdicts.hybrid_shadow === "improving") {
+  } else if (anyImproving && hybridVerdict === "improving" && hybridSummary) {
+    const candidateR = hybridSummary.relaxed_pass.avg_r;
+    const meetsMinSample = hybridSummary.graded_rows >= DECISION_THRESHOLDS.min_graded_total;
+    const notWorseThanProd = prodGraded === 0 || candidateR >= prodAvgR - 0.2;
+
+    if (meetsMinSample && notWorseThanProd) {
       promotionReady = true;
       note = "Hybrid candidate showing improvement with sufficient data — consider promoting.";
+    } else if (!meetsMinSample) {
+      note = "Hybrid looks promising but needs more graded samples.";
     } else {
-      note = "Positive signals in experiments but hybrid needs more graded data.";
+      note = "Hybrid improving vs shadow baseline but underperforms production — hold.";
     }
+  } else if (anyImproving) {
+    note = "Positive signals in experiments but hybrid not yet proven.";
   } else {
     note = "Results are roughly equal across experiments — no clear winner yet.";
   }
 
-  // Production signals section
-  let productionSection: { status: "ok" | "error"; label: string; message?: string; summary?: ProductionSummary };
-  try {
-    const prodSummary = await computeProductionSummary();
-    productionSection = { status: "ok", label: "Production accepted trades", summary: prodSummary };
-  } catch (err) {
-    hasError = true;
-    productionSection = { status: "error", label: "Production accepted trades", message: String(err).slice(0, 200) };
+  if (prodGraded > 0) {
+    note += ` Production: ${prodGraded} graded trade(s), avg_r=${prodAvgR}.`;
   }
 
-  // Adjust note to include production context
-  const prodCount = productionSection.status === "ok" && productionSection.summary ? productionSection.summary.total_trades : 0;
-  if (prodCount === 0 && !allInsufficient) {
-    note += " No production trades recorded yet — shadow experiments are the only signal quality data.";
-  } else if (prodCount > 0) {
-    note += ` ${prodCount} production trade(s) recorded.`;
-  }
-
-  const allOk = !hasError;
+  // ── Assemble response ──────────────────────────────────
 
   return NextResponse.json({
-    status: allOk ? "ok" : "partial",
+    status: hasError ? "partial" : "ok",
     generated_at: new Date().toISOString(),
-    production_signals: productionSection,
-    adx_shadow: sections.adx_shadow,
-    trigger_shadow: sections.trigger_shadow,
-    hybrid_shadow: sections.hybrid_shadow,
+    sample_thresholds: DECISION_THRESHOLDS,
+
+    experiments: Object.fromEntries(
+      EXPERIMENTS.map(exp => [exp.setup_type, {
+        ...shadowSections[exp.setup_type],
+        description: exp.description,
+      }])
+    ),
+
+    production: {
+      status: productionSection.status,
+      label: "Production accepted trades (graded)",
+      message: productionSection.message,
+      summary: productionSection.summary,
+    },
+
+    claude_reviewer: {
+      status: claudeSection.status,
+      label: "Claude reviewer behavior",
+      message: claudeSection.message,
+      stats: claudeSection.stats,
+    },
+
     bottom_line: {
-      production_trades: prodCount,
-      adx_shadow: verdicts.adx_shadow,
-      trigger_shadow: verdicts.trigger_shadow,
-      hybrid_shadow: verdicts.hybrid_shadow,
+      verdicts,
       promotion_ready: promotionReady,
       note,
     },
