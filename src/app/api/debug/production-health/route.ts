@@ -19,7 +19,7 @@ export async function GET() {
     sq_volume_mult: DEFAULT_SIGNAL_PARAMS.sq_volume_mult,
     sq_adx_1h_max: DEFAULT_SIGNAL_PARAMS.sq_adx_1h_max,
     sq_4h_distance_pct: DEFAULT_SIGNAL_PARAMS.sq_4h_distance_pct,
-    sq_bb_width_max: 0.04,
+    sq_bb_width_max: 0.12,
     mr_adx_1h_max: DEFAULT_SIGNAL_PARAMS.mr_adx_1h_max,
     mr_adx_4h_max: DEFAULT_SIGNAL_PARAMS.mr_adx_4h_max,
   };

@@ -270,7 +270,7 @@ export function detectSignalsWithParams(
   const sqVolume = ind.volume > ind.sma20_volume * params.sq_volume_mult;
 
   if (
-    ind.bb_width_ratio < 0.04 &&  // tightened from 0.08 for data collection — squeeze only
+    ind.bb_width_ratio < 0.12 &&  // loosened from 0.08 for data collection
     sqBasis &&
     ind.close < ind.ema20 &&
     sqRsi &&
@@ -361,7 +361,7 @@ export function evaluateNearMisses(ind: SymbolIndicators): NearMissResult[] {
   const crossedBelowBasis = ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis;
   const rsiCrossedBelow48 = ind.prev_rsi >= 48 && ind.rsi < 48;
   const sqShortConds: ConditionResult[] = [
-    { name: "bb_width_lt_0.04", passed: ind.bb_width_ratio < 0.04, actual: ind.bb_width_ratio, threshold: 0.04, op: "lt" },
+    { name: "bb_width_lt_0.12", passed: ind.bb_width_ratio < 0.12, actual: ind.bb_width_ratio, threshold: 0.12, op: "lt" },
     { name: "crossed_below_basis", passed: crossedBelowBasis, actual: ind.close - ind.bb_basis, threshold: 0, op: "lt" },
     { name: "close_lt_ema20", passed: ind.close < ind.ema20, actual: ind.close, threshold: ind.ema20, op: "lt" },
     { name: "rsi_crossed_below_48", passed: rsiCrossedBelow48, actual: ind.rsi, threshold: 48, op: "lt" },
