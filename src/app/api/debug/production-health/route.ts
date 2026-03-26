@@ -19,6 +19,7 @@ export async function GET() {
     sq_volume_mult: DEFAULT_SIGNAL_PARAMS.sq_volume_mult,
     sq_adx_1h_max: DEFAULT_SIGNAL_PARAMS.sq_adx_1h_max,
     sq_4h_distance_pct: DEFAULT_SIGNAL_PARAMS.sq_4h_distance_pct,
+    sq_bb_width_max: 0.04,
     mr_adx_1h_max: DEFAULT_SIGNAL_PARAMS.mr_adx_1h_max,
     mr_adx_4h_max: DEFAULT_SIGNAL_PARAMS.mr_adx_4h_max,
   };
@@ -28,7 +29,7 @@ export async function GET() {
 
   const { data: recentDecisions } = await supabase
     .from("decisions")
-    .select("id, symbol, alert_type, decision, gate_a_passed, gate_b_passed, gate_b_reason, claude_decision, claude_confidence, btc_regime, telegram_attempted, telegram_sent, telegram_error, blocked_reason, created_at")
+    .select("id, symbol, alert_type, decision, gate_a_passed, gate_b_passed, gate_b_reason, btc_regime, telegram_attempted, telegram_sent, telegram_error, blocked_reason, created_at")
     .gte("created_at", sevenDaysAgo)
     .order("created_at", { ascending: false })
     .limit(20);
@@ -81,7 +82,6 @@ export async function GET() {
       gate_a: d.gate_a_passed,
       gate_b: d.gate_b_passed,
       gate_b_reason: d.gate_b_reason,
-      claude: d.claude_decision,
       telegram_sent: d.telegram_sent,
       blocked: d.blocked_reason,
       created_at: d.created_at,

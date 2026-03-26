@@ -203,7 +203,7 @@ export const DEFAULT_SIGNAL_PARAMS: SignalParams = {
   mr_adx_4h_max: 22,
   sq_adx_1h_max: 30,
   sq_trigger_mode: "state",  // promoted from "event" — increases SQ signal throughput
-  sq_volume_mult: 1.5,
+  sq_volume_mult: 1.0,      // loosened from 1.5 for data collection (no real capital at risk)
   sq_4h_distance_pct: 0,
 };
 
@@ -270,7 +270,7 @@ export function detectSignalsWithParams(
   const sqVolume = ind.volume > ind.sma20_volume * params.sq_volume_mult;
 
   if (
-    ind.bb_width_ratio < 0.08 &&
+    ind.bb_width_ratio < 0.04 &&  // tightened from 0.08 for data collection — squeeze only
     sqBasis &&
     ind.close < ind.ema20 &&
     sqRsi &&
@@ -361,7 +361,7 @@ export function evaluateNearMisses(ind: SymbolIndicators): NearMissResult[] {
   const crossedBelowBasis = ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis;
   const rsiCrossedBelow48 = ind.prev_rsi >= 48 && ind.rsi < 48;
   const sqShortConds: ConditionResult[] = [
-    { name: "bb_width_lt_0.08", passed: ind.bb_width_ratio < 0.08, actual: ind.bb_width_ratio, threshold: 0.08, op: "lt" },
+    { name: "bb_width_lt_0.04", passed: ind.bb_width_ratio < 0.04, actual: ind.bb_width_ratio, threshold: 0.04, op: "lt" },
     { name: "crossed_below_basis", passed: crossedBelowBasis, actual: ind.close - ind.bb_basis, threshold: 0, op: "lt" },
     { name: "close_lt_ema20", passed: ind.close < ind.ema20, actual: ind.close, threshold: ind.ema20, op: "lt" },
     { name: "rsi_crossed_below_48", passed: rsiCrossedBelow48, actual: ind.rsi, threshold: 48, op: "lt" },
