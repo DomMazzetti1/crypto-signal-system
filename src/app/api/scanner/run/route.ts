@@ -411,26 +411,21 @@ export async function GET() {
           continue;
         }
 
-        // 7b. Atomic idempotency: attempt insert, skip on conflict.
-        // candle_signals has UNIQUE(symbol, setup_type, candle_start_time).
-        // This eliminates the SELECT-then-INSERT race window.
-        const { error: idempotencyErr } = await supabase
+        // 7b. Idempotency check: have we already processed this candle?
+        // Uses SELECT first. The actual idempotency insert happens AFTER
+        // a successful pipeline trade decision, to avoid consuming the
+        // signal if the pipeline fails or Claude blocks it.
+        const { data: existing } = await supabase
           .from("candle_signals")
-          .insert({
-            symbol,
-            setup_type: sig.type,
-            candle_start_time: candleTime,
-          })
           .select("id")
-          .single();
+          .eq("symbol", symbol)
+          .eq("setup_type", sig.type)
+          .eq("candle_start_time", candleTime)
+          .limit(1)
+          .maybeSingle();
 
-        if (idempotencyErr) {
-          // 23505 = unique_violation (already processed this candle)
-          if (idempotencyErr.code === "23505") {
-            skippedIdempotency++;
-            continue;
-          }
-          console.error(`[scanner] candle_signals insert failed for ${symbol} ${sig.type}:`, idempotencyErr);
+        if (existing) {
+          skippedIdempotency++;
           continue;
         }
 
@@ -465,9 +460,15 @@ export async function GET() {
         const alertId = rawRow?.id ?? null;
         try {
           const result = await runPipeline(alertPayload, alertId);
-          // Only set cooldown on tradable decision (idempotency already recorded above)
+          // Only set cooldown + record idempotency on tradable decision
           if (result.decision === "LONG" || result.decision === "SHORT") {
             await redis.set(cooldownKey, Date.now(), { ex: 8 * 60 * 60 });
+            // Atomic idempotency insert (ON CONFLICT = already recorded by a parallel run)
+            await supabase.from("candle_signals").upsert({
+              symbol,
+              setup_type: sig.type,
+              candle_start_time: candleTime,
+            }, { onConflict: "symbol,setup_type,candle_start_time", ignoreDuplicates: true });
             candidatesQueued++;
             console.log(`[scanner] Queued: ${symbol} ${sig.type} close=${indicators.close}`);
           }

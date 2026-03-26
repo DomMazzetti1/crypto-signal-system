@@ -287,16 +287,22 @@ export async function computeProductionGradeSummary(): Promise<ProductionGradeSu
 export async function computeClaudeStats(): Promise<ClaudeReviewerStats> {
   const supabase = getSupabase();
 
+  // Try querying claude_decision — column may not exist if migration 004 wasn't applied
   const { data: rows, error } = await supabase
     .from("decisions")
-    .select("alert_type, btc_regime, claude_decision")
-    .not("claude_decision", "is", null);
+    .select("alert_type, btc_regime, decision, gate_b_passed")
+    .in("decision", ["LONG", "SHORT", "MR_LONG", "MR_SHORT", "SQ_SHORT", "NO_TRADE"])
+    .eq("gate_b_passed", true);
 
   if (error) throw new Error(`Claude stats query failed: ${error.message}`);
 
+  // Without claude_decision column, approximate from gate_b_passed=true decisions:
+  // If gate_b passed and final decision is a trade → Claude approved (or wasn't invoked)
+  // If gate_b passed and final decision is NO_TRADE → Claude blocked it
   const all = rows ?? [];
-  const approved = all.filter(r => r.claude_decision === "LONG" || r.claude_decision === "SHORT");
-  const rejected = all.filter(r => r.claude_decision === "NO_TRADE" || r.claude_decision === "INVALID");
+  const trades = ["LONG", "SHORT", "MR_LONG", "MR_SHORT", "SQ_SHORT"];
+  const approved = all.filter(r => trades.includes(r.decision));
+  const rejected = all.filter(r => r.decision === "NO_TRADE");
 
   const bySetup: Record<string, { reviewed: number; approved: number; pass_rate: number }> = {};
   const byRegime: Record<string, { reviewed: number; approved: number; pass_rate: number }> = {};
@@ -306,7 +312,7 @@ export async function computeClaudeStats(): Promise<ClaudeReviewerStats> {
     const keys = Array.from(new Set(all.map(r => String(r[field] ?? "unknown"))));
     for (const key of keys) {
       const sub = all.filter(r => r[field] === key);
-      const subApproved = sub.filter(r => r.claude_decision === "LONG" || r.claude_decision === "SHORT");
+      const subApproved = sub.filter(r => trades.includes(r.decision));
       target[key] = {
         reviewed: sub.length,
         approved: subApproved.length,
