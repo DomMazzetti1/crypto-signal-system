@@ -9,7 +9,7 @@ import {
 } from "@/lib/signals";
 import { runGateB, GateBInput } from "@/lib/gate-b";
 import { calculateLevels } from "@/lib/levels";
-import { computeHTFTrend, latestATR } from "@/lib/ta";
+import { computeHTFTrend } from "@/lib/ta";
 import { classifyRegimeFromCandles } from "@/lib/regime";
 import { gradeSignal, computeR, GradeResult } from "@/lib/grade-signal";
 import { runWithConcurrency, readCache, enforceProductionLimits, round } from "@/lib/backtest-utils";
@@ -164,18 +164,15 @@ export async function POST(request: NextRequest) {
         // Compute HTF trend from the symbol's own 4H candles
         const htfTrend = computeHTFTrend(slice4h);
         const atr1h = ind.atr_1h;
-        const atr4h = latestATR(slice4h, 14);
 
         // Compute BTC regime at this point in time
         let regime = "sideways";
-        let altEnv = "mixed";
         if (hasBtcData) {
           const btc4hSlice = candlesUpTo(btc4h, barTime + 1);
           const btc1dSlice = candlesUpTo(btc1d, barTime + 1);
           if (btc4hSlice.length >= 50 && btc1dSlice.length >= 220) {
             const regimeResult = classifyRegimeFromCandles(btc4hSlice, btc1dSlice);
             regime = regimeResult.btc_regime;
-            altEnv = regimeResult.alt_environment;
           }
         }
 
