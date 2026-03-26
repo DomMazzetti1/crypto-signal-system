@@ -194,6 +194,8 @@ export interface SignalParams {
   sq_trigger_mode: "event" | "state";
   /** SQ volume multiplier vs SMA20. Production = 1.5 */
   sq_volume_mult: number;
+  /** Minimum % below EMA50 on 4H for SQ_SHORT. 0 = any amount below (production). 2 = at least 2% below. */
+  sq_4h_distance_pct: number;
 }
 
 export const DEFAULT_SIGNAL_PARAMS: SignalParams = {
@@ -202,6 +204,7 @@ export const DEFAULT_SIGNAL_PARAMS: SignalParams = {
   sq_adx_1h_max: 30,
   sq_trigger_mode: "event",
   sq_volume_mult: 1.5,
+  sq_4h_distance_pct: 0,
 };
 
 // ── Signal conditions ───────────────────────────────────
@@ -274,6 +277,7 @@ export function detectSignalsWithParams(
     sqVolume &&
     ind.adx_1h < params.sq_adx_1h_max &&
     ind.close_4h < ind.ema50_4h &&
+    (params.sq_4h_distance_pct === 0 || (ind.ema50_4h > 0 && (ind.ema50_4h - ind.close_4h) / ind.ema50_4h * 100 >= params.sq_4h_distance_pct)) &&
     ind.candle_range < ind.atr_1h * 2.2 &&
     Math.abs(ind.close - ind.ema20) < ind.atr_1h * 1.5
   ) {
