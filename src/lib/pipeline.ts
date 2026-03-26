@@ -419,7 +419,7 @@ export async function runPipeline(
   }
 
   // ── 10. Store decision ────────────────────────────────
-  await storeDecision(supabase, {
+  const decisionId = await storeDecision(supabase, {
     snapshot_id: snapshotId,
     alert_id: alertId,
     symbol: alert.symbol,
@@ -458,29 +458,56 @@ export async function runPipeline(
     claude_confidence: claudeConfidence,
   });
 
+  console.log(`[pipeline] Decision stored: ${decisionId} ${alert.symbol} ${decision}`);
+
   // ── 11. Mark alert processed ──────────────────────────
   await markProcessed(supabase, alertId);
 
   // ── 12. Telegram delivery ─────────────────────────────
   let telegramSent = false;
+  let telegramAttempted = false;
+  let telegramError: string | null = null;
+  let blockedReason: string | null = null;
+
   if (decision === "LONG" || decision === "SHORT") {
-    const msg = buildMessage({
-      symbol: alert.symbol,
-      decision,
-      entry: levels.entry,
-      stop: levels.stop,
-      tp1: levels.tp1,
-      tp2: levels.tp2,
-      tp3: levels.tp3,
-      confidence: claudeConfidence ?? 0,
-      setup_type: setupType ?? "unknown",
-      btc_regime: regime.btc_regime,
-      alt_environment: regime.alt_environment,
-      funding_rate: fundingRate,
-      risk_flags: riskFlags,
-      reasoning: reasoning ?? "",
-    });
-    telegramSent = await sendTelegram(msg);
+    telegramAttempted = true;
+    try {
+      const msg = buildMessage({
+        symbol: alert.symbol,
+        decision,
+        entry: levels.entry,
+        stop: levels.stop,
+        tp1: levels.tp1,
+        tp2: levels.tp2,
+        tp3: levels.tp3,
+        confidence: claudeConfidence ?? 0,
+        setup_type: setupType ?? "unknown",
+        btc_regime: regime.btc_regime,
+        alt_environment: regime.alt_environment,
+        funding_rate: fundingRate,
+        risk_flags: riskFlags,
+        reasoning: reasoning ?? "",
+      });
+      telegramSent = await sendTelegram(msg);
+      if (!telegramSent) telegramError = "sendTelegram returned false";
+    } catch (err) {
+      telegramError = String(err).slice(0, 200);
+      console.error("[pipeline] Telegram send error:", err);
+    }
+  } else {
+    blockedReason = decision === "NO_TRADE"
+      ? (reasoning ?? finalGateBReason ?? "filtered")
+      : `decision=${decision}`;
+  }
+
+  // ── 12b. Update delivery tracking on stored decision ───
+  if (decisionId) {
+    await supabase.from("decisions").update({
+      telegram_attempted: telegramAttempted,
+      telegram_sent: telegramSent,
+      telegram_error: telegramError,
+      blocked_reason: blockedReason,
+    }).eq("id", decisionId);
   }
 
   return {
@@ -527,11 +554,13 @@ export async function runPipeline(
 async function storeDecision(
   supabase: ReturnType<typeof getSupabase>,
   data: Record<string, unknown>
-) {
-  const { error } = await supabase.from("decisions").insert(data);
+): Promise<string | null> {
+  const { data: row, error } = await supabase.from("decisions").insert(data).select("id").maybeSingle();
   if (error) {
     console.error("[pipeline] Failed to insert decision:", error);
+    return null;
   }
+  return row?.id ?? null;
 }
 
 async function markProcessed(

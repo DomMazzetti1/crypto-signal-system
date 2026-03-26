@@ -202,7 +202,7 @@ export const DEFAULT_SIGNAL_PARAMS: SignalParams = {
   mr_adx_1h_max: 18,
   mr_adx_4h_max: 22,
   sq_adx_1h_max: 30,
-  sq_trigger_mode: "event",
+  sq_trigger_mode: "state",  // promoted from "event" — increases SQ signal throughput
   sq_volume_mult: 1.5,
   sq_4h_distance_pct: 0,
 };
