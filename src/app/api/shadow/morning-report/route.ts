@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getSupabase } from "@/lib/supabase";
 import { computeShadowSummary, ShadowSummary } from "@/lib/shadow-summary";
 
 export const dynamic = "force-dynamic";
@@ -16,6 +17,54 @@ interface SectionResult {
   label: string;
   message?: string;
   summary?: ShadowSummary;
+}
+
+// ── Production signal summary ────────────────────────────
+
+interface ProductionSummary {
+  total_trades: number;
+  by_setup: Record<string, number>;
+  by_regime: Record<string, number>;
+  recent_trades: { symbol: string; alert_type: string; decision: string; btc_regime: string; created_at: string; rr_tp1: number }[];
+  note: string;
+}
+
+async function computeProductionSummary(): Promise<ProductionSummary> {
+  const supabase = getSupabase();
+
+  const { data: rows, error } = await supabase
+    .from("decisions")
+    .select("symbol, alert_type, decision, btc_regime, created_at, rr_tp1, entry_price, stop_price, tp1_price")
+    .in("decision", ["LONG", "SHORT", "MR_LONG", "MR_SHORT", "SQ_SHORT"])
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`decisions query failed: ${error.message}`);
+
+  const trades = rows ?? [];
+
+  const bySetup: Record<string, number> = {};
+  const byRegime: Record<string, number> = {};
+  for (const t of trades) {
+    const st = t.alert_type ?? "unknown";
+    bySetup[st] = (bySetup[st] || 0) + 1;
+    const reg = t.btc_regime ?? "unknown";
+    byRegime[reg] = (byRegime[reg] || 0) + 1;
+  }
+
+  return {
+    total_trades: trades.length,
+    by_setup: bySetup,
+    by_regime: byRegime,
+    recent_trades: trades.slice(0, 5).map(t => ({
+      symbol: t.symbol,
+      alert_type: t.alert_type,
+      decision: t.decision,
+      btc_regime: t.btc_regime,
+      created_at: t.created_at,
+      rr_tp1: t.rr_tp1,
+    })),
+    note: "Production decisions are not graded (no outcome_r/hit_tp1). Win rate requires manual review or separate grading pipeline.",
+  };
 }
 
 function decisionToVerdict(decision: string): "improving" | "neutral" | "worse" | "insufficient data" {
@@ -81,15 +130,35 @@ export async function GET() {
     note = "Results are roughly equal across experiments — no clear winner yet.";
   }
 
+  // Production signals section
+  let productionSection: { status: "ok" | "error"; label: string; message?: string; summary?: ProductionSummary };
+  try {
+    const prodSummary = await computeProductionSummary();
+    productionSection = { status: "ok", label: "Production accepted trades", summary: prodSummary };
+  } catch (err) {
+    hasError = true;
+    productionSection = { status: "error", label: "Production accepted trades", message: String(err).slice(0, 200) };
+  }
+
+  // Adjust note to include production context
+  const prodCount = productionSection.status === "ok" && productionSection.summary ? productionSection.summary.total_trades : 0;
+  if (prodCount === 0 && !allInsufficient) {
+    note += " No production trades recorded yet — shadow experiments are the only signal quality data.";
+  } else if (prodCount > 0) {
+    note += ` ${prodCount} production trade(s) recorded.`;
+  }
+
   const allOk = !hasError;
 
   return NextResponse.json({
     status: allOk ? "ok" : "partial",
     generated_at: new Date().toISOString(),
+    production_signals: productionSection,
     adx_shadow: sections.adx_shadow,
     trigger_shadow: sections.trigger_shadow,
     hybrid_shadow: sections.hybrid_shadow,
     bottom_line: {
+      production_trades: prodCount,
       adx_shadow: verdicts.adx_shadow,
       trigger_shadow: verdicts.trigger_shadow,
       hybrid_shadow: verdicts.hybrid_shadow,
