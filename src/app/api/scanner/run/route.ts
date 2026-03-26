@@ -266,6 +266,33 @@ export async function GET() {
         if (sqTrigErr) console.error(`[scanner] SQ trigger shadow upsert failed for ${symbol}:`, sqTrigErr);
       }
 
+      // Shadow 3: Hybrid candidate (state trigger + 1.5x vol + 5% below 4H EMA50)
+      const sqHybridParams = { ...DEFAULT_SIGNAL_PARAMS, sq_trigger_mode: "state" as const, sq_4h_distance_pct: 5 };
+      const hybridSigs = detectSignalsWithParams(symbol, indicators, sqHybridParams);
+      const prodSQ = baselineSigs.some(s => s.type === "SQ_SHORT");
+      const hybridSQ = hybridSigs.some(s => s.type === "SQ_SHORT");
+
+      if (prodSQ || hybridSQ) {
+        const dist4hPct = indicators.ema50_4h > 0
+          ? round2((indicators.ema50_4h - indicators.close_4h) / indicators.ema50_4h * 100)
+          : 0;
+        const volRatio = indicators.sma20_volume > 0 ? round2(indicators.volume / indicators.sma20_volume) : 0;
+        const { error: sqHybridErr } = await supabase.from("shadow_signals").upsert({
+          symbol, setup_type: "SQ_SHORT_HYBRID_SHADOW", candle_time: candleTimeIso,
+          regime: "n/a", trend_4h: "n/a",
+          rsi: indicators.rsi, adx_1h: indicators.adx_1h,
+          volume: indicators.volume, sma20_volume: indicators.sma20_volume,
+          close_price: indicators.close, atr_1h: indicators.atr_1h,
+          baseline_pass: prodSQ,
+          baseline_block_reason: prodSQ ? null : "event trigger not met",
+          relaxed_pass: hybridSQ,
+          relaxed_block_reason: hybridSQ ? null : `hybrid not met (mode=state, dist4h=${dist4hPct}%, vol_ratio=${volRatio})`,
+          shadow_only: hybridSQ && !prodSQ,
+          baseline_decision: null,
+        }, { onConflict: "symbol,setup_type,candle_time" });
+        if (sqHybridErr) console.error(`[scanner] SQ hybrid shadow upsert failed for ${symbol}:`, sqHybridErr);
+      }
+
       // 6. Detect signals (production path — unchanged)
       const signals = baselineSigs;
       if (signals.length === 0) return;
