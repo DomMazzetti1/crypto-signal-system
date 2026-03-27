@@ -29,6 +29,11 @@ export async function GET() {
     mr_adx_4h_max: DEFAULT_SIGNAL_PARAMS.mr_adx_4h_max,
     mode: "data_collection_tiered",
     gate_a: "advisory (not blocking)",
+    cooldown_policy: {
+      STRICT_PROD: "8h",
+      RELAXED_PROD: "2h",
+      DATA_ONLY: "none",
+    },
   };
 
   // Recent decisions (last 7 days)

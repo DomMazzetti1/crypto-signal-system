@@ -299,6 +299,36 @@ export async function runPipeline(
   // ── 5. Price levels ───────────────────────────────────
   const levels = calculateLevels(markPrice, atr14_1h, direction);
 
+  // ── 5b. Level validation ───────────────────────────────
+  if (!levels.valid) {
+    console.error(`[pipeline] ${alert.symbol} INVALID LEVELS: ${levels.invalid_reason}`);
+    await storeDecision(supabase, {
+      snapshot_id: snapshotId,
+      alert_id: alertId,
+      symbol: alert.symbol,
+      alert_type: alert.type,
+      alert_tf: alert.tf,
+      decision: "NO_TRADE",
+      gate_a_passed: gateA.passed,
+      gate_a_quality: gateA.quality,
+      gate_b_passed: false,
+      gate_b_reason: `Invalid levels: ${levels.invalid_reason}`,
+      trend_4h: trend4h.trend,
+      trend_1d: trend1d.trend,
+      btc_regime: regime.btc_regime,
+      alt_environment: regime.alt_environment,
+      cooldown_active: false,
+    });
+    await markProcessed(supabase, alertId);
+    return {
+      status: "decision_made",
+      symbol: alert.symbol,
+      decision: "NO_TRADE",
+      gate_a: { passed: gateA.passed, quality: gateA.quality, reject_reason: gateA.rejectReason },
+      gate_b: { passed: false, reason: `Invalid levels: ${levels.invalid_reason}` },
+    };
+  }
+
   // ── 6. Gate B ─────────────────────────────────────────
   const gateB = runGateB({
     alertType: alert.type,

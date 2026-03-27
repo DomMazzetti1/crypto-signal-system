@@ -418,13 +418,17 @@ export async function GET() {
           console.error(`[scanner] shadow_signals upsert failed for ${symbol} ${sig.type}:`, shadowUpsertError);
         }
 
-        // 7a. Cooldown check (PRODUCTION — unchanged)
+        // 7a. Tier-aware cooldown check
+        const tieredSig = sig as TieredSignal;
         const cooldownKey = `cooldown:${symbol}:${sig.type}`;
-        const cooldownExists = await redis.get(cooldownKey);
-        if (cooldownExists) {
-          skippedCooldown++;
-          continue;
+        if (tieredSig.tier !== "DATA_ONLY") {
+          const cooldownExists = await redis.get(cooldownKey);
+          if (cooldownExists) {
+            skippedCooldown++;
+            continue;
+          }
         }
+        // DATA_ONLY: no cooldown (always proceed to storage)
 
         // 7b. Idempotency check: have we already processed this candle?
         // Uses SELECT first. The actual idempotency insert happens AFTER
@@ -444,7 +448,6 @@ export async function GET() {
           continue;
         }
 
-        const tieredSig = sig as TieredSignal;
         console.log(`[scanner] Signal: ${symbol} ${sig.type} tier=${tieredSig.tier} pass=${tieredSig.pass_count}/${tieredSig.total_conditions} failed=[${tieredSig.failed_conditions.join(",")}]`);
 
         // Build alert payload with tier metadata
@@ -484,7 +487,11 @@ export async function GET() {
         try {
           const result = await runPipeline(alertPayload, alertId);
           if (result.decision === "LONG" || result.decision === "SHORT") {
-            await redis.set(cooldownKey, Date.now(), { ex: 8 * 60 * 60 });
+            // Tier-aware cooldown TTL
+            const cooldownTtl = tieredSig.tier === "STRICT_PROD" ? 8 * 60 * 60
+              : tieredSig.tier === "RELAXED_PROD" ? 2 * 60 * 60
+              : 0; // DATA_ONLY: no cooldown
+            if (cooldownTtl > 0) await redis.set(cooldownKey, Date.now(), { ex: cooldownTtl });
             await supabase.from("candle_signals").upsert({
               symbol,
               setup_type: sig.type,
