@@ -112,7 +112,7 @@ export async function runPipeline(
   const supabase = getSupabase();
 
   const rawType = alert.type.toLowerCase();
-  const direction: "long" | "short" = rawType.endsWith("_short") ? "short" : "long";
+  const direction: "long" | "short" = rawType.includes("short") ? "short" : "long";
   console.log(`[pipeline] Processing: ${alert.symbol} type=${alert.type} direction=${direction}`);
 
   // ── 1. Enrichment: market data (parallel) ─────────────

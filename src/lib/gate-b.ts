@@ -28,12 +28,15 @@ export function runGateB(input: GateBInput): GateBResult {
   const lowerType = alertType.toLowerCase();
 
   // ── Directional trend filter ──────────────────────────
-  if (lowerType.includes("long") && trend4h === "bearish") {
-    return { passed: false, reason: "LONG signal but 4H trend is bearish" };
-  }
-
-  if (lowerType.includes("short") && trend4h === "bullish") {
-    return { passed: false, reason: "SHORT signal but 4H trend is bullish" };
+  // Relaxed/data tiers bypass trend filter in data-collection mode
+  const isRelaxedOrData = lowerType.includes("relaxed") || lowerType.includes("data");
+  if (!isRelaxedOrData) {
+    if (lowerType.includes("long") && trend4h === "bearish") {
+      return { passed: false, reason: "LONG signal but 4H trend is bearish" };
+    }
+    if (lowerType.includes("short") && trend4h === "bullish") {
+      return { passed: false, reason: "SHORT signal but 4H trend is bullish" };
+    }
   }
 
   // ── ATR too low — no movement ─────────────────────────
@@ -94,12 +97,14 @@ export function runGateB(input: GateBInput): GateBResult {
 
   if (btcRegime === "sideways") {
     // SIDEWAYS: allow MR_LONG, MR_SHORT freely (mean reversion preferred)
-    // SQ_SHORT: require stronger volume confirmation (2.0x instead of 1.5x)
+    // SQ_SHORT: volume confirmation varies by tier
     if (lowerType.includes("sq_short") && volume !== undefined && sma20Volume !== undefined) {
-      if (volume <= sma20Volume * 2.0) {
+      const isRelaxedTier = lowerType.includes("relaxed") || lowerType.includes("data");
+      const volMult = isRelaxedTier ? 1.0 : 2.0;
+      if (volume <= sma20Volume * volMult) {
         return {
           passed: false,
-          reason: `SQ_SHORT in SIDEWAYS regime requires volume > 2.0x SMA20 (${Math.round(volume)} <= ${Math.round(sma20Volume * 2.0)})`,
+          reason: `SQ_SHORT in SIDEWAYS regime requires volume > ${volMult}x SMA20 (${Math.round(volume)} <= ${Math.round(sma20Volume * volMult)})`,
         };
       }
     }
