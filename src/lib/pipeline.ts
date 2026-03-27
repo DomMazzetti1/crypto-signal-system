@@ -115,6 +115,7 @@ export async function runPipeline(
 
   const rawType = alert.type.toLowerCase();
   const direction: "long" | "short" = rawType.includes("short") ? "short" : "long";
+  const isRelaxed = rawType.includes("relaxed");
   console.log(`[pipeline] Processing: ${alert.symbol} type=${alert.type} direction=${direction}`);
 
   // ── 1. Enrichment: market data (parallel) ─────────────
@@ -429,16 +430,29 @@ export async function runPipeline(
         `[pipeline] Claude: decision=${claudeDecision} confidence=${claudeConfidence} setup=${setupType}`
       );
 
+      // Tier-aware reviewer policy:
+      // STRICT_PROD: reviewer can veto (blocking)
+      // RELAXED_PROD: reviewer is annotation-only (non-blocking for subjective reasoning)
       if (claudeDecision === "NO_TRADE" || claudeDecision === "INVALID") {
-        decision = "NO_TRADE";
+        if (isRelaxed) {
+          // Non-blocking: keep original LONG/SHORT decision, attach reasoning as annotation
+          console.log(`[pipeline] ${alert.symbol} RELAXED reviewer annotation (non-blocking): ${claudeDecision} — ${reasoning}`);
+          // decision stays as LONG/SHORT
+        } else {
+          decision = "NO_TRADE";
+        }
       }
     } catch (err) {
-      // EXPLICIT POLICY: if Claude review fails, block the trade.
-      // Rationale: Claude is the final safety gate. Sending trades
-      // without AI review risks unfiltered signals reaching Telegram.
-      console.error("[pipeline] Claude review failed — blocking trade:", err);
-      decision = "NO_TRADE";
-      reasoning = "Claude review unavailable";
+      if (isRelaxed) {
+        // RELAXED: reviewer failure is non-blocking
+        console.log(`[pipeline] ${alert.symbol} RELAXED reviewer unavailable (non-blocking):`, err);
+        reasoning = "Claude review unavailable (non-blocking for RELAXED)";
+      } else {
+        // STRICT: reviewer failure blocks the trade
+        console.error("[pipeline] Claude review failed — blocking trade:", err);
+        decision = "NO_TRADE";
+        reasoning = "Claude review unavailable";
+      }
     }
   }
 
@@ -499,7 +513,6 @@ export async function runPipeline(
   let telegramBlockReason: string | null = null;
 
   const isTrade = decision === "LONG" || decision === "SHORT";
-  const isRelaxed = rawType.includes("relaxed");
 
   if (isTrade) {
     // RELAXED_PROD Telegram quality filter
