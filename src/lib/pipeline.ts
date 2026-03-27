@@ -219,9 +219,14 @@ export async function runPipeline(
 
   const snapshotId: string | null = snapRow?.id ?? null;
 
-  // If Gate A fails, record NO_TRADE and stop
+  // Gate A is advisory — flag but don't block.
+  // In data-collection mode, we want all signals to reach Gate B and beyond.
   if (!gateA.passed) {
-    console.log(`[pipeline] ${alert.symbol} Gate A rejected: ${gateA.rejectReason}`);
+    console.log(`[pipeline] ${alert.symbol} Gate A flagged (not blocking): ${gateA.rejectReason}`);
+  }
+
+  /* GATE A HARD BLOCK DISABLED FOR DATA COLLECTION
+  if (!gateA.passed) {
     await storeDecision(supabase, {
       snapshot_id: snapshotId,
       alert_id: alertId,
@@ -247,6 +252,7 @@ export async function runPipeline(
       gate_a: { passed: false, quality: gateA.quality, reject_reason: gateA.rejectReason },
     };
   }
+  END GATE A HARD BLOCK */
 
   // ── 3. HTF Trend ──────────────────────────────────────
   let candles1h, candles4h, candles1d;
@@ -331,22 +337,15 @@ export async function runPipeline(
   // ── 9. Claude review (only if deterministic passed) ───
   let claudeDecision: string | null = null;
   let claudeConfidence: number | null = null;
-  let claudeRequest: object | null = null;
-  let claudeResponse: object | null = null;
-  let promptVersionId: string | null = null;
   let setupType: string | null = null;
   let riskFlags: string[] = [];
   let reasoning: string | null = null;
 
   if (decision === "LONG" || decision === "SHORT") {
-    const { data: promptRow } = await supabase
-      .from("prompt_versions")
-      .select("id")
-      .eq("is_production", true)
-      .limit(1)
-      .maybeSingle();
-
-    promptVersionId = promptRow?.id ?? null;
+    // Prompt version lookup disabled — migration 004 not applied
+    // const { data: promptRow } = await supabase
+    //   .from("prompt_versions").select("id")
+    //   .eq("is_production", true).limit(1).maybeSingle();
 
     const reviewInput: ClaudeReviewInput = {
       symbol: alert.symbol,
@@ -388,8 +387,6 @@ export async function runPipeline(
 
     try {
       const review = await reviewWithClaude(reviewInput);
-      claudeRequest = review.request;
-      claudeResponse = review.response;
       claudeDecision = review.response.decision;
       claudeConfidence = review.response.confidence;
       setupType = review.response.setup_type;

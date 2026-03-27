@@ -27,6 +27,8 @@ export async function GET() {
     sq_bb_width_max: 0.12,
     mr_adx_1h_max: DEFAULT_SIGNAL_PARAMS.mr_adx_1h_max,
     mr_adx_4h_max: DEFAULT_SIGNAL_PARAMS.mr_adx_4h_max,
+    mode: "data_collection_tiered",
+    gate_a: "advisory (not blocking)",
   };
 
   // Recent decisions (last 7 days)
@@ -80,6 +82,20 @@ export async function GET() {
     .order("scanned_at", { ascending: false })
     .limit(1);
 
+  // Tier breakdown from recent alerts_raw
+  const { data: recentAlerts } = await supabase
+    .from("alerts_raw")
+    .select("payload")
+    .gte("received_at", sevenDaysAgo)
+    .order("received_at", { ascending: false })
+    .limit(100);
+
+  const tierCounts: Record<string, number> = {};
+  for (const a of recentAlerts ?? []) {
+    const tier = (a.payload as Record<string, unknown>)?.tier as string ?? "unknown";
+    tierCounts[tier] = (tierCounts[tier] || 0) + 1;
+  }
+
   return NextResponse.json({
     generated_at: new Date().toISOString(),
 
@@ -92,6 +108,7 @@ export async function GET() {
       telegram_attempted: attempted.length,
       telegram_sent: sent.length,
       telegram_failed: sendFails.length,
+      by_tier: tierCounts,
     },
 
     recent_send_failures: sendFails.slice(0, 5).map(d => ({

@@ -3,7 +3,7 @@ import { getSupabase } from "@/lib/supabase";
 import { getRedis, ALERTS_QUEUE_KEY } from "@/lib/redis";
 import { fetchKlines, Kline } from "@/lib/bybit";
 import { runPipeline, AlertPayload } from "@/lib/pipeline";
-import { computeIndicators, detectSignals, detectSignalsWithParams, evaluateNearMisses, NearMissResult, DEFAULT_SIGNAL_PARAMS } from "@/lib/signals";
+import { computeIndicators, detectSignals, detectSignalsWithParams, detectSignalsTiered, evaluateNearMisses, NearMissResult, DEFAULT_SIGNAL_PARAMS, TieredSignal } from "@/lib/signals";
 import { runGateBRelaxed, isShadowCooldownActive, setShadowCooldown } from "@/lib/shadow-relaxed";
 import { runGateB } from "@/lib/gate-b";
 import { computeHTFTrend } from "@/lib/ta";
@@ -108,6 +108,18 @@ export async function GET() {
     let skippedCooldown = 0;
     let skippedIdempotency = 0;
     let symbolsEvaluated = 0;
+
+    // ── Throughput-based low-flow detection ──
+    // If fewer than 5 decisions in last 24h, widen detection automatically
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { count: recentDecisionCount } = await supabase
+      .from("decisions")
+      .select("*", { count: "exact", head: true })
+      .gte("created_at", twentyFourHoursAgo);
+    const lowFlowMode = (recentDecisionCount ?? 0) < 5;
+    if (lowFlowMode) {
+      console.log(`[scanner] LOW FLOW MODE active: ${recentDecisionCount ?? 0} decisions in last 24h`);
+    }
 
     // ── Near-miss aggregation (in-memory, one write at end) ──
     const passCountHist: Record<string, Record<string, number>> = {};
@@ -295,8 +307,11 @@ export async function GET() {
         if (sqHybridErr) console.error(`[scanner] SQ hybrid shadow upsert failed for ${symbol}:`, sqHybridErr);
       }
 
-      // 6. Detect signals (production path — unchanged)
-      const signals = baselineSigs;
+      // 6. Tiered detection for data-collection mode
+      // Check throughput: if < 5 signals in last 24h, activate low-flow mode
+      const tieredSignals = detectSignalsTiered(symbol, indicators, DEFAULT_SIGNAL_PARAMS, { low_flow: lowFlowMode });
+      // Also include any MR signals from baseline (which are always STRICT_PROD)
+      const signals: TieredSignal[] = tieredSignals;
       if (signals.length === 0) return;
 
       candidatesFound += signals.length;
@@ -429,7 +444,10 @@ export async function GET() {
           continue;
         }
 
-        // Build alert payload (PRODUCTION — unchanged)
+        const tieredSig = sig as TieredSignal;
+        console.log(`[scanner] Signal: ${symbol} ${sig.type} tier=${tieredSig.tier} pass=${tieredSig.pass_count}/${tieredSig.total_conditions} failed=[${tieredSig.failed_conditions.join(",")}]`);
+
+        // Build alert payload with tier metadata
         const alertPayload: AlertPayload = {
           type: sig.type,
           symbol,
@@ -443,44 +461,44 @@ export async function GET() {
           sma20_volume: indicators.sma20_volume,
         };
 
-        // Store in alerts_raw
+        // Store in alerts_raw for ALL tiers (observability)
         const { data: rawRow, error: rawInsertError } = await supabase
           .from("alerts_raw")
-          .insert({ payload: alertPayload })
+          .insert({ payload: { ...alertPayload, tier: tieredSig.tier, pass_count: tieredSig.pass_count, failed_conditions: tieredSig.failed_conditions, priority: tieredSig.priority } })
           .select("id")
           .single();
         if (rawInsertError) {
           console.error(`[scanner] alerts_raw insert failed for ${symbol} ${sig.type}:`, rawInsertError);
         }
 
-        // Push to Redis queue
+        // DATA_ONLY: store + grade only, no pipeline or Telegram
+        if (tieredSig.tier === "DATA_ONLY") {
+          console.log(`[scanner] DATA_ONLY: ${symbol} ${sig.type} (${tieredSig.pass_count}/${tieredSig.total_conditions}) — stored for grading only`);
+          continue;
+        }
+
+        // STRICT_PROD and RELAXED_PROD: run full pipeline
         await redis.lpush(ALERTS_QUEUE_KEY, JSON.stringify(alertPayload));
 
-        // Run pipeline inline (PRODUCTION — unchanged)
         const alertId = rawRow?.id ?? null;
         try {
           const result = await runPipeline(alertPayload, alertId);
-          // Only set cooldown + record idempotency on tradable decision
           if (result.decision === "LONG" || result.decision === "SHORT") {
             await redis.set(cooldownKey, Date.now(), { ex: 8 * 60 * 60 });
-            // Atomic idempotency insert (ON CONFLICT = already recorded by a parallel run)
             await supabase.from("candle_signals").upsert({
               symbol,
               setup_type: sig.type,
               candle_start_time: candleTime,
             }, { onConflict: "symbol,setup_type,candle_start_time", ignoreDuplicates: true });
             candidatesQueued++;
-            console.log(`[scanner] Queued: ${symbol} ${sig.type} close=${indicators.close}`);
+            console.log(`[scanner] Queued: ${symbol} ${sig.type} tier=${tieredSig.tier} close=${indicators.close}`);
           }
-          // Update shadow row with baseline final decision (includes Claude override)
-          const { error: shadowUpdateError } = await supabase.from("shadow_signals")
+          // Update shadow row with baseline final decision
+          await supabase.from("shadow_signals")
             .update({ baseline_decision: result.decision })
             .eq("symbol", symbol)
             .eq("setup_type", sig.type)
             .eq("candle_time", candleTime);
-          if (shadowUpdateError) {
-            console.error(`[scanner] shadow_signals decision update failed for ${symbol} ${sig.type}:`, shadowUpdateError);
-          }
         } catch (err) {
           console.error(`[scanner] Pipeline error for ${symbol} ${sig.type}:`, err);
         }

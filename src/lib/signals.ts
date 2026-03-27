@@ -207,6 +207,18 @@ export const DEFAULT_SIGNAL_PARAMS: SignalParams = {
   sq_4h_distance_pct: 0,
 };
 
+// ── Tiered signal types ─────────────────────────────────
+
+export type SignalTier = "STRICT_PROD" | "RELAXED_PROD" | "DATA_ONLY";
+
+export interface TieredSignal extends Signal {
+  tier: SignalTier;
+  pass_count: number;
+  total_conditions: number;
+  failed_conditions: string[];
+  priority: boolean;
+}
+
 // ── Signal conditions ───────────────────────────────────
 
 /**
@@ -215,6 +227,92 @@ export const DEFAULT_SIGNAL_PARAMS: SignalParams = {
  */
 export function detectSignals(symbol: string, ind: SymbolIndicators): Signal[] {
   return detectSignalsWithParams(symbol, ind, DEFAULT_SIGNAL_PARAMS);
+}
+
+/**
+ * Tiered detector for data-collection mode.
+ * Evaluates all conditions individually, assigns tiers by pass_count.
+ * - STRICT_PROD: all conditions pass (full rule set)
+ * - RELAXED_PROD: pass_count >= threshold (default 6)
+ * - DATA_ONLY: pass_count >= threshold (default 5)
+ */
+export function detectSignalsTiered(
+  symbol: string,
+  ind: SymbolIndicators,
+  params: SignalParams,
+  opts: { relaxed_min?: number; data_min?: number; low_flow?: boolean } = {}
+): TieredSignal[] {
+  const relaxedMin = opts.low_flow ? 5 : (opts.relaxed_min ?? 6);
+  const dataMin = opts.data_min ?? 5;
+  const results: TieredSignal[] = [];
+
+  // ── SQ_SHORT condition evaluation ──────────────────
+  const sqBasis = params.sq_trigger_mode === "event"
+    ? (ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis)
+    : (ind.close < ind.bb_basis);
+  const sqRsi = params.sq_trigger_mode === "event"
+    ? (ind.prev_rsi >= 48 && ind.rsi < 48)
+    : (ind.rsi < 48);
+  const sqVolMult = opts.low_flow ? 0.8 : params.sq_volume_mult;
+  const sqBbWidth = opts.low_flow ? 0.15 : 0.12;
+
+  const sqConditions: { name: string; passed: boolean }[] = [
+    { name: "bb_width", passed: ind.bb_width_ratio < sqBbWidth },
+    { name: "basis_trigger", passed: sqBasis },
+    { name: "close_lt_ema20", passed: ind.close < ind.ema20 },
+    { name: "rsi_trigger", passed: sqRsi },
+    { name: "volume", passed: ind.volume > ind.sma20_volume * sqVolMult },
+    { name: "adx_1h", passed: ind.adx_1h < params.sq_adx_1h_max },
+    { name: "close_4h_lt_ema50", passed: ind.close_4h < ind.ema50_4h },
+    { name: "range_vs_atr", passed: ind.candle_range < ind.atr_1h * 2.2 },
+    { name: "close_near_ema20", passed: Math.abs(ind.close - ind.ema20) < ind.atr_1h * 1.5 },
+  ];
+
+  const sqPassed = sqConditions.filter(c => c.passed).length;
+  const sqFailed = sqConditions.filter(c => !c.passed).map(c => c.name);
+  const sqTotal = sqConditions.length;
+
+  if (sqPassed >= dataMin) {
+    let tier: SignalTier;
+    let typeSuffix = "";
+    if (sqPassed === sqTotal) {
+      tier = "STRICT_PROD";
+    } else if (sqPassed >= relaxedMin) {
+      tier = "RELAXED_PROD";
+      typeSuffix = "_RELAXED";
+    } else {
+      tier = "DATA_ONLY";
+      typeSuffix = "_DATA";
+    }
+
+    results.push({
+      type: `SQ_SHORT${typeSuffix}`,
+      symbol,
+      indicators: ind,
+      tier,
+      pass_count: sqPassed,
+      total_conditions: sqTotal,
+      failed_conditions: sqFailed,
+      priority: sqPassed >= 7,
+    });
+  }
+
+  // ── MR_LONG (strict only — no tiering for MR) ─────
+  const strictSignals = detectSignalsWithParams(symbol, ind, params);
+  for (const sig of strictSignals) {
+    if (sig.type === "MR_LONG" || sig.type === "MR_SHORT") {
+      results.push({
+        ...sig,
+        tier: "STRICT_PROD",
+        pass_count: sig.type === "MR_LONG" ? 8 : 8,
+        total_conditions: 8,
+        failed_conditions: [],
+        priority: true,
+      });
+    }
+  }
+
+  return results;
 }
 
 /**
