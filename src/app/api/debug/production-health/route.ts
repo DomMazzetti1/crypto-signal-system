@@ -105,12 +105,21 @@ export async function GET() {
   const relaxedTrades = trades.filter(d => String(d.alert_type ?? "").toLowerCase().includes("relaxed"));
   const relaxedSent = relaxedTrades.filter(d => d.telegram_sent);
   const relaxedFilterReasons: Record<string, number> = {};
+  let repeatSuppressed = 0;
   for (const d of relaxedTrades) {
     const err = d.telegram_error as string | null;
     if (err && err.startsWith("RELAXED filtered:")) {
       const reasons = err.replace("RELAXED filtered: ", "").split(", ");
       for (const r of reasons) relaxedFilterReasons[r] = (relaxedFilterReasons[r] || 0) + 1;
     }
+    if (err && err.startsWith("repeat_signal_within_")) repeatSuppressed++;
+  }
+  // Also check strict signals for repeat suppression
+  const strictTrades = trades.filter(d => !String(d.alert_type ?? "").toLowerCase().includes("relaxed") && !String(d.alert_type ?? "").toLowerCase().includes("data"));
+  let strictRepeatSuppressed = 0;
+  for (const d of strictTrades) {
+    const err = d.telegram_error as string | null;
+    if (err && err.startsWith("repeat_signal_within_")) strictRepeatSuppressed++;
   }
 
   return NextResponse.json({
@@ -130,7 +139,14 @@ export async function GET() {
         total: relaxedTrades.length,
         sent: relaxedSent.length,
         filtered_out: relaxedTrades.length - relaxedSent.length,
+        repeat_suppressed: repeatSuppressed,
         filter_reasons: Object.keys(relaxedFilterReasons).length > 0 ? relaxedFilterReasons : undefined,
+      },
+      repeat_suppression: {
+        relaxed_suppressed: repeatSuppressed,
+        strict_suppressed: strictRepeatSuppressed,
+        relaxed_window: "12h",
+        strict_window: "4h",
       },
     },
 

@@ -1,4 +1,5 @@
 import { getSupabase } from "@/lib/supabase";
+import { getRedis } from "@/lib/redis";
 import {
   fetchTicker,
   fetchOrderbook,
@@ -522,6 +523,21 @@ export async function runPipeline(
       }
     }
 
+    // Repeat suppression: prevent same symbol+direction from flooding Telegram
+    if (sendTelegram_) {
+      const redis = getRedis();
+      // Setup family = base type without tier suffix (SQ_SHORT_RELAXED → SQ_SHORT)
+      const setupFamily = alert.type.replace(/_RELAXED$|_DATA$/i, "");
+      const suppressKey = `tg_sent:${alert.symbol}:${setupFamily}:${direction}`;
+      const alreadySent = await redis.get(suppressKey);
+      if (alreadySent) {
+        sendTelegram_ = false;
+        const suppressWindow = isRelaxed ? "12h" : "4h";
+        telegramBlockReason = `repeat_signal_within_${suppressWindow}`;
+        console.log(`[pipeline] ${alert.symbol} Telegram suppressed: ${telegramBlockReason}`);
+      }
+    }
+
     if (sendTelegram_) {
       telegramAttempted = true;
       try {
@@ -542,7 +558,16 @@ export async function runPipeline(
           reasoning: reasoning ?? "",
         });
         telegramSent = await sendTelegram(msg);
-        if (!telegramSent) telegramError = "sendTelegram returned false";
+        if (telegramSent) {
+          // Set repeat suppression key after successful send
+          const redis = getRedis();
+          const setupFamily = alert.type.replace(/_RELAXED$|_DATA$/i, "");
+          const suppressKey = `tg_sent:${alert.symbol}:${setupFamily}:${direction}`;
+          const suppressTtl = isRelaxed ? 12 * 60 * 60 : 4 * 60 * 60;
+          await redis.set(suppressKey, Date.now(), { ex: suppressTtl });
+        } else {
+          telegramError = "sendTelegram returned false";
+        }
       } catch (err) {
         telegramError = String(err).slice(0, 200);
         console.error("[pipeline] Telegram send error:", err);
