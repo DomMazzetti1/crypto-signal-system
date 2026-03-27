@@ -101,6 +101,7 @@ export interface PipelineResult {
   };
   cooldown_active?: boolean;
   telegram_sent?: boolean;
+  telegram_block_reason?: string | null;
   error?: string;
   http_status?: number;
 }
@@ -464,31 +465,58 @@ export async function runPipeline(
   let telegramAttempted = false;
   let telegramError: string | null = null;
   let blockedReason: string | null = null;
+  let telegramBlockReason: string | null = null;
 
-  if (decision === "LONG" || decision === "SHORT") {
-    telegramAttempted = true;
-    try {
-      const msg = buildMessage({
-        symbol: alert.symbol,
-        decision,
-        entry: levels.entry,
-        stop: levels.stop,
-        tp1: levels.tp1,
-        tp2: levels.tp2,
-        tp3: levels.tp3,
-        confidence: claudeConfidence ?? 0,
-        setup_type: setupType ?? "unknown",
-        btc_regime: regime.btc_regime,
-        alt_environment: regime.alt_environment,
-        funding_rate: fundingRate,
-        risk_flags: riskFlags,
-        reasoning: reasoning ?? "",
-      });
-      telegramSent = await sendTelegram(msg);
-      if (!telegramSent) telegramError = "sendTelegram returned false";
-    } catch (err) {
-      telegramError = String(err).slice(0, 200);
-      console.error("[pipeline] Telegram send error:", err);
+  const isTrade = decision === "LONG" || decision === "SHORT";
+  const isRelaxed = rawType.includes("relaxed");
+
+  if (isTrade) {
+    // RELAXED_PROD Telegram quality filter
+    let sendTelegram_ = true;
+    if (isRelaxed) {
+      const volRatio = (alert.sma20_volume && alert.sma20_volume > 0)
+        ? (alert.volume ?? 0) / alert.sma20_volume : 0;
+      const checks: { name: string; pass: boolean }[] = [
+        { name: "pass_count", pass: true }, // pass_count not available in pipeline; checked at scanner level
+        { name: "bb_width>=0.06", pass: alert.bb_width >= 0.06 },
+        { name: "vol_ratio>=1.2", pass: volRatio >= 1.2 },
+        { name: "rr_tp1>=1.2", pass: levels.rr_tp1 >= 1.2 },
+        { name: "tp1_positive", pass: direction === "long" ? levels.tp1 > levels.entry : levels.tp1 < levels.entry },
+        { name: "entry_mark_dev<=1%", pass: markPrice > 0 && Math.abs(levels.entry - markPrice) / markPrice <= 0.01 },
+      ];
+      const failed = checks.filter(c => !c.pass);
+      if (failed.length > 0) {
+        sendTelegram_ = false;
+        telegramBlockReason = `RELAXED filtered: ${failed.map(f => f.name).join(", ")}`;
+        console.log(`[pipeline] ${alert.symbol} RELAXED Telegram blocked: ${telegramBlockReason}`);
+      }
+    }
+
+    if (sendTelegram_) {
+      telegramAttempted = true;
+      try {
+        const msg = buildMessage({
+          symbol: alert.symbol,
+          decision,
+          entry: levels.entry,
+          stop: levels.stop,
+          tp1: levels.tp1,
+          tp2: levels.tp2,
+          tp3: levels.tp3,
+          confidence: claudeConfidence ?? 0,
+          setup_type: setupType ?? "unknown",
+          btc_regime: regime.btc_regime,
+          alt_environment: regime.alt_environment,
+          funding_rate: fundingRate,
+          risk_flags: riskFlags,
+          reasoning: reasoning ?? "",
+        });
+        telegramSent = await sendTelegram(msg);
+        if (!telegramSent) telegramError = "sendTelegram returned false";
+      } catch (err) {
+        telegramError = String(err).slice(0, 200);
+        console.error("[pipeline] Telegram send error:", err);
+      }
     }
   } else {
     blockedReason = decision === "NO_TRADE"
@@ -501,7 +529,7 @@ export async function runPipeline(
     await supabase.from("decisions").update({
       telegram_attempted: telegramAttempted,
       telegram_sent: telegramSent,
-      telegram_error: telegramError,
+      telegram_error: telegramError ?? telegramBlockReason,
       blocked_reason: blockedReason,
     }).eq("id", decisionId);
   }
@@ -542,6 +570,7 @@ export async function runPipeline(
     },
     cooldown_active: cooldownActive,
     telegram_sent: telegramSent,
+    telegram_block_reason: telegramBlockReason,
   };
 }
 
