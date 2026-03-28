@@ -16,6 +16,8 @@ import { calculateLevels } from "@/lib/levels";
 import { isCooldownActive, setCooldown } from "@/lib/cooldown";
 import { reviewWithClaude, ClaudeReviewInput } from "@/lib/reviewer";
 import { buildMessage, sendTelegram } from "@/lib/telegram";
+import { computeCompositeScore } from "@/lib/scoring";
+import { assignCluster } from "@/lib/cluster";
 
 export interface AlertPayload {
   type: string;
@@ -461,6 +463,60 @@ export async function runPipeline(
     await setCooldown(alert.symbol, alert.type);
   }
 
+  // ── 9b. Compute scoring inputs + composite score ──────
+  const volRatio =
+    alert.sma20_volume && alert.sma20_volume > 0
+      ? (alert.volume ?? 0) / alert.sma20_volume
+      : null;
+  const entryDeviationPct =
+    markPrice > 0
+      ? Math.abs(levels.entry - markPrice) / markPrice
+      : null;
+
+  const scoreResult = computeCompositeScore({
+    rr_tp1: levels.rr_tp1,
+    vol_ratio: volRatio,
+    alert_type: alert.type,
+    entry_price: levels.entry,
+    mark_price: markPrice,
+  });
+
+  // ── 9c. Cluster assignment + execution selection ──────
+  const isTradeBefore = decision === "LONG" || decision === "SHORT";
+  let clusterData: {
+    cluster_id: string | null;
+    cluster_hour: string | null;
+    cluster_size: number;
+    cluster_rank: number | null;
+    selected_for_execution: boolean;
+    suppressed_reason: string | null;
+  } = {
+    cluster_id: null,
+    cluster_hour: null,
+    cluster_size: 1,
+    cluster_rank: null,
+    selected_for_execution: false,
+    suppressed_reason: null,
+  };
+
+  if (isTradeBefore) {
+    try {
+      const cluster = await assignCluster({
+        symbol: alert.symbol,
+        decision,
+        alert_type: alert.type,
+        btc_regime: regime.btc_regime,
+        created_at: new Date(),
+        composite_score: scoreResult.composite_score,
+        rr_tp1: levels.rr_tp1,
+        cooldown_active: cooldownActive,
+      });
+      clusterData = cluster;
+    } catch (err) {
+      console.error("[pipeline] Cluster assignment failed (non-blocking):", err);
+    }
+  }
+
   // ── 10. Store decision ────────────────────────────────
   // NOTE: claude columns (prompt_version_id, claude_request, claude_response,
   // claude_decision, claude_confidence) are omitted because migration 004
@@ -498,6 +554,17 @@ export async function runPipeline(
     rr_tp2: levels.rr_tp2,
     rr_tp3: levels.rr_tp3,
     cooldown_active: cooldownActive,
+    // New: scoring inputs
+    vol_ratio: volRatio,
+    entry_deviation_pct: entryDeviationPct,
+    composite_score: scoreResult.composite_score,
+    // New: cluster metadata
+    cluster_id: clusterData.cluster_id,
+    cluster_hour: clusterData.cluster_hour,
+    cluster_size: clusterData.cluster_size,
+    cluster_rank: clusterData.cluster_rank,
+    selected_for_execution: clusterData.selected_for_execution,
+    suppressed_reason: clusterData.suppressed_reason,
   });
 
   console.log(`[pipeline] Decision stored: ${decisionId} ${alert.symbol} ${decision}`);

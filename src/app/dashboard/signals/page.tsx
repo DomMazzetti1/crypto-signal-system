@@ -23,6 +23,22 @@ type Signal = {
   status: string;
   pct_to_tp1: number | null;
   score: number;
+  // Cluster metadata
+  cluster_id: string | null;
+  cluster_size: number;
+  cluster_rank: number | null;
+  // Execution selection
+  selected_for_execution: boolean;
+  suppressed_reason: string | null;
+  // Graded outcome (research, distinct from live status)
+  graded_outcome: string | null;
+  // Lifecycle
+  tp1_hit_at: string | null;
+  tp2_hit_at: string | null;
+  tp3_hit_at: string | null;
+  stopped_at: string | null;
+  resolved_at: string | null;
+  // Existing
   telegram_sent: boolean;
   telegram_attempted: boolean;
   blocked_reason: string | null;
@@ -33,7 +49,7 @@ type Signal = {
 type Filters = {
   hours: number;
   tier: string;
-  statusFilter: string; // "open" | "all" | "tp_hits" | "stopped"
+  statusFilter: string;
 };
 
 type Cluster = {
@@ -46,6 +62,8 @@ type Cluster = {
   tp2: number;
   tp3: number;
   stopped: number;
+  selected: number;
+  suppressed: number;
 };
 
 // ── Helpers ────────────────────────────────────────────
@@ -94,20 +112,33 @@ function statusColor(status: string): string {
   }
 }
 
-function clusterKey(iso: string): string {
-  const d = new Date(iso);
+function gradedColor(outcome: string | null): string {
+  if (!outcome) return "text-neutral-600";
+  if (outcome.startsWith("WIN")) return "text-emerald-400";
+  if (outcome === "LOSS") return "text-red-400";
+  return "text-yellow-400";
+}
+
+function clusterKey(signal: Signal): string {
+  // Use persisted cluster_id if available, else derive from created_at hour
+  if (signal.cluster_id) return signal.cluster_id;
+  const d = new Date(signal.created_at);
   d.setMinutes(0, 0, 0);
   return d.toISOString();
 }
 
-function clusterLabel(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleTimeString("en-US", {
+function clusterLabel(key: string): string {
+  // Persisted cluster_id format: "YYYY-MM-DDTHH:DIRECTION:REGIME"
+  // Derived format: ISO string
+  const hourPart = key.slice(0, 13); // "YYYY-MM-DDTHH"
+  const rest = key.slice(14); // "LONG:bear" or empty
+  const d = new Date(hourPart + ":00:00.000Z");
+  const time = d.toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-    timeZoneName: "short",
   });
+  return rest ? `${time} ${rest}` : time;
 }
 
 function positionRef(signal: Signal): string {
@@ -121,10 +152,8 @@ function positionRef(signal: Signal): string {
     Math.abs(signal.tp1_price - signal.entry_price) / signal.entry_price;
   const leverage = 10;
   const returnPct = pctMove * leverage * 100;
-  return `+${returnPct.toFixed(1)}% (TP1)`;
+  return `+${returnPct.toFixed(1)}%`;
 }
-
-// ── Filter helpers ─────────────────────────────────────
 
 function matchesStatus(signal: Signal, filter: string): boolean {
   switch (filter) {
@@ -139,6 +168,13 @@ function matchesStatus(signal: Signal, filter: string): boolean {
   }
 }
 
+function scoreColor(score: number): string {
+  if (score >= 70) return "text-emerald-400";
+  if (score >= 50) return "text-yellow-400";
+  if (score >= 30) return "text-orange-400";
+  return "text-red-400";
+}
+
 // ── Constants ──────────────────────────────────────────
 
 const HOUR_OPTIONS = [4, 12, 24] as const;
@@ -149,7 +185,7 @@ const STATUS_OPTIONS = [
   { value: "stopped", label: "Stopped" },
 ] as const;
 
-const COL_SPAN = 15;
+const COL_SPAN = 16;
 
 // ── Component ──────────────────────────────────────────
 
@@ -188,18 +224,22 @@ export default function SignalsDashboard() {
     return () => clearInterval(interval);
   }, [fetchSignals]);
 
-  // Apply client-side status filter + sort by score descending
+  // Apply client-side status filter, sort by score desc then cluster_rank asc
   const filtered = useMemo(() => {
     return signals
       .filter((s) => matchesStatus(s, filters.statusFilter))
-      .sort((a, b) => b.score - a.score);
+      .sort((a, b) => {
+        const scoreDiff = b.score - a.score;
+        if (scoreDiff !== 0) return scoreDiff;
+        return (a.cluster_rank ?? 999) - (b.cluster_rank ?? 999);
+      });
   }, [signals, filters.statusFilter]);
 
-  // Group into hour clusters
+  // Group into clusters using persisted cluster_id
   const clusters = useMemo(() => {
     const map = new Map<string, Signal[]>();
     for (const s of filtered) {
-      const key = clusterKey(s.created_at);
+      const key = clusterKey(s);
       const arr = map.get(key);
       if (arr) arr.push(s);
       else map.set(key, [s]);
@@ -216,18 +256,17 @@ export default function SignalsDashboard() {
         tp2: sigs.filter((s) => s.status === "TP2_HIT").length,
         tp3: sigs.filter((s) => s.status === "TP3_HIT").length,
         stopped: sigs.filter((s) => s.status === "STOPPED").length,
+        selected: sigs.filter((s) => s.selected_for_execution).length,
+        suppressed: sigs.filter((s) => s.suppressed_reason != null).length,
       });
     }
-    // Sort clusters by time descending (most recent first)
     result.sort((a, b) => b.key.localeCompare(a.key));
     return result;
   }, [filtered]);
 
-  const totalFiltered = filtered.length;
-
   return (
     <div className="min-h-screen bg-black text-white p-6 font-[family-name:var(--font-geist-mono)]">
-      <div className="max-w-[1400px] mx-auto">
+      <div className="max-w-[1600px] mx-auto">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div>
@@ -235,10 +274,10 @@ export default function SignalsDashboard() {
               Signal Dashboard
             </h1>
             <p className="text-neutral-500 text-sm mt-1">
-              {totalFiltered} signal{totalFiltered !== 1 ? "s" : ""} in last{" "}
-              {filters.hours}h
+              {filtered.length} signal{filtered.length !== 1 ? "s" : ""} in
+              last {filters.hours}h
               {pricesLoaded && (
-                <span className="ml-2 text-emerald-500">Live prices</span>
+                <span className="ml-2 text-emerald-500">Live</span>
               )}
             </p>
           </div>
@@ -252,67 +291,37 @@ export default function SignalsDashboard() {
 
         {/* Filters */}
         <div className="flex gap-4 mb-6 flex-wrap">
-          {/* Time window */}
-          <div className="flex items-center gap-2">
-            <span className="text-neutral-500 text-sm">Window:</span>
-            <div className="flex gap-1">
-              {HOUR_OPTIONS.map((h) => (
-                <button
-                  key={h}
-                  onClick={() => setFilters((f) => ({ ...f, hours: h }))}
-                  className={`text-sm px-2.5 py-1 rounded transition-colors ${
-                    filters.hours === h
-                      ? "bg-white text-black"
-                      : "border border-white/20 hover:bg-white/10"
-                  }`}
-                >
-                  {h}h
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Tier filter */}
-          <div className="flex items-center gap-2">
-            <span className="text-neutral-500 text-sm">Tier:</span>
-            <div className="flex gap-1">
-              {(["all", "strict", "relaxed"] as const).map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setFilters((f) => ({ ...f, tier: t }))}
-                  className={`text-sm px-2.5 py-1 rounded capitalize transition-colors ${
-                    filters.tier === t
-                      ? "bg-white text-black"
-                      : "border border-white/20 hover:bg-white/10"
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Status filter */}
-          <div className="flex items-center gap-2">
-            <span className="text-neutral-500 text-sm">Status:</span>
-            <div className="flex gap-1">
-              {STATUS_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  onClick={() =>
-                    setFilters((f) => ({ ...f, statusFilter: opt.value }))
-                  }
-                  className={`text-sm px-2.5 py-1 rounded transition-colors ${
-                    filters.statusFilter === opt.value
-                      ? "bg-white text-black"
-                      : "border border-white/20 hover:bg-white/10"
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-          </div>
+          <FilterGroup
+            label="Window"
+            options={HOUR_OPTIONS.map((h) => ({
+              value: String(h),
+              label: `${h}h`,
+            }))}
+            selected={String(filters.hours)}
+            onSelect={(v) =>
+              setFilters((f) => ({ ...f, hours: Number(v) }))
+            }
+          />
+          <FilterGroup
+            label="Tier"
+            options={["all", "strict", "relaxed"].map((t) => ({
+              value: t,
+              label: t.charAt(0).toUpperCase() + t.slice(1),
+            }))}
+            selected={filters.tier}
+            onSelect={(v) => setFilters((f) => ({ ...f, tier: v }))}
+          />
+          <FilterGroup
+            label="Status"
+            options={STATUS_OPTIONS.map((o) => ({
+              value: o.value,
+              label: o.label,
+            }))}
+            selected={filters.statusFilter}
+            onSelect={(v) =>
+              setFilters((f) => ({ ...f, statusFilter: v }))
+            }
+          />
         </div>
 
         {/* Error */}
@@ -324,25 +333,26 @@ export default function SignalsDashboard() {
 
         {/* Table */}
         <div className="overflow-x-auto border border-white/10 rounded-lg">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm whitespace-nowrap">
             <thead>
               <tr className="border-b border-white/10 text-neutral-400 text-left">
-                <th className="px-3 py-2.5">Symbol</th>
-                <th className="px-3 py-2.5">Side</th>
-                <th className="px-3 py-2.5">Type</th>
-                <th className="px-3 py-2.5">Tier</th>
-                <th className="px-3 py-2.5">Score</th>
-                <th className="px-3 py-2.5">Time</th>
-                <th className="px-3 py-2.5 text-right">Entry</th>
-                <th className="px-3 py-2.5 text-right">Current</th>
-                <th className="px-3 py-2.5 text-right">Stop</th>
-                <th className="px-3 py-2.5 text-right">TP1</th>
-                <th className="px-3 py-2.5 text-right">TP2</th>
-                <th className="px-3 py-2.5 text-center">Status</th>
-                <th className="px-3 py-2.5 text-right">% to TP1</th>
-                <th className="px-3 py-2.5 text-right">$100@10x</th>
-                <th className="px-3 py-2.5 text-center">TG</th>
-                <th className="px-3 py-2.5 text-center">TV</th>
+                <th className="px-2 py-2.5">Symbol</th>
+                <th className="px-2 py-2.5">Side</th>
+                <th className="px-2 py-2.5">Type</th>
+                <th className="px-2 py-2.5">Tier</th>
+                <th className="px-2 py-2.5 text-right">Score</th>
+                <th className="px-2 py-2.5 text-center">Rank</th>
+                <th className="px-2 py-2.5 text-center">Sel</th>
+                <th className="px-2 py-2.5">Time</th>
+                <th className="px-2 py-2.5 text-right">Entry</th>
+                <th className="px-2 py-2.5 text-right">Current</th>
+                <th className="px-2 py-2.5 text-right">Stop</th>
+                <th className="px-2 py-2.5 text-right">TP1</th>
+                <th className="px-2 py-2.5 text-center">Status</th>
+                <th className="px-2 py-2.5 text-right">%TP1</th>
+                <th className="px-2 py-2.5 text-right">10x</th>
+                <th className="px-2 py-2.5 text-center">Grade</th>
+                <th className="px-2 py-2.5 text-center">TV</th>
               </tr>
             </thead>
             <tbody>
@@ -375,8 +385,43 @@ export default function SignalsDashboard() {
 
         {/* Footer */}
         <div className="mt-4 text-xs text-neutral-600">
-          Auto-refreshes every 30s &middot; Sorted by score desc
+          Auto-refreshes every 30s &middot; Score desc, then cluster rank asc
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Filter group ───────────────────────────────────────
+
+function FilterGroup({
+  label,
+  options,
+  selected,
+  onSelect,
+}: {
+  label: string;
+  options: { value: string; label: string }[];
+  selected: string;
+  onSelect: (v: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-neutral-500 text-sm">{label}:</span>
+      <div className="flex gap-1">
+        {options.map((o) => (
+          <button
+            key={o.value}
+            onClick={() => onSelect(o.value)}
+            className={`text-sm px-2.5 py-1 rounded transition-colors ${
+              selected === o.value
+                ? "bg-white text-black"
+                : "border border-white/20 hover:bg-white/10"
+            }`}
+          >
+            {o.label}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -387,14 +432,22 @@ export default function SignalsDashboard() {
 function ClusterGroup({ cluster }: { cluster: Cluster }) {
   return (
     <>
-      {/* Cluster header row */}
       <tr className="bg-white/[0.03]">
-        <td colSpan={COL_SPAN + 1} className="px-3 py-2">
-          <div className="flex items-center gap-4 text-xs">
+        <td colSpan={COL_SPAN + 1} className="px-2 py-2">
+          <div className="flex items-center gap-3 text-xs">
             <span className="font-medium text-neutral-300">
               {cluster.label}
             </span>
             <span className="text-neutral-500">{cluster.total} signals</span>
+            {cluster.selected > 0 && (
+              <span className="text-blue-400">{cluster.selected} selected</span>
+            )}
+            {cluster.suppressed > 0 && (
+              <span className="text-neutral-500">
+                {cluster.suppressed} suppressed
+              </span>
+            )}
+            <span className="text-neutral-600">|</span>
             {cluster.open > 0 && (
               <span className="text-neutral-400">{cluster.open} open</span>
             )}
@@ -413,7 +466,6 @@ function ClusterGroup({ cluster }: { cluster: Cluster }) {
           </div>
         </td>
       </tr>
-      {/* Signal rows */}
       {cluster.signals.map((s) => (
         <SignalRow key={s.id} signal={s} />
       ))}
@@ -424,12 +476,22 @@ function ClusterGroup({ cluster }: { cluster: Cluster }) {
 // ── Signal row ─────────────────────────────────────────
 
 function SignalRow({ signal: s }: { signal: Signal }) {
+  const suppressTitle = s.suppressed_reason
+    ? `Suppressed: ${s.suppressed_reason}`
+    : undefined;
+
   return (
-    <tr className="border-b border-white/5 hover:bg-white/5 transition-colors">
-      <td className="px-3 py-2 font-medium">
+    <tr
+      className={`border-b border-white/5 hover:bg-white/5 transition-colors ${
+        !s.selected_for_execution && s.suppressed_reason
+          ? "opacity-50"
+          : ""
+      }`}
+    >
+      <td className="px-2 py-2 font-medium">
         {s.symbol.replace(/USDT$/i, "")}
       </td>
-      <td className="px-3 py-2">
+      <td className="px-2 py-2">
         <span
           className={
             s.decision === "LONG" ? "text-emerald-400" : "text-red-400"
@@ -438,8 +500,8 @@ function SignalRow({ signal: s }: { signal: Signal }) {
           {s.decision}
         </span>
       </td>
-      <td className="px-3 py-2 text-neutral-300">{s.setup_family}</td>
-      <td className="px-3 py-2">
+      <td className="px-2 py-2 text-neutral-300">{s.setup_family}</td>
+      <td className="px-2 py-2">
         <span
           className={`text-xs px-1.5 py-0.5 rounded ${
             s.tier === "STRICT"
@@ -450,60 +512,67 @@ function SignalRow({ signal: s }: { signal: Signal }) {
           {s.tier}
         </span>
       </td>
-      <td className="px-3 py-2 tabular-nums">
-        {s.score > 0 ? s.score.toFixed(2) : "-"}
+      <td className={`px-2 py-2 text-right tabular-nums ${scoreColor(s.score)}`}>
+        {s.score > 0 ? s.score.toFixed(1) : "-"}
       </td>
-      <td className="px-3 py-2 text-neutral-400">{formatTime(s.created_at)}</td>
-      <td className="px-3 py-2 text-right tabular-nums">
+      <td className="px-2 py-2 text-center tabular-nums text-neutral-400">
+        {s.cluster_rank != null ? `#${s.cluster_rank}` : "-"}
+      </td>
+      <td className="px-2 py-2 text-center" title={suppressTitle}>
+        {s.selected_for_execution ? (
+          <span className="text-blue-400">Y</span>
+        ) : s.suppressed_reason ? (
+          <span className="text-neutral-500 cursor-help">N</span>
+        ) : (
+          <span className="text-neutral-600">-</span>
+        )}
+      </td>
+      <td className="px-2 py-2 text-neutral-400">
+        {formatTime(s.created_at)}
+      </td>
+      <td className="px-2 py-2 text-right tabular-nums">
         {formatPrice(s.entry_price)}
       </td>
-      <td className="px-3 py-2 text-right tabular-nums font-medium">
+      <td className="px-2 py-2 text-right tabular-nums font-medium">
         {formatPrice(s.current_price)}
       </td>
-      <td className="px-3 py-2 text-right tabular-nums text-red-400/80">
+      <td className="px-2 py-2 text-right tabular-nums text-red-400/80">
         {formatPrice(s.stop_price)}
       </td>
-      <td className="px-3 py-2 text-right tabular-nums text-emerald-400/80">
+      <td className="px-2 py-2 text-right tabular-nums text-emerald-400/80">
         {formatPrice(s.tp1_price)}
       </td>
-      <td className="px-3 py-2 text-right tabular-nums text-emerald-400/80">
-        {formatPrice(s.tp2_price)}
-      </td>
-      <td className="px-3 py-2 text-center">
+      <td className="px-2 py-2 text-center">
         <span
           className={`text-xs px-1.5 py-0.5 rounded ${statusColor(s.status)}`}
         >
           {s.status.replace("_", " ")}
         </span>
       </td>
-      <td className="px-3 py-2 text-right tabular-nums">
+      <td className="px-2 py-2 text-right tabular-nums">
         {s.pct_to_tp1 != null ? (
           <span
-            className={s.pct_to_tp1 >= 100 ? "text-emerald-400" : s.pct_to_tp1 >= 0 ? "text-neutral-300" : "text-red-400"}
+            className={
+              s.pct_to_tp1 >= 100
+                ? "text-emerald-400"
+                : s.pct_to_tp1 >= 0
+                  ? "text-neutral-300"
+                  : "text-red-400"
+            }
           >
-            {s.pct_to_tp1.toFixed(1)}%
+            {s.pct_to_tp1.toFixed(0)}%
           </span>
         ) : (
           "-"
         )}
       </td>
-      <td className="px-3 py-2 text-right tabular-nums text-emerald-400/80">
+      <td className="px-2 py-2 text-right tabular-nums text-emerald-400/80">
         {positionRef(s)}
       </td>
-      <td className="px-3 py-2 text-center">
-        {s.telegram_sent ? (
-          <span className="text-emerald-400">Y</span>
-        ) : s.blocked_reason ? (
-          <span className="text-yellow-400" title={s.blocked_reason}>
-            B
-          </span>
-        ) : s.telegram_attempted ? (
-          <span className="text-red-400">F</span>
-        ) : (
-          <span className="text-neutral-600">-</span>
-        )}
+      <td className={`px-2 py-2 text-center text-xs ${gradedColor(s.graded_outcome)}`}>
+        {s.graded_outcome ?? "-"}
       </td>
-      <td className="px-3 py-2 text-center">
+      <td className="px-2 py-2 text-center">
         <a
           href={tradingViewUrl(s.symbol)}
           target="_blank"

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { parseBybitResponse } from "@/lib/bybit";
+import { computeCompositeScore } from "@/lib/scoring";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +27,10 @@ async function fetchAllPrices(): Promise<Map<string, number>> {
   return map;
 }
 
+/**
+ * Live dashboard status — derived from current price vs levels.
+ * This is NOT the graded research outcome. It's a real-time operational indicator.
+ */
 function computeStatus(
   decision: string,
   current: number | null,
@@ -44,7 +49,6 @@ function computeStatus(
     if (tp1 != null && current >= tp1) return "TP1_HIT";
     return "OPEN";
   } else {
-    // SHORT
     if (stop != null && current >= stop) return "STOPPED";
     if (tp3 != null && current <= tp3) return "TP3_HIT";
     if (tp2 != null && current <= tp2) return "TP2_HIT";
@@ -75,11 +79,8 @@ export async function GET(req: NextRequest) {
   const supabase = getSupabase();
   const { searchParams } = req.nextUrl;
 
-  // Time window filter (default 24h)
   const hours = Number(searchParams.get("hours") || "24");
   const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-
-  // Tier filter: "strict" | "relaxed" | undefined (all)
   const tier = searchParams.get("tier");
 
   let query = supabase
@@ -87,9 +88,13 @@ export async function GET(req: NextRequest) {
     .select(
       `id, symbol, decision, alert_type, alert_tf, created_at,
        entry_price, stop_price, tp1_price, tp2_price, tp3_price,
-       rr_tp1, rr_tp2,
+       rr_tp1, rr_tp2, vol_ratio, entry_deviation_pct, composite_score,
+       cluster_id, cluster_hour, cluster_size, cluster_rank,
+       selected_for_execution, suppressed_reason,
+       graded_outcome,
+       tp1_hit_at, tp2_hit_at, tp3_hit_at, stopped_at, resolved_at,
        telegram_sent, telegram_attempted, blocked_reason,
-       gate_a_quality, gate_b_passed, gate_b_reason,
+       gate_a_quality, gate_b_passed, gate_b_reason, btc_regime,
        alert_id`
     )
     .in("decision", ["LONG", "SHORT"])
@@ -134,8 +139,19 @@ export async function GET(req: NextRequest) {
       d.tp1_price
     );
 
-    // Simple score: rr_tp1 is the primary signal quality metric available
-    const score = d.rr_tp1 != null ? Number(d.rr_tp1) : 0;
+    // Use persisted composite_score if available; otherwise compute on-the-fly
+    // for backward compatibility with pre-migration rows.
+    let score = d.composite_score != null ? Number(d.composite_score) : null;
+    if (score == null) {
+      const fallback = computeCompositeScore({
+        rr_tp1: d.rr_tp1,
+        vol_ratio: d.vol_ratio,
+        alert_type: d.alert_type,
+        entry_price: d.entry_price,
+        mark_price: currentPrice,
+      });
+      score = fallback.composite_score;
+    }
 
     return {
       id: d.id,
@@ -156,6 +172,22 @@ export async function GET(req: NextRequest) {
       status,
       pct_to_tp1: pctToTp1,
       score,
+      // Cluster metadata
+      cluster_id: d.cluster_id ?? null,
+      cluster_size: d.cluster_size ?? 1,
+      cluster_rank: d.cluster_rank ?? null,
+      // Execution selection
+      selected_for_execution: d.selected_for_execution ?? false,
+      suppressed_reason: d.suppressed_reason ?? null,
+      // Graded outcome (research, distinct from live status)
+      graded_outcome: d.graded_outcome ?? null,
+      // Lifecycle timestamps
+      tp1_hit_at: d.tp1_hit_at ?? null,
+      tp2_hit_at: d.tp2_hit_at ?? null,
+      tp3_hit_at: d.tp3_hit_at ?? null,
+      stopped_at: d.stopped_at ?? null,
+      resolved_at: d.resolved_at ?? null,
+      // Existing fields
       telegram_sent: d.telegram_sent,
       telegram_attempted: d.telegram_attempted,
       blocked_reason: d.blocked_reason,
