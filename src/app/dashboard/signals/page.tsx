@@ -190,11 +190,23 @@ const COL_SPAN = 16;
 
 // ── Component ──────────────────────────────────────────
 
+type SelectionStats = {
+  schema_available: boolean;
+  total_resolved?: number;
+  total_unresolved?: number;
+  by_selection?: {
+    selected: { total: number; win_full: number; win_partial: number; loss: number; win_rate: number | null };
+    suppressed: { total: number; win_full: number; win_partial: number; loss: number; win_rate: number | null };
+  };
+};
+
 export default function SignalsDashboard() {
   const [signals, setSignals] = useState<Signal[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pricesLoaded, setPricesLoaded] = useState(false);
+  const [schemaVersion, setSchemaVersion] = useState<string>("unknown");
+  const [selectionStats, setSelectionStats] = useState<SelectionStats | null>(null);
   const [filters, setFilters] = useState<Filters>({
     hours: 4,
     tier: "all",
@@ -212,12 +224,21 @@ export default function SignalsDashboard() {
       const json = await res.json();
       setSignals(json.signals);
       setPricesLoaded(json.prices_loaded);
+      setSchemaVersion(json.schema_version ?? "unknown");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Fetch failed");
     } finally {
       setLoading(false);
     }
   }, [filters]);
+
+  // Fetch selection stats once on mount
+  useEffect(() => {
+    fetch("/api/dashboard/selection-stats")
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => { if (d) setSelectionStats(d); })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetchSignals();
@@ -289,6 +310,36 @@ export default function SignalsDashboard() {
             Refresh
           </button>
         </div>
+
+        {/* Degraded schema banner */}
+        {schemaVersion === "base" && (
+          <div className="mb-4 p-3 bg-yellow-900/30 border border-yellow-500/30 rounded text-yellow-300 text-xs">
+            Schema degraded — migration 014 not applied. Cluster metadata, composite scores, lifecycle fields, and selection data are unavailable.
+          </div>
+        )}
+
+        {/* Selection stats (compact) */}
+        {selectionStats?.schema_available && selectionStats.by_selection && (
+          <div className="mb-4 flex gap-6 text-xs text-neutral-400 border border-white/5 rounded p-3">
+            <span className="text-neutral-500">Resolved: {selectionStats.total_resolved}</span>
+            <span>
+              Selected: {selectionStats.by_selection.selected.total}
+              {selectionStats.by_selection.selected.win_rate != null && (
+                <span className="text-emerald-400 ml-1">
+                  {selectionStats.by_selection.selected.win_rate}% WR
+                </span>
+              )}
+            </span>
+            <span>
+              Suppressed: {selectionStats.by_selection.suppressed.total}
+              {selectionStats.by_selection.suppressed.win_rate != null && (
+                <span className="text-neutral-500 ml-1">
+                  {selectionStats.by_selection.suppressed.win_rate}% WR
+                </span>
+              )}
+            </span>
+          </div>
+        )}
 
         {/* Filters */}
         <div className="flex gap-4 mb-6 flex-wrap">

@@ -346,8 +346,15 @@ async function insertGrade(
 
 /**
  * Write lifecycle/grading fields back to the decisions table.
- * Best-effort: if migration 014 columns don't exist, the update silently fails.
- * Only writes non-null timestamps to preserve first-hit semantics on re-grading.
+ *
+ * OVERWRITE PROTECTION (first-hit semantics):
+ *   - Reads existing lifecycle values before writing
+ *   - Timestamps (tp1_hit_at, stopped_at, etc.) are only set if currently null
+ *   - graded_outcome and resolution_path are only set if currently null
+ *   - Once a decision is resolved, its lifecycle data is durable
+ *   - This prevents re-grading from corrupting earlier truth
+ *
+ * Best-effort: if migration 014 columns don't exist, degrades silently.
  */
 async function writeLifecycleToDecision(
   supabase: ReturnType<typeof getSupabase>,
@@ -362,29 +369,59 @@ async function writeLifecycleToDecision(
     stopped_at?: string | null;
   }
 ) {
-  // Build update payload — only include non-null timestamps
-  const update: Record<string, unknown> = {
-    graded_outcome: fields.graded_outcome,
-    resolution_path: fields.resolution_path,
-  };
+  // Read existing lifecycle values to enforce first-hit semantics
+  const { data: existing, error: readErr } = await supabase
+    .from("decisions")
+    .select("graded_outcome, resolution_path, resolved_at, tp1_hit_at, tp2_hit_at, tp3_hit_at, stopped_at")
+    .eq("id", decisionId)
+    .maybeSingle();
 
-  if (fields.resolved_at != null) update.resolved_at = fields.resolved_at;
-  if (fields.tp1_hit_at != null) update.tp1_hit_at = fields.tp1_hit_at;
-  if (fields.tp2_hit_at != null) update.tp2_hit_at = fields.tp2_hit_at;
-  if (fields.tp3_hit_at != null) update.tp3_hit_at = fields.tp3_hit_at;
-  if (fields.stopped_at != null) update.stopped_at = fields.stopped_at;
+  if (readErr) {
+    if (readErr.message.includes("does not exist")) {
+      console.warn("[grade-production] Lifecycle columns not available (migration 014 not applied)");
+    } else {
+      console.error(`[grade-production] Failed to read lifecycle for ${decisionId}:`, readErr.message);
+    }
+    return;
+  }
 
-  const { error } = await supabase
+  // Build update payload — only write fields that are currently null in the DB.
+  // This ensures earlier grading truth is never overwritten by a re-grade.
+  const update: Record<string, unknown> = {};
+
+  if (!existing?.graded_outcome && fields.graded_outcome) {
+    update.graded_outcome = fields.graded_outcome;
+  }
+  if (!existing?.resolution_path && fields.resolution_path) {
+    update.resolution_path = fields.resolution_path;
+  }
+  if (!existing?.resolved_at && fields.resolved_at != null) {
+    update.resolved_at = fields.resolved_at;
+  }
+  if (!existing?.tp1_hit_at && fields.tp1_hit_at != null) {
+    update.tp1_hit_at = fields.tp1_hit_at;
+  }
+  if (!existing?.tp2_hit_at && fields.tp2_hit_at != null) {
+    update.tp2_hit_at = fields.tp2_hit_at;
+  }
+  if (!existing?.tp3_hit_at && fields.tp3_hit_at != null) {
+    update.tp3_hit_at = fields.tp3_hit_at;
+  }
+  if (!existing?.stopped_at && fields.stopped_at != null) {
+    update.stopped_at = fields.stopped_at;
+  }
+
+  // Nothing to write — all fields already populated
+  if (Object.keys(update).length === 0) {
+    return;
+  }
+
+  const { error: writeErr } = await supabase
     .from("decisions")
     .update(update)
     .eq("id", decisionId);
 
-  if (error) {
-    // If columns don't exist (migration not applied), log and continue
-    if (error.message.includes("does not exist")) {
-      console.warn("[grade-production] Lifecycle columns not available (migration 014 not applied)");
-    } else {
-      console.error(`[grade-production] Failed to write lifecycle for ${decisionId}:`, error.message);
-    }
+  if (writeErr) {
+    console.error(`[grade-production] Failed to write lifecycle for ${decisionId}:`, writeErr.message);
   }
 }
