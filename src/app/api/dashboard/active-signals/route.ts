@@ -147,6 +147,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
+  // Two status concepts coexist in the response:
+  //   status:         live operational indicator derived from current price vs levels.
+  //                   Ephemeral, recalculated on each request. Not persisted.
+  //   graded_outcome: durable research truth set by the grading job. Once set, it is
+  //                   protected from re-grading overwrite (first-hit semantics).
+  //                   Manual DB repair is the only way to change a resolved outcome.
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const signals = (decisions ?? []).map((d: any) => {
     const isRelaxed = /_RELAXED$/i.test(d.alert_type);

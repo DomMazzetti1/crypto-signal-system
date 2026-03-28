@@ -23,22 +23,20 @@ type Signal = {
   status: string;
   pct_to_tp1: number | null;
   score: number;
-  // Cluster metadata
   cluster_id: string | null;
   cluster_size: number;
   cluster_rank: number | null;
-  // Execution selection
   selected_for_execution: boolean;
   suppressed_reason: string | null;
-  // Graded outcome (research, distinct from live status)
+  // graded_outcome is persisted research truth, separate from live status.
+  // Live status (OPEN/TP1_HIT/STOPPED/etc.) is derived from current price.
+  // graded_outcome (WIN_FULL/LOSS/etc.) is set by the grading job and is durable.
   graded_outcome: string | null;
-  // Lifecycle
   tp1_hit_at: string | null;
   tp2_hit_at: string | null;
   tp3_hit_at: string | null;
   stopped_at: string | null;
   resolved_at: string | null;
-  // Existing
   telegram_sent: boolean;
   telegram_attempted: boolean;
   blocked_reason: string | null;
@@ -90,6 +88,7 @@ function formatTime(iso: string): string {
 
 function formatPrice(val: number | null): string {
   if (val == null) return "-";
+  if (!Number.isFinite(val)) return "-";
   if (val >= 1000) return val.toFixed(2);
   if (val >= 1) return val.toFixed(4);
   return val.toPrecision(4);
@@ -108,7 +107,8 @@ function statusColor(status: string): string {
     case "OPEN":
       return "text-neutral-300 bg-white/5";
     default:
-      return "text-neutral-500 bg-white/5";
+      // UNKNOWN — neutral, not alarming
+      return "text-neutral-600 bg-transparent";
   }
 }
 
@@ -120,7 +120,6 @@ function gradedColor(outcome: string | null): string {
 }
 
 function clusterKey(signal: Signal): string {
-  // Use persisted cluster_id if available, else derive from created_at hour
   if (signal.cluster_id) return signal.cluster_id;
   const d = new Date(signal.created_at);
   d.setMinutes(0, 0, 0);
@@ -128,12 +127,10 @@ function clusterKey(signal: Signal): string {
 }
 
 function clusterLabel(key: string): string {
-  // Persisted cluster_id format: "YYYY-MM-DDTHH:DIRECTION:REGIME"
-  // Derived format: ISO string
-  const hourPart = key.slice(0, 13); // "YYYY-MM-DDTHH"
-  const rest = key.slice(14); // "LONG:bear" or empty
+  const hourPart = key.slice(0, 13);
+  const rest = key.slice(14);
   const d = new Date(hourPart + ":00:00.000Z");
-  if (isNaN(d.getTime())) return key; // fallback for unparseable keys
+  if (isNaN(d.getTime())) return key;
   const time = d.toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
@@ -151,8 +148,8 @@ function positionRef(signal: Signal): string {
     return "-";
   const pctMove =
     Math.abs(signal.tp1_price - signal.entry_price) / signal.entry_price;
-  const leverage = 10;
-  const returnPct = pctMove * leverage * 100;
+  if (!Number.isFinite(pctMove)) return "-";
+  const returnPct = pctMove * 10 * 100;
   return `+${returnPct.toFixed(1)}%`;
 }
 
@@ -170,6 +167,7 @@ function matchesStatus(signal: Signal, filter: string): boolean {
 }
 
 function scoreColor(score: number): string {
+  if (!Number.isFinite(score) || score <= 0) return "text-neutral-600";
   if (score >= 70) return "text-emerald-400";
   if (score >= 50) return "text-yellow-400";
   if (score >= 30) return "text-orange-400";
@@ -188,17 +186,22 @@ const STATUS_OPTIONS = [
 
 const COL_SPAN = 16;
 
-// ── Component ──────────────────────────────────────────
+// ── Selection stats type ───────────────────────────────
 
 type SelectionStats = {
   schema_available: boolean;
   total_resolved?: number;
   total_unresolved?: number;
+  comparison_eligible?: number;
+  comparison_excluded_untagged?: number;
+  win_rate_definition?: string;
   by_selection?: {
-    selected: { total: number; win_full: number; win_partial: number; loss: number; win_rate: number | null };
-    suppressed: { total: number; win_full: number; win_partial: number; loss: number; win_rate: number | null };
+    selected: { total: number; win_full: number; win_partial: number; loss: number; win_rate: number | null; eligible_for_rate: number };
+    suppressed: { total: number; win_full: number; win_partial: number; loss: number; win_rate: number | null; eligible_for_rate: number };
   };
 };
+
+// ── Component ──────────────────────────────────────────
 
 export default function SignalsDashboard() {
   const [signals, setSignals] = useState<Signal[]>([]);
@@ -213,6 +216,8 @@ export default function SignalsDashboard() {
     statusFilter: "open",
   });
 
+  const isDegraded = schemaVersion === "base";
+
   const fetchSignals = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -222,8 +227,8 @@ export default function SignalsDashboard() {
       const res = await fetch(`/api/dashboard/active-signals?${params}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
-      setSignals(json.signals);
-      setPricesLoaded(json.prices_loaded);
+      setSignals(json.signals ?? []);
+      setPricesLoaded(json.prices_loaded ?? false);
       setSchemaVersion(json.schema_version ?? "unknown");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Fetch failed");
@@ -232,11 +237,12 @@ export default function SignalsDashboard() {
     }
   }, [filters]);
 
-  // Fetch selection stats once on mount
   useEffect(() => {
     fetch("/api/dashboard/selection-stats")
-      .then((r) => r.ok ? r.json() : null)
-      .then((d) => { if (d) setSelectionStats(d); })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d) setSelectionStats(d);
+      })
       .catch(() => {});
   }, []);
 
@@ -246,7 +252,6 @@ export default function SignalsDashboard() {
     return () => clearInterval(interval);
   }, [fetchSignals]);
 
-  // Apply client-side status filter, sort by score desc then cluster_rank asc
   const filtered = useMemo(() => {
     return signals
       .filter((s) => matchesStatus(s, filters.statusFilter))
@@ -257,7 +262,6 @@ export default function SignalsDashboard() {
       });
   }, [signals, filters.statusFilter]);
 
-  // Group into clusters using persisted cluster_id
   const clusters = useMemo(() => {
     const map = new Map<string, Signal[]>();
     for (const s of filtered) {
@@ -298,8 +302,10 @@ export default function SignalsDashboard() {
             <p className="text-neutral-500 text-sm mt-1">
               {filtered.length} signal{filtered.length !== 1 ? "s" : ""} in
               last {filters.hours}h
-              {pricesLoaded && (
-                <span className="ml-2 text-emerald-500">Live</span>
+              {pricesLoaded ? (
+                <span className="ml-2 text-emerald-500">Live prices</span>
+              ) : (
+                <span className="ml-2 text-neutral-600">Prices unavailable</span>
               )}
             </p>
           </div>
@@ -312,34 +318,52 @@ export default function SignalsDashboard() {
         </div>
 
         {/* Degraded schema banner */}
-        {schemaVersion === "base" && (
-          <div className="mb-4 p-3 bg-yellow-900/30 border border-yellow-500/30 rounded text-yellow-300 text-xs">
-            Schema degraded — migration 014 not applied. Cluster metadata, composite scores, lifecycle fields, and selection data are unavailable.
+        {isDegraded && (
+          <div className="mb-4 p-3 bg-yellow-900/30 border border-yellow-500/30 rounded text-yellow-300 text-xs leading-relaxed">
+            <strong>Degraded mode</strong> — migration 014 not applied.
+            Cluster metadata not persisted. Scores are fallback (not persisted).
+            Rank/Selection/Grade columns are unavailable. Research comparison disabled.
           </div>
         )}
 
-        {/* Selection stats (compact) */}
-        {selectionStats?.schema_available && selectionStats.by_selection && (
-          <div className="mb-4 flex gap-6 text-xs text-neutral-400 border border-white/5 rounded p-3">
-            <span className="text-neutral-500">Resolved: {selectionStats.total_resolved}</span>
-            <span>
-              Selected: {selectionStats.by_selection.selected.total}
-              {selectionStats.by_selection.selected.win_rate != null && (
-                <span className="text-emerald-400 ml-1">
-                  {selectionStats.by_selection.selected.win_rate}% WR
-                </span>
-              )}
-            </span>
-            <span>
-              Suppressed: {selectionStats.by_selection.suppressed.total}
-              {selectionStats.by_selection.suppressed.win_rate != null && (
-                <span className="text-neutral-500 ml-1">
-                  {selectionStats.by_selection.suppressed.win_rate}% WR
-                </span>
-              )}
-            </span>
-          </div>
-        )}
+        {/* Selection stats — only shown when schema is full and data exists */}
+        {!isDegraded &&
+          selectionStats?.schema_available &&
+          selectionStats.by_selection &&
+          (selectionStats.comparison_eligible ?? 0) > 0 && (
+            <div className="mb-4 flex gap-6 text-xs text-neutral-400 border border-white/5 rounded p-3">
+              <span className="text-neutral-500">
+                Eligible: {selectionStats.comparison_eligible}
+                {(selectionStats.comparison_excluded_untagged ?? 0) > 0 && (
+                  <span className="text-neutral-600 ml-1">
+                    ({selectionStats.comparison_excluded_untagged} untagged excl)
+                  </span>
+                )}
+              </span>
+              <span>
+                Selected: {selectionStats.by_selection.selected.total}
+                {selectionStats.by_selection.selected.win_rate != null && (
+                  <span className="text-emerald-400 ml-1">
+                    {selectionStats.by_selection.selected.win_rate}% WR
+                  </span>
+                )}
+                {selectionStats.by_selection.selected.win_rate == null && (
+                  <span className="text-neutral-600 ml-1">no data</span>
+                )}
+              </span>
+              <span>
+                Suppressed: {selectionStats.by_selection.suppressed.total}
+                {selectionStats.by_selection.suppressed.win_rate != null && (
+                  <span className="text-neutral-500 ml-1">
+                    {selectionStats.by_selection.suppressed.win_rate}% WR
+                  </span>
+                )}
+                {selectionStats.by_selection.suppressed.win_rate == null && (
+                  <span className="text-neutral-600 ml-1">no data</span>
+                )}
+              </span>
+            </div>
+          )}
 
         {/* Filters */}
         <div className="flex gap-4 mb-6 flex-wrap">
@@ -392,9 +416,11 @@ export default function SignalsDashboard() {
                 <th className="px-2 py-2.5">Side</th>
                 <th className="px-2 py-2.5">Type</th>
                 <th className="px-2 py-2.5">Tier</th>
-                <th className="px-2 py-2.5 text-right">Score</th>
-                <th className="px-2 py-2.5 text-center">Rank</th>
-                <th className="px-2 py-2.5 text-center">Sel</th>
+                <th className="px-2 py-2.5 text-right">
+                  Score{isDegraded && <span className="text-neutral-600 text-[10px] ml-0.5">*</span>}
+                </th>
+                {!isDegraded && <th className="px-2 py-2.5 text-center">Rank</th>}
+                {!isDegraded && <th className="px-2 py-2.5 text-center">Sel</th>}
                 <th className="px-2 py-2.5">Time</th>
                 <th className="px-2 py-2.5 text-right">Entry</th>
                 <th className="px-2 py-2.5 text-right">Current</th>
@@ -403,7 +429,7 @@ export default function SignalsDashboard() {
                 <th className="px-2 py-2.5 text-center">Status</th>
                 <th className="px-2 py-2.5 text-right">%TP1</th>
                 <th className="px-2 py-2.5 text-right">10x</th>
-                <th className="px-2 py-2.5 text-center">Grade</th>
+                {!isDegraded && <th className="px-2 py-2.5 text-center">Grade</th>}
                 <th className="px-2 py-2.5 text-center">TV</th>
               </tr>
             </thead>
@@ -428,7 +454,11 @@ export default function SignalsDashboard() {
                 </tr>
               ) : (
                 clusters.map((cluster) => (
-                  <ClusterGroup key={cluster.key} cluster={cluster} />
+                  <ClusterGroup
+                    key={cluster.key}
+                    cluster={cluster}
+                    isDegraded={isDegraded}
+                  />
                 ))
               )}
             </tbody>
@@ -437,7 +467,8 @@ export default function SignalsDashboard() {
 
         {/* Footer */}
         <div className="mt-4 text-xs text-neutral-600">
-          Auto-refreshes every 30s &middot; Score desc, then cluster rank asc
+          Auto-refreshes every 30s
+          {isDegraded && " · Score is fallback (not persisted)"}
         </div>
       </div>
     </div>
@@ -481,20 +512,29 @@ function FilterGroup({
 
 // ── Cluster group ──────────────────────────────────────
 
-function ClusterGroup({ cluster }: { cluster: Cluster }) {
+function ClusterGroup({
+  cluster,
+  isDegraded,
+}: {
+  cluster: Cluster;
+  isDegraded: boolean;
+}) {
+  const colCount = isDegraded ? COL_SPAN - 2 : COL_SPAN + 1;
   return (
     <>
       <tr className="bg-white/[0.03]">
-        <td colSpan={COL_SPAN + 1} className="px-2 py-2">
+        <td colSpan={colCount} className="px-2 py-2">
           <div className="flex items-center gap-3 text-xs">
             <span className="font-medium text-neutral-300">
               {cluster.label}
             </span>
             <span className="text-neutral-500">{cluster.total} signals</span>
-            {cluster.selected > 0 && (
-              <span className="text-blue-400">{cluster.selected} selected</span>
+            {!isDegraded && cluster.selected > 0 && (
+              <span className="text-blue-400">
+                {cluster.selected} selected
+              </span>
             )}
-            {cluster.suppressed > 0 && (
+            {!isDegraded && cluster.suppressed > 0 && (
               <span className="text-neutral-500">
                 {cluster.suppressed} suppressed
               </span>
@@ -519,7 +559,7 @@ function ClusterGroup({ cluster }: { cluster: Cluster }) {
         </td>
       </tr>
       {cluster.signals.map((s) => (
-        <SignalRow key={s.id} signal={s} />
+        <SignalRow key={s.id} signal={s} isDegraded={isDegraded} />
       ))}
     </>
   );
@@ -527,7 +567,13 @@ function ClusterGroup({ cluster }: { cluster: Cluster }) {
 
 // ── Signal row ─────────────────────────────────────────
 
-function SignalRow({ signal: s }: { signal: Signal }) {
+function SignalRow({
+  signal: s,
+  isDegraded,
+}: {
+  signal: Signal;
+  isDegraded: boolean;
+}) {
   const suppressTitle = s.suppressed_reason
     ? `Suppressed: ${s.suppressed_reason}`
     : undefined;
@@ -535,7 +581,7 @@ function SignalRow({ signal: s }: { signal: Signal }) {
   return (
     <tr
       className={`border-b border-white/5 hover:bg-white/5 transition-colors ${
-        !s.selected_for_execution && s.suppressed_reason
+        !isDegraded && !s.selected_for_execution && s.suppressed_reason
           ? "opacity-50"
           : ""
       }`}
@@ -564,21 +610,27 @@ function SignalRow({ signal: s }: { signal: Signal }) {
           {s.tier}
         </span>
       </td>
-      <td className={`px-2 py-2 text-right tabular-nums ${s.score > 0 ? scoreColor(s.score) : "text-neutral-600"}`}>
+      <td
+        className={`px-2 py-2 text-right tabular-nums ${scoreColor(s.score)}`}
+      >
         {s.score > 0 ? s.score.toFixed(1) : "-"}
       </td>
-      <td className="px-2 py-2 text-center tabular-nums text-neutral-400">
-        {s.cluster_rank != null ? `#${s.cluster_rank}` : "-"}
-      </td>
-      <td className="px-2 py-2 text-center" title={suppressTitle}>
-        {s.selected_for_execution ? (
-          <span className="text-blue-400">Y</span>
-        ) : s.suppressed_reason ? (
-          <span className="text-neutral-500 cursor-help">N</span>
-        ) : (
-          <span className="text-neutral-600">-</span>
-        )}
-      </td>
+      {!isDegraded && (
+        <td className="px-2 py-2 text-center tabular-nums text-neutral-400">
+          {s.cluster_rank != null ? `#${s.cluster_rank}` : "-"}
+        </td>
+      )}
+      {!isDegraded && (
+        <td className="px-2 py-2 text-center" title={suppressTitle}>
+          {s.selected_for_execution ? (
+            <span className="text-blue-400">Y</span>
+          ) : s.suppressed_reason ? (
+            <span className="text-neutral-500 cursor-help">N</span>
+          ) : (
+            <span className="text-neutral-600">-</span>
+          )}
+        </td>
+      )}
       <td className="px-2 py-2 text-neutral-400">
         {formatTime(s.created_at)}
       </td>
@@ -598,11 +650,11 @@ function SignalRow({ signal: s }: { signal: Signal }) {
         <span
           className={`text-xs px-1.5 py-0.5 rounded ${statusColor(s.status)}`}
         >
-          {s.status.replace("_", " ")}
+          {s.status === "UNKNOWN" ? "-" : s.status.replace("_", " ")}
         </span>
       </td>
       <td className="px-2 py-2 text-right tabular-nums">
-        {s.pct_to_tp1 != null ? (
+        {s.pct_to_tp1 != null && Number.isFinite(s.pct_to_tp1) ? (
           <span
             className={
               s.pct_to_tp1 >= 100
@@ -621,9 +673,13 @@ function SignalRow({ signal: s }: { signal: Signal }) {
       <td className="px-2 py-2 text-right tabular-nums text-emerald-400/80">
         {positionRef(s)}
       </td>
-      <td className={`px-2 py-2 text-center text-xs ${gradedColor(s.graded_outcome)}`}>
-        {s.graded_outcome ?? "-"}
-      </td>
+      {!isDegraded && (
+        <td
+          className={`px-2 py-2 text-center text-xs ${gradedColor(s.graded_outcome)}`}
+        >
+          {s.graded_outcome ?? "-"}
+        </td>
+      )}
       <td className="px-2 py-2 text-center">
         <a
           href={tradingViewUrl(s.symbol)}

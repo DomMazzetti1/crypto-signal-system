@@ -7,16 +7,20 @@ export const dynamic = "force-dynamic";
  * GET /api/dashboard/selection-stats
  *
  * Minimal research surface for comparing selected vs suppressed outcomes.
- * Only counts rows with non-null graded_outcome (resolved signals).
  *
- * Win rate definition:
- *   (WIN_FULL + WIN_PARTIAL) / (total resolved, excluding INVALID and CANCELLED)
+ * ELIGIBILITY RULES:
+ *   Only rows meeting ALL of these criteria are included in comparison stats:
+ *   1. decision is LONG or SHORT (no NO_TRADE)
+ *   2. graded_outcome is non-null (signal is resolved)
+ *   3. graded_outcome is not INVALID, CANCELLED, or STALE_ENTRY
+ *   4. selected_for_execution or suppressed_reason is non-null
+ *      (row was actually tagged by cluster selection logic — pre-migration
+ *       rows without selection metadata are excluded to avoid contamination)
  *
- * Returns:
- *   - by_selection: selected vs suppressed outcome counts and win rates
- *   - by_rank: rank 1 vs rank 2+ outcome counts and win rates
- *   - total_resolved: total signals with a graded outcome
- *   - total_unresolved: signals without a graded outcome yet
+ * WIN RATE DEFINITION:
+ *   (WIN_FULL + WIN_PARTIAL) / eligible_for_rate
+ *   where eligible_for_rate = total minus INVALID/CANCELLED/STALE_ENTRY outcomes
+ *   Returned as a percentage, e.g. 66.7
  *
  * Requires migration 014 columns. Returns schema_available: false if not applied.
  */
@@ -27,8 +31,7 @@ export async function GET() {
   const { data: rows, error } = await supabase
     .from("decisions")
     .select("selected_for_execution, suppressed_reason, cluster_rank, graded_outcome")
-    .in("decision", ["LONG", "SHORT"])
-    .not("graded_outcome", "is", null);
+    .in("decision", ["LONG", "SHORT"]);
 
   if (error) {
     if (error.message.includes("does not exist")) {
@@ -40,17 +43,23 @@ export async function GET() {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  // Also count unresolved
-  const { count: unresolvedCount } = await supabase
-    .from("decisions")
-    .select("id", { count: "exact", head: true })
-    .in("decision", ["LONG", "SHORT"])
-    .is("graded_outcome", null);
+  const allRows = rows ?? [];
 
-  const resolved = rows ?? [];
+  // Split into resolved vs unresolved
+  const resolved = allRows.filter((r) => r.graded_outcome != null);
+  const unresolved = allRows.filter((r) => r.graded_outcome == null);
 
-  // Exclude INVALID and CANCELLED from win rate calculation
-  const excludedOutcomes = new Set(["INVALID", "CANCELLED", "STALE_ENTRY"]);
+  // Outcomes excluded from win-rate denominator
+  const nonComparisonOutcomes = new Set(["INVALID", "CANCELLED", "STALE_ENTRY"]);
+
+  // Rows eligible for selected-vs-suppressed comparison:
+  // must have graded_outcome AND must have been tagged by cluster selection logic
+  const tagged = resolved.filter(
+    (r) => r.selected_for_execution === true || r.suppressed_reason != null
+  );
+  const untagged = resolved.filter(
+    (r) => r.selected_for_execution !== true && r.suppressed_reason == null
+  );
 
   function computeStats(subset: typeof resolved) {
     const total = subset.length;
@@ -58,27 +67,42 @@ export async function GET() {
     const winPartial = subset.filter((r) => r.graded_outcome === "WIN_PARTIAL").length;
     const loss = subset.filter((r) => r.graded_outcome === "LOSS").length;
     const expired = subset.filter((r) => r.graded_outcome === "EXPIRED").length;
-    const eligible = subset.filter((r) => !excludedOutcomes.has(r.graded_outcome)).length;
-    const winRate = eligible > 0 ? (winFull + winPartial) / eligible : null;
+    const excluded = subset.filter((r) => nonComparisonOutcomes.has(r.graded_outcome)).length;
+    const eligibleForRate = total - excluded;
+    const winRate =
+      eligibleForRate > 0
+        ? Math.round(((winFull + winPartial) / eligibleForRate) * 1000) / 10
+        : null;
 
-    return { total, win_full: winFull, win_partial: winPartial, loss, expired, eligible_for_rate: eligible, win_rate: winRate != null ? Math.round(winRate * 1000) / 10 : null };
+    return {
+      total,
+      win_full: winFull,
+      win_partial: winPartial,
+      loss,
+      expired,
+      excluded,
+      eligible_for_rate: eligibleForRate,
+      win_rate: winRate,
+    };
   }
 
-  const selected = resolved.filter((r) => r.selected_for_execution === true);
-  const suppressed = resolved.filter((r) => r.suppressed_reason != null);
-  const neither = resolved.filter((r) => !r.selected_for_execution && !r.suppressed_reason);
+  const selected = tagged.filter((r) => r.selected_for_execution === true);
+  const suppressed = tagged.filter((r) => r.suppressed_reason != null && r.selected_for_execution !== true);
 
-  const rank1 = resolved.filter((r) => r.cluster_rank === 1);
-  const rank2plus = resolved.filter((r) => r.cluster_rank != null && r.cluster_rank > 1);
+  const rank1 = tagged.filter((r) => r.cluster_rank === 1);
+  const rank2plus = tagged.filter((r) => r.cluster_rank != null && r.cluster_rank > 1);
 
   return NextResponse.json({
     schema_available: true,
+    // Win rate = (WIN_FULL + WIN_PARTIAL) / (total - INVALID - CANCELLED - STALE_ENTRY)
+    win_rate_definition: "(WIN_FULL + WIN_PARTIAL) / eligible, excl INVALID/CANCELLED/STALE_ENTRY",
     total_resolved: resolved.length,
-    total_unresolved: unresolvedCount ?? 0,
+    total_unresolved: unresolved.length,
+    comparison_eligible: tagged.length,
+    comparison_excluded_untagged: untagged.length,
     by_selection: {
       selected: computeStats(selected),
       suppressed: computeStats(suppressed),
-      untagged: computeStats(neither),
     },
     by_rank: {
       rank_1: computeStats(rank1),
