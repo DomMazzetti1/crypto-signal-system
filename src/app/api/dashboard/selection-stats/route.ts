@@ -31,7 +31,7 @@ export async function GET() {
   const { data: rows, error } = await supabase
     .from("decisions")
     .select("selected_for_execution, suppressed_reason, cluster_rank, graded_outcome")
-    .in("decision", ["LONG", "SHORT"]);
+    .in("decision", ["LONG", "SHORT", "MR_LONG", "MR_SHORT"]);
 
   if (error) {
     if (error.message.includes("does not exist")) {
@@ -45,7 +45,7 @@ export async function GET() {
 
   const allRows = rows ?? [];
 
-  // Split into resolved vs unresolved
+  // Split into resolved vs unresolved.
   const resolved = allRows.filter((r) => r.graded_outcome != null);
   const unresolved = allRows.filter((r) => r.graded_outcome == null);
 
