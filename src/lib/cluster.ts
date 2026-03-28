@@ -6,11 +6,15 @@
  *   cluster_id = "{YYYY-MM-DDTHH}:{LONG|SHORT}:{regime}"
  *   cluster_hour = created_at truncated to the hour
  *
- * Ranking within cluster:
+ * Ranking within cluster (insert-time only — not recomputed retroactively):
  *   1. composite_score DESC
  *   2. rr_tp1 DESC
  *   3. created_at ASC (newer = higher rank as tiebreak)
  *   Rank 1 = best signal in cluster.
+ *
+ * cluster_rank semantics: rank-at-time-of-insert. When a new higher-score
+ * signal joins a cluster, earlier members are NOT re-ranked. This is
+ * intentional for v1 to keep writes simple and avoid race conditions.
  *
  * Execution selection policy:
  *   - Maximum 1 STRICT signal selected per cluster
@@ -26,6 +30,11 @@
  *   - DATA_ONLY_NON_EXECUTABLE
  *   - COOLDOWN_ACTIVE
  *   - INVALID_LEVELS (set upstream, not here)
+ *
+ * Migration resilience:
+ *   If migration 014 has not been applied, the cluster query will return
+ *   empty results (cluster_id column won't exist → query returns error →
+ *   treated as empty cluster). The signal proceeds with rank=1, selected=true.
  */
 
 import { getSupabase } from "@/lib/supabase";
@@ -75,6 +84,7 @@ export function buildClusterId(
 /**
  * Assigns cluster metadata and determines execution selection for a new signal.
  * Queries existing cluster members to determine rank and selection eligibility.
+ * Resilient to missing migration 014 columns — degrades to rank=1, selected=true.
  */
 export async function assignCluster(
   input: ClusterInput
@@ -107,17 +117,27 @@ export async function assignCluster(
     };
   }
 
-  // Fetch existing decisions in this cluster
+  // Fetch existing decisions in this cluster.
+  // If migration 014 is not applied, cluster_id/composite_score/selected_for_execution
+  // won't exist → query error → treat as empty cluster (first signal, rank 1, selected).
   const supabase = getSupabase();
-  const { data: existing } = await supabase
+  let clusterMembers: { id: string; composite_score: unknown; rr_tp1: unknown; alert_type: string; selected_for_execution: unknown }[] = [];
+
+  const { data: existing, error: clusterErr } = await supabase
     .from("decisions")
     .select("id, composite_score, rr_tp1, alert_type, selected_for_execution, created_at")
     .eq("cluster_id", clusterId)
     .in("decision", ["LONG", "SHORT"])
     .order("composite_score", { ascending: false });
 
-  const clusterMembers = existing ?? [];
-  const clusterSize = clusterMembers.length + 1; // including this new signal
+  if (clusterErr) {
+    // Column doesn't exist (pre-migration) — proceed as empty cluster
+    console.warn("[cluster] Cluster query failed (migration 014 not applied?), proceeding as new cluster");
+  } else {
+    clusterMembers = existing ?? [];
+  }
+
+  const clusterSize = clusterMembers.length + 1;
 
   // Determine rank: count how many existing members have a higher score
   let rank = 1;
@@ -160,13 +180,16 @@ export async function assignCluster(
     }
   }
 
-  // Update cluster_size on existing members (lightweight indexed update)
+  // Update cluster_size on existing members (best-effort, non-blocking)
   if (clusterMembers.length > 0) {
     const ids = clusterMembers.map((m) => m.id);
     await supabase
       .from("decisions")
       .update({ cluster_size: clusterSize })
-      .in("id", ids);
+      .in("id", ids)
+      .then(({ error: updateErr }) => {
+        if (updateErr) console.warn("[cluster] cluster_size update failed:", updateErr.message);
+      });
   }
 
   return {

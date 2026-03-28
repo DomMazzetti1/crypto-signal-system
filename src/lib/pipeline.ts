@@ -518,11 +518,9 @@ export async function runPipeline(
   }
 
   // ── 10. Store decision ────────────────────────────────
-  // NOTE: claude columns (prompt_version_id, claude_request, claude_response,
-  // claude_decision, claude_confidence) are omitted because migration 004
-  // has not been applied to the live database. Including non-existent columns
-  // causes the entire insert to fail silently.
-  const decisionId = await storeDecision(supabase, {
+  // Base fields always exist. Extended fields (migration 014) are attempted
+  // first; if insert fails due to missing columns, retry with base only.
+  const baseData: Record<string, unknown> = {
     snapshot_id: snapshotId,
     alert_id: alertId,
     symbol: alert.symbol,
@@ -554,18 +552,22 @@ export async function runPipeline(
     rr_tp2: levels.rr_tp2,
     rr_tp3: levels.rr_tp3,
     cooldown_active: cooldownActive,
-    // New: scoring inputs
+  };
+
+  const extendedData: Record<string, unknown> = {
+    ...baseData,
     vol_ratio: volRatio,
     entry_deviation_pct: entryDeviationPct,
     composite_score: scoreResult.composite_score,
-    // New: cluster metadata
     cluster_id: clusterData.cluster_id,
     cluster_hour: clusterData.cluster_hour,
     cluster_size: clusterData.cluster_size,
     cluster_rank: clusterData.cluster_rank,
     selected_for_execution: clusterData.selected_for_execution,
     suppressed_reason: clusterData.suppressed_reason,
-  });
+  };
+
+  const decisionId = await storeDecision(supabase, extendedData, baseData);
 
   console.log(`[pipeline] Decision stored: ${decisionId} ${alert.symbol} ${decision}`);
 
@@ -713,10 +715,25 @@ export async function runPipeline(
 
 async function storeDecision(
   supabase: ReturnType<typeof getSupabase>,
-  data: Record<string, unknown>
+  data: Record<string, unknown>,
+  fallbackData?: Record<string, unknown>
 ): Promise<string | null> {
   const { data: row, error } = await supabase.from("decisions").insert(data).select("id").maybeSingle();
   if (error) {
+    // If insert fails due to missing columns (migration not applied), retry with base data
+    if (fallbackData && error.message.includes("does not exist")) {
+      console.warn("[pipeline] Extended columns not available, retrying with base schema");
+      const { data: fallbackRow, error: fbErr } = await supabase
+        .from("decisions")
+        .insert(fallbackData)
+        .select("id")
+        .maybeSingle();
+      if (fbErr) {
+        console.error("[pipeline] Failed to insert decision (fallback):", fbErr);
+        return null;
+      }
+      return fallbackRow?.id ?? null;
+    }
     console.error("[pipeline] Failed to insert decision:", error);
     return null;
   }

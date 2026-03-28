@@ -133,6 +133,7 @@ function clusterLabel(key: string): string {
   const hourPart = key.slice(0, 13); // "YYYY-MM-DDTHH"
   const rest = key.slice(14); // "LONG:bear" or empty
   const d = new Date(hourPart + ":00:00.000Z");
+  if (isNaN(d.getTime())) return key; // fallback for unparseable keys
   const time = d.toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
@@ -229,7 +230,7 @@ export default function SignalsDashboard() {
     return signals
       .filter((s) => matchesStatus(s, filters.statusFilter))
       .sort((a, b) => {
-        const scoreDiff = b.score - a.score;
+        const scoreDiff = (b.score || 0) - (a.score || 0);
         if (scoreDiff !== 0) return scoreDiff;
         return (a.cluster_rank ?? 999) - (b.cluster_rank ?? 999);
       });
@@ -512,7 +513,7 @@ function SignalRow({ signal: s }: { signal: Signal }) {
           {s.tier}
         </span>
       </td>
-      <td className={`px-2 py-2 text-right tabular-nums ${scoreColor(s.score)}`}>
+      <td className={`px-2 py-2 text-right tabular-nums ${s.score > 0 ? scoreColor(s.score) : "text-neutral-600"}`}>
         {s.score > 0 ? s.score.toFixed(1) : "-"}
       </td>
       <td className="px-2 py-2 text-center tabular-nums text-neutral-400">

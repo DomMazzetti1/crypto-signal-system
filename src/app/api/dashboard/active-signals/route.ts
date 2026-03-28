@@ -7,7 +7,22 @@ export const dynamic = "force-dynamic";
 
 const BYBIT_BASE = "https://api.bybit.com/v5/market";
 
-// Fetch all linear perpetual tickers in one call, return map symbol → markPrice
+// Columns that exist since the original decisions schema (always safe to query)
+const BASE_COLUMNS = `id, symbol, decision, alert_type, alert_tf, created_at,
+       entry_price, stop_price, tp1_price, tp2_price, tp3_price,
+       rr_tp1, rr_tp2,
+       telegram_sent, telegram_attempted, blocked_reason,
+       gate_a_quality, gate_b_passed, gate_b_reason, btc_regime,
+       alert_id`;
+
+// Columns added by migration 014 — may not exist in all environments
+const EXTENDED_COLUMNS = `${BASE_COLUMNS},
+       vol_ratio, entry_deviation_pct, composite_score,
+       cluster_id, cluster_hour, cluster_size, cluster_rank,
+       selected_for_execution, suppressed_reason,
+       graded_outcome,
+       tp1_hit_at, tp2_hit_at, tp3_hit_at, stopped_at, resolved_at`;
+
 async function fetchAllPrices(): Promise<Map<string, number>> {
   const map = new Map<string, number>();
   try {
@@ -29,7 +44,7 @@ async function fetchAllPrices(): Promise<Map<string, number>> {
 
 /**
  * Live dashboard status — derived from current price vs levels.
- * This is NOT the graded research outcome. It's a real-time operational indicator.
+ * This is NOT the graded research outcome (graded_outcome).
  */
 function computeStatus(
   decision: string,
@@ -75,6 +90,13 @@ function computePctToTp1(
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function safeNum(v: any): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 export async function GET(req: NextRequest) {
   const supabase = getSupabase();
   const { searchParams } = req.nextUrl;
@@ -83,41 +105,50 @@ export async function GET(req: NextRequest) {
   const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
   const tier = searchParams.get("tier");
 
-  let query = supabase
-    .from("decisions")
-    .select(
-      `id, symbol, decision, alert_type, alert_tf, created_at,
-       entry_price, stop_price, tp1_price, tp2_price, tp3_price,
-       rr_tp1, rr_tp2, vol_ratio, entry_deviation_pct, composite_score,
-       cluster_id, cluster_hour, cluster_size, cluster_rank,
-       selected_for_execution, suppressed_reason,
-       graded_outcome,
-       tp1_hit_at, tp2_hit_at, tp3_hit_at, stopped_at, resolved_at,
-       telegram_sent, telegram_attempted, blocked_reason,
-       gate_a_quality, gate_b_passed, gate_b_reason, btc_regime,
-       alert_id`
-    )
-    .in("decision", ["LONG", "SHORT"])
-    .gte("created_at", cutoff)
-    .order("created_at", { ascending: false })
-    .limit(100);
+  function buildQuery(columns: string) {
+    let q = supabase
+      .from("decisions")
+      .select(columns)
+      .in("decision", ["LONG", "SHORT"])
+      .gte("created_at", cutoff)
+      .order("created_at", { ascending: false })
+      .limit(100);
 
-  if (tier === "strict") {
-    query = query.not("alert_type", "ilike", "%_RELAXED");
-  } else if (tier === "relaxed") {
-    query = query.ilike("alert_type", "%_RELAXED");
+    if (tier === "strict") {
+      q = q.not("alert_type", "ilike", "%_RELAXED");
+    } else if (tier === "relaxed") {
+      q = q.ilike("alert_type", "%_RELAXED");
+    }
+    return q;
   }
 
-  // Run DB query and price fetch in parallel
-  const [dbResult, prices] = await Promise.all([query, fetchAllPrices()]);
+  // Try extended columns first; fall back to base if migration not applied.
+  // This makes the app resilient to schema drift between code and DB.
+  let hasExtendedSchema = true;
+  const [priceResult, extResult] = await Promise.all([
+    fetchAllPrices(),
+    buildQuery(EXTENDED_COLUMNS),
+  ]);
 
-  const { data: decisions, error } = dbResult;
+  let decisions = extResult.data;
+  let error = extResult.error;
+
+  if (error && error.message.includes("does not exist")) {
+    // Migration 014 not applied — fall back to base columns
+    hasExtendedSchema = false;
+    const fallback = await buildQuery(BASE_COLUMNS);
+    decisions = fallback.data;
+    error = fallback.error;
+  }
+
+  const prices = priceResult;
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  const signals = (decisions ?? []).map((d) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const signals = (decisions ?? []).map((d: any) => {
     const isRelaxed = /_RELAXED$/i.test(d.alert_type);
     const derivedTier = isRelaxed ? "RELAXED" : "STRICT";
     const setupFamily = d.alert_type.replace(/_RELAXED$|_DATA$/i, "");
@@ -139,15 +170,14 @@ export async function GET(req: NextRequest) {
       d.tp1_price
     );
 
-    // Use persisted composite_score if available; otherwise compute on-the-fly
-    // for backward compatibility with pre-migration rows.
-    let score = d.composite_score != null ? Number(d.composite_score) : null;
+    // Composite score: use persisted value, fall back to on-the-fly computation
+    let score = safeNum(d.composite_score);
     if (score == null) {
       const fallback = computeCompositeScore({
-        rr_tp1: d.rr_tp1,
-        vol_ratio: d.vol_ratio,
+        rr_tp1: safeNum(d.rr_tp1),
+        vol_ratio: safeNum(d.vol_ratio),
         alert_type: d.alert_type,
-        entry_price: d.entry_price,
+        entry_price: safeNum(d.entry_price),
         mark_price: currentPrice,
       });
       score = fallback.composite_score;
@@ -172,7 +202,7 @@ export async function GET(req: NextRequest) {
       status,
       pct_to_tp1: pctToTp1,
       score,
-      // Cluster metadata
+      // Cluster metadata (null-safe for pre-migration rows)
       cluster_id: d.cluster_id ?? null,
       cluster_size: d.cluster_size ?? 1,
       cluster_rank: d.cluster_rank ?? null,
@@ -188,11 +218,11 @@ export async function GET(req: NextRequest) {
       stopped_at: d.stopped_at ?? null,
       resolved_at: d.resolved_at ?? null,
       // Existing fields
-      telegram_sent: d.telegram_sent,
-      telegram_attempted: d.telegram_attempted,
-      blocked_reason: d.blocked_reason,
-      gate_a_quality: d.gate_a_quality,
-      gate_b_passed: d.gate_b_passed,
+      telegram_sent: d.telegram_sent ?? false,
+      telegram_attempted: d.telegram_attempted ?? false,
+      blocked_reason: d.blocked_reason ?? null,
+      gate_a_quality: d.gate_a_quality ?? null,
+      gate_b_passed: d.gate_b_passed ?? false,
     };
   });
 
@@ -200,5 +230,6 @@ export async function GET(req: NextRequest) {
     signals,
     count: signals.length,
     prices_loaded: prices.size > 0,
+    schema_version: hasExtendedSchema ? "014" : "base",
   });
 }

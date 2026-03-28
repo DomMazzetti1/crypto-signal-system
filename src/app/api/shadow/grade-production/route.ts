@@ -9,11 +9,25 @@ const MIN_AGE_MS = 48 * 60 * 60 * 1000;
 const FORWARD_BARS = 48;
 
 /**
+ * Graded outcome values (persisted to decisions.graded_outcome):
+ *   WIN_FULL    — all active TPs hit before stop
+ *   WIN_PARTIAL — TP1 hit but stop hit before full target
+ *   LOSS        — stop hit before any TP
+ *   EXPIRED     — neither full win nor stop within grading window
+ *   INVALID     — invalid levels or missing data
+ *
+ * Resolution path values (persisted to decisions.resolution_path):
+ *   ENTRY->SL, ENTRY->TP1->SL, ENTRY->TP1->TP2->SL,
+ *   ENTRY->TP1->TP2->TP3, ENTRY->TP1->EXPIRED, ENTRY->EXPIRED,
+ *   INVALID
+ */
+
+/**
  * GET /api/shadow/grade-production
  *
  * Grades accepted production trades using the same 48-forward-bar
  * approach used for shadow signal grading. Stores results in
- * production_signal_grades without mutating the decisions table.
+ * production_signal_grades AND writes lifecycle fields back to decisions.
  */
 export async function GET() {
   const supabase = getSupabase();
@@ -53,7 +67,7 @@ export async function GET() {
 
   let graded = 0;
   let failed = 0;
-  const results: { symbol: string; decision: string; outcome_r: number; hit_tp1: boolean }[] = [];
+  const results: { symbol: string; decision: string; outcome_r: number; hit_tp1: boolean; graded_outcome: string }[] = [];
 
   for (const dec of ungraded) {
     const entry = Number(dec.entry_price);
@@ -62,6 +76,11 @@ export async function GET() {
 
     if (!Number.isFinite(entry) || !Number.isFinite(stop) || entry <= 0) {
       await insertGrade(supabase, dec, "FAILED");
+      await writeLifecycleToDecision(supabase, dec.id, {
+        graded_outcome: "INVALID",
+        resolution_path: "INVALID",
+        resolved_at: new Date().toISOString(),
+      });
       failed++;
       continue;
     }
@@ -107,6 +126,11 @@ export async function GET() {
     const risk = Math.abs(entry - stop);
     if (risk === 0) {
       await insertGrade(supabase, dec, "FAILED");
+      await writeLifecycleToDecision(supabase, dec.id, {
+        graded_outcome: "INVALID",
+        resolution_path: "INVALID",
+        resolved_at: new Date().toISOString(),
+      });
       failed++;
       continue;
     }
@@ -126,26 +150,44 @@ export async function GET() {
     let max_favorable = 0, max_adverse = 0;
     let bars_to_resolution = futureBars.length;
 
+    // Lifecycle: track first-hit timestamps (bar start time as consistent timestamp)
+    let tp1HitAt: string | null = null;
+    let tp2HitAt: string | null = null;
+    let tp3HitAt: string | null = null;
+    let stoppedAt: string | null = null;
+
     for (let i = 0; i < futureBars.length; i++) {
       const bar = futureBars[i];
+      const barTime = new Date(bar.startTime).toISOString();
+
       if (isLong) {
         const fav = bar.high - entry;
         const adv = entry - bar.low;
         if (fav > max_favorable) max_favorable = fav;
         if (adv > max_adverse) max_adverse = adv;
-        if (!hit_sl && bar.low <= stop) { hit_sl = true; if (!hit_tp1) { bars_to_resolution = i + 1; break; } }
-        if (!hit_tp1 && bar.high >= tp1) hit_tp1 = true;
-        if (!hit_tp2 && bar.high >= tp2) hit_tp2 = true;
-        if (!hit_tp3 && bar.high >= tp3) hit_tp3 = true;
+
+        if (!hit_sl && bar.low <= stop) {
+          hit_sl = true;
+          stoppedAt = barTime;
+          if (!hit_tp1) { bars_to_resolution = i + 1; break; }
+        }
+        if (!hit_tp1 && bar.high >= tp1) { hit_tp1 = true; tp1HitAt = barTime; }
+        if (!hit_tp2 && bar.high >= tp2) { hit_tp2 = true; tp2HitAt = barTime; }
+        if (!hit_tp3 && bar.high >= tp3) { hit_tp3 = true; tp3HitAt = barTime; }
       } else {
         const fav = entry - bar.low;
         const adv = bar.high - entry;
         if (fav > max_favorable) max_favorable = fav;
         if (adv > max_adverse) max_adverse = adv;
-        if (!hit_sl && bar.high >= stop) { hit_sl = true; if (!hit_tp1) { bars_to_resolution = i + 1; break; } }
-        if (!hit_tp1 && bar.low <= tp1) hit_tp1 = true;
-        if (!hit_tp2 && bar.low <= tp2) hit_tp2 = true;
-        if (!hit_tp3 && bar.low <= tp3) hit_tp3 = true;
+
+        if (!hit_sl && bar.high >= stop) {
+          hit_sl = true;
+          stoppedAt = barTime;
+          if (!hit_tp1) { bars_to_resolution = i + 1; break; }
+        }
+        if (!hit_tp1 && bar.low <= tp1) { hit_tp1 = true; tp1HitAt = barTime; }
+        if (!hit_tp2 && bar.low <= tp2) { hit_tp2 = true; tp2HitAt = barTime; }
+        if (!hit_tp3 && bar.low <= tp3) { hit_tp3 = true; tp3HitAt = barTime; }
       }
       if (hit_tp3) { bars_to_resolution = i + 1; break; }
     }
@@ -155,6 +197,12 @@ export async function GET() {
     else if (hit_tp2) outcome_r = 2.5;
     else if (hit_tp1) outcome_r = 1.5;
     else if (hit_sl) outcome_r = -1;
+
+    // Determine graded_outcome and resolution_path
+    const { gradedOutcome, resolutionPath, resolvedAt } = deriveOutcome({
+      hit_tp1, hit_tp2, hit_tp3, hit_sl,
+      tp1HitAt, tp2HitAt, tp3HitAt, stoppedAt,
+    });
 
     const { error: upsertErr } = await supabase.from("production_signal_grades").upsert({
       decision_id: dec.id,
@@ -177,13 +225,105 @@ export async function GET() {
       console.error(`[grade-production] Upsert failed for ${dec.symbol}:`, upsertErr);
       failed++;
     } else {
+      // Write lifecycle fields back to the decisions table (best-effort)
+      await writeLifecycleToDecision(supabase, dec.id, {
+        graded_outcome: gradedOutcome,
+        resolution_path: resolutionPath,
+        resolved_at: resolvedAt,
+        tp1_hit_at: tp1HitAt,
+        tp2_hit_at: tp2HitAt,
+        tp3_hit_at: tp3HitAt,
+        stopped_at: stoppedAt,
+      });
+
       graded++;
-      results.push({ symbol: dec.symbol, decision: dec.decision, outcome_r: Math.round(outcome_r * 100) / 100, hit_tp1 });
+      results.push({
+        symbol: dec.symbol,
+        decision: dec.decision,
+        outcome_r: Math.round(outcome_r * 100) / 100,
+        hit_tp1,
+        graded_outcome: gradedOutcome,
+      });
     }
   }
 
   return NextResponse.json({ status: "completed", checked: ungraded.length, graded, failed, results });
 }
+
+// ── Outcome derivation ───────────────────────────────────
+
+interface OutcomeInput {
+  hit_tp1: boolean;
+  hit_tp2: boolean;
+  hit_tp3: boolean;
+  hit_sl: boolean;
+  tp1HitAt: string | null;
+  tp2HitAt: string | null;
+  tp3HitAt: string | null;
+  stoppedAt: string | null;
+}
+
+function deriveOutcome(input: OutcomeInput): {
+  gradedOutcome: string;
+  resolutionPath: string;
+  resolvedAt: string | null;
+} {
+  const { hit_tp1, hit_tp2, hit_tp3, hit_sl, tp1HitAt, tp2HitAt, tp3HitAt, stoppedAt } = input;
+
+  // Build path segments based on what was hit
+  const pathParts = ["ENTRY"];
+
+  if (hit_tp1) pathParts.push("TP1");
+  if (hit_tp2) pathParts.push("TP2");
+  if (hit_tp3) pathParts.push("TP3");
+
+  // WIN_FULL: TP3 hit (full target completion)
+  if (hit_tp3) {
+    return {
+      gradedOutcome: "WIN_FULL",
+      resolutionPath: pathParts.join("->"),
+      resolvedAt: tp3HitAt,
+    };
+  }
+
+  // LOSS: stop hit before any TP
+  if (hit_sl && !hit_tp1) {
+    return {
+      gradedOutcome: "LOSS",
+      resolutionPath: "ENTRY->SL",
+      resolvedAt: stoppedAt,
+    };
+  }
+
+  // WIN_PARTIAL: at least TP1 hit, then stopped
+  if (hit_sl && hit_tp1) {
+    pathParts.push("SL");
+    return {
+      gradedOutcome: "WIN_PARTIAL",
+      resolutionPath: pathParts.join("->"),
+      resolvedAt: stoppedAt,
+    };
+  }
+
+  // Still open or expired: TP hit(s) but no stop and no full win
+  if (hit_tp1) {
+    pathParts.push("EXPIRED");
+    return {
+      gradedOutcome: "WIN_PARTIAL",
+      resolutionPath: pathParts.join("->"),
+      resolvedAt: tp2HitAt ?? tp1HitAt,
+    };
+  }
+
+  // Nothing hit within grading window
+  return {
+    gradedOutcome: "EXPIRED",
+    resolutionPath: "ENTRY->EXPIRED",
+    resolvedAt: null,
+  };
+}
+
+// ── Helpers ──────────────────────────────────────────────
 
 async function insertGrade(
   supabase: ReturnType<typeof getSupabase>,
@@ -202,4 +342,49 @@ async function insertGrade(
     grade_status: status,
     graded_at: new Date().toISOString(),
   }, { onConflict: "decision_id" });
+}
+
+/**
+ * Write lifecycle/grading fields back to the decisions table.
+ * Best-effort: if migration 014 columns don't exist, the update silently fails.
+ * Only writes non-null timestamps to preserve first-hit semantics on re-grading.
+ */
+async function writeLifecycleToDecision(
+  supabase: ReturnType<typeof getSupabase>,
+  decisionId: string,
+  fields: {
+    graded_outcome: string;
+    resolution_path: string;
+    resolved_at: string | null;
+    tp1_hit_at?: string | null;
+    tp2_hit_at?: string | null;
+    tp3_hit_at?: string | null;
+    stopped_at?: string | null;
+  }
+) {
+  // Build update payload — only include non-null timestamps
+  const update: Record<string, unknown> = {
+    graded_outcome: fields.graded_outcome,
+    resolution_path: fields.resolution_path,
+  };
+
+  if (fields.resolved_at != null) update.resolved_at = fields.resolved_at;
+  if (fields.tp1_hit_at != null) update.tp1_hit_at = fields.tp1_hit_at;
+  if (fields.tp2_hit_at != null) update.tp2_hit_at = fields.tp2_hit_at;
+  if (fields.tp3_hit_at != null) update.tp3_hit_at = fields.tp3_hit_at;
+  if (fields.stopped_at != null) update.stopped_at = fields.stopped_at;
+
+  const { error } = await supabase
+    .from("decisions")
+    .update(update)
+    .eq("id", decisionId);
+
+  if (error) {
+    // If columns don't exist (migration not applied), log and continue
+    if (error.message.includes("does not exist")) {
+      console.warn("[grade-production] Lifecycle columns not available (migration 014 not applied)");
+    } else {
+      console.error(`[grade-production] Failed to write lifecycle for ${decisionId}:`, error.message);
+    }
+  }
 }
