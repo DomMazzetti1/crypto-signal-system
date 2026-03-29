@@ -281,11 +281,13 @@ function deriveOutcome(input: OutcomeInput): {
   }
   if (hit_sl && hit_tp1) {
     pathParts.push("SL");
-    return { gradedOutcome: "WIN_PARTIAL", resolutionPath: pathParts.join("->"), resolvedAt: stoppedAt };
+    // TP1 hit then stopped out — partial win but position ultimately closed at loss
+    return { gradedOutcome: "WIN_PARTIAL_THEN_SL", resolutionPath: pathParts.join("->"), resolvedAt: stoppedAt };
   }
   if (hit_tp1) {
     pathParts.push("EXPIRED");
-    return { gradedOutcome: "WIN_PARTIAL", resolutionPath: pathParts.join("->"), resolvedAt: tp2HitAt ?? tp1HitAt };
+    // TP1 hit, no SL, but expired before TP2 — partial win with open question
+    return { gradedOutcome: "WIN_PARTIAL_EXPIRED", resolutionPath: pathParts.join("->"), resolvedAt: tp2HitAt ?? tp1HitAt };
   }
   return { gradedOutcome: "EXPIRED", resolutionPath: "ENTRY->EXPIRED", resolvedAt: null };
 }

@@ -68,7 +68,12 @@ export async function GET(req: NextRequest) {
   function computeStats(subset: typeof resolved) {
     const total = subset.length;
     const winFull = subset.filter((r) => r.graded_outcome === "WIN_FULL").length;
-    const winPartial = subset.filter((r) => r.graded_outcome === "WIN_PARTIAL").length;
+    // Win rate treats WIN_PARTIAL, WIN_PARTIAL_THEN_SL, and WIN_PARTIAL_EXPIRED as wins
+    const winPartial = subset.filter((r) =>
+      r.graded_outcome === "WIN_PARTIAL" ||
+      r.graded_outcome === "WIN_PARTIAL_THEN_SL" ||
+      r.graded_outcome === "WIN_PARTIAL_EXPIRED"
+    ).length;
     const loss = subset.filter((r) => r.graded_outcome === "LOSS").length;
     const expired = subset.filter((r) => r.graded_outcome === "EXPIRED").length;
     const excluded = subset.filter((r) => nonComparisonOutcomes.has(r.graded_outcome)).length;
