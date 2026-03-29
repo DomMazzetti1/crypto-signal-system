@@ -22,7 +22,7 @@ const EXTENDED_COLUMNS = `${BASE_COLUMNS},
        vol_ratio, entry_deviation_pct, composite_score,
        cluster_id, cluster_hour, cluster_size, cluster_rank,
        selected_for_execution, suppressed_reason,
-       graded_outcome,
+       graded_outcome, resolution_path,
        tp1_hit_at, tp2_hit_at, tp3_hit_at, stopped_at, resolved_at`;
 
 type PriceSource = "coingecko" | "relay" | "bybit" | "none";
@@ -324,6 +324,7 @@ export async function GET(req: NextRequest) {
       selection_pending: d.cluster_id != null && d.selected_for_execution !== true && d.suppressed_reason == null,
       // Graded outcome (research, distinct from live status)
       graded_outcome: d.graded_outcome ?? null,
+      resolution_path: d.resolution_path ?? null,
       // Lifecycle timestamps
       tp1_hit_at: d.tp1_hit_at ?? null,
       tp2_hit_at: d.tp2_hit_at ?? null,
