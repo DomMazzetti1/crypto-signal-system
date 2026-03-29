@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const LOCK_KEY = "scanner:lock";
-const LOCK_TTL = 600; // 10 minutes — prevents overlap for hourly cron
+const LOCK_TTL = 290; // Must be < maxDuration (300s) so lock releases if Vercel kills the function
 const MAX_CONCURRENT = 8;
 
 // ── Bucket helpers ──────────────────────────────────────
@@ -495,11 +495,8 @@ export async function GET(request: NextRequest) {
         try {
           const result = await runPipeline(alertPayload, alertId);
           if (result.decision === "LONG" || result.decision === "SHORT") {
-            // Tier-aware cooldown TTL
-            const cooldownTtl = tieredSig.tier === "STRICT_PROD" ? 8 * 60 * 60
-              : tieredSig.tier === "RELAXED_PROD" ? 2 * 60 * 60
-              : 0; // DATA_ONLY: no cooldown
-            if (cooldownTtl > 0) await redis.set(cooldownKey, Date.now(), { ex: cooldownTtl });
+            // Pipeline already set the cooldown key inside runPipeline (pipeline.ts:setCooldown).
+            // We only skip re-setting it here to avoid resetting the TTL to a shorter value.
             await supabase.from("candle_signals").upsert({
               symbol,
               setup_type: sig.type,
