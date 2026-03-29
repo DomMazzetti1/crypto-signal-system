@@ -9,6 +9,26 @@ const MIN_TURNOVER_24H = 10_000_000;
 const MIN_OPEN_INTEREST = 2_000_000;
 const MIN_AGE_DAYS = 45;
 
+async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = [];
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const i = index++;
+      results[i] = await fn(items[i]);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 interface InstrumentInfo {
   symbol: string;
   status: string;
@@ -80,7 +100,7 @@ export async function GET() {
   let eligible = 0;
   const now = new Date().toISOString();
 
-  for (const inst of candidates) {
+  await runWithConcurrency(candidates, 10, async (inst) => {
     const launchTime = new Date(Number(inst.launchTime));
 
     // Must have been launched at least MIN_AGE_DAYS ago
@@ -91,11 +111,11 @@ export async function GET() {
         is_eligible: false,
         last_checked_at: now,
       });
-      continue;
+      return;
     }
 
     const ticker = await fetchTicker(inst.symbol);
-    if (!ticker) continue;
+    if (!ticker) return;
 
     const turnover = parseFloat(ticker.turnover24h);
     const oi = parseFloat(ticker.openInterest);
@@ -115,7 +135,7 @@ export async function GET() {
       is_eligible: passes,
       last_checked_at: now,
     });
-  }
+  });
 
   return NextResponse.json({
     total_scanned: candidates.length,
