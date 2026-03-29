@@ -204,7 +204,7 @@ export async function GET(req: NextRequest) {
       .in("decision", ["LONG", "SHORT"])
       .gte("created_at", cutoff)
       .order("created_at", { ascending: false })
-      .limit(100);
+      .limit(1000);
 
     if (tier === "strict") {
       q = q.not("alert_type", "ilike", "%_RELAXED");
