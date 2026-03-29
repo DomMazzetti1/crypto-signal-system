@@ -6,7 +6,7 @@ async function getStats() {
   try {
     const supabase = getSupabase();
 
-    const [universeRes, lastBuildRes, decisionsRes] = await Promise.all([
+    const [universeRes, lastBuildRes, decisionsRes, lastScanRes] = await Promise.all([
       supabase
         .from("universe")
         .select("symbol", { count: "exact", head: true })
@@ -22,12 +22,19 @@ async function getStats() {
         .select("id", { count: "exact", head: true })
         .in("decision", ["LONG", "SHORT"])
         .gte("created_at", new Date().toISOString().slice(0, 10)),
+      supabase
+        .from("scanner_runs")
+        .select("completed_at")
+        .order("completed_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
     ]);
 
     return {
       eligibleSymbols: universeRes.count ?? 0,
       lastUniverseBuild: lastBuildRes.data?.updated_at ?? null,
       signalsToday: decisionsRes.count ?? 0,
+      lastScanAt: lastScanRes.data?.completed_at ?? null,
     };
   } catch {
     return null;
@@ -64,6 +71,14 @@ export default async function Home() {
             value={
               stats?.lastUniverseBuild
                 ? new Date(stats.lastUniverseBuild).toUTCString()
+                : "--"
+            }
+          />
+          <Row
+            label="Last scanner run"
+            value={
+              stats?.lastScanAt
+                ? new Date(stats.lastScanAt).toUTCString()
                 : "--"
             }
           />
