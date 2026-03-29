@@ -569,6 +569,19 @@ export async function runPipeline(
 
   const decisionId = await storeDecision(supabase, extendedData, baseData);
 
+  // ── SAFETY GUARD: decision must be persisted before any downstream action ──
+  if (!decisionId) {
+    console.error(`[pipeline] CRITICAL: Decision insert failed for ${alert.symbol} ${decision} — aborting Telegram and downstream`);
+    return {
+      status: "error",
+      symbol: alert.symbol,
+      decision,
+      gate_a: { passed: true, quality: gateA.quality, reject_reason: null },
+      error: "Decision insert failed — Telegram blocked",
+      http_status: 500,
+    };
+  }
+
   console.log(`[pipeline] Decision stored: ${decisionId} ${alert.symbol} ${decision}`);
 
   // ── 10b. Try to finalize cluster if window already expired ──
