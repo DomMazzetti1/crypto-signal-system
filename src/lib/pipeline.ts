@@ -475,11 +475,10 @@ export async function runPipeline(
       : null;
 
   const scoreResult = computeCompositeScore({
-    rr_tp1: levels.rr_tp1,
+    atr14_1h: atr14_1h,
+    mark_price: markPrice,
     vol_ratio: volRatio,
     alert_type: alert.type,
-    entry_price: levels.entry,
-    mark_price: markPrice,
   });
 
   // ── 9c. Cluster assignment + execution selection ──────

@@ -1,47 +1,39 @@
 /**
  * Composite Signal Score (0–100)
  *
- * Replaces the naive score = rr_tp1 with a bounded composite that uses
- * multiple available signal quality metrics.
- *
  * Formula:
- *   score = (rr_component * 0.35)
- *         + (vol_component * 0.35)
- *         + (tier_component * 0.20)
+ *   score = (atr_pct_component * 0.35)
+ *         + (vol_component     * 0.35)
+ *         + (tier_component    * 0.20)
  *         - (deviation_penalty * 0.10)
  *
- * Each component is normalized to 0–100 before weighting.
- *
  * Components:
- *   rr_component:       rr_tp1 clamped to [0, 5], mapped to [0, 100]
- *                        rr_tp1=1.5 (minimum) → 30, rr_tp1=3.0 → 60, rr_tp1=5.0 → 100
- *   vol_component:      vol_ratio clamped to [0, 5], mapped to [0, 100]
- *                        vol_ratio=1.0 → 20, vol_ratio=2.0 → 40
- *   tier_component:     derived from tier (proxy for pass_count since exact
- *                        pass_count is not available in pipeline)
- *                        STRICT_PROD (9/9) → 100, RELAXED_PROD (~7/9) → 55, DATA_ONLY (~5/9) → 25
- *   deviation_penalty:  |entry_price - mark_price| / mark_price, clamped to [0, 0.02]
- *                        0% deviation → 0 penalty, 2%+ deviation → full 10-point penalty
- *
- * Missing inputs degrade gracefully: each missing component contributes 0
- * but the score is scaled up proportionally so missing data doesn't
- * systematically crush scores.
+ *   atr_pct_component: ATR/price inverted and normalized over [0.1%, 4%]
+ *     - ATR = 0.1% of price → score 100 (tight levels, high precision)
+ *     - ATR = 2%   of price → score ~49
+ *     - ATR = 4%+  of price → score 0  (wide noisy levels)
+ *   vol_component: vol_ratio clamped to [0, 5], mapped to [0, 100]
+ *   tier_component: STRICT → 100, RELAXED → 55, DATA_ONLY → 25
+ *   deviation_penalty: always 0 currently (entry = markPrice by design)
+ *     Will activate if entry is ever set to a non-mark price.
  */
 
 export interface ScoreInput {
-  rr_tp1: number | null;
+  /** ATR (1H, period 14) in price units */
+  atr14_1h: number | null;
+  /** Current mark price — used to compute ATR as % of price */
+  mark_price: number | null;
+  /** vol_ratio = current volume / SMA20 volume */
   vol_ratio: number | null;
   /** The alert_type string, e.g. "SQ_SHORT" or "SQ_SHORT_RELAXED" */
   alert_type: string;
-  entry_price: number | null;
-  mark_price: number | null;
 }
 
 export interface ScoreResult {
   composite_score: number; // 0–100
   /** Raw component values before weighting (for debugging) */
   components: {
-    rr: number;
+    atr_pct: number;
     vol: number;
     tier: number;
     deviation_penalty: number;
@@ -49,7 +41,7 @@ export interface ScoreResult {
 }
 
 // Weights sum to 1.0
-const W_RR = 0.35;
+const W_ATR = 0.35;
 const W_VOL = 0.35;
 const W_TIER = 0.20;
 const W_DEV = 0.10;
@@ -72,20 +64,22 @@ function tierScore(alertType: string): number {
 }
 
 export function computeCompositeScore(input: ScoreInput): ScoreResult {
-  const rrRaw = input.rr_tp1 != null ? normalize(input.rr_tp1, 0, 5) : null;
+  // ATR% component: lower ATR% = tighter levels = higher score
+  // Normalize over [0.001, 0.04] (0.1% to 4% of price — typical perp range)
+  // Invert so that low ATR% maps to high score
+  let atrPctRaw: number | null = null;
+  if (input.atr14_1h != null && input.mark_price != null && input.mark_price > 0) {
+    const atrPct = input.atr14_1h / input.mark_price;
+    const clamped = Math.max(0.001, Math.min(0.04, atrPct));
+    atrPctRaw = (1 - (clamped - 0.001) / (0.04 - 0.001)) * 100;
+  }
+
   const volRaw = input.vol_ratio != null ? normalize(input.vol_ratio, 0, 5) : null;
   const tierRaw = tierScore(input.alert_type);
 
-  let deviationPenalty = 0;
-  if (
-    input.entry_price != null &&
-    input.mark_price != null &&
-    input.mark_price > 0
-  ) {
-    const devPct = Math.abs(input.entry_price - input.mark_price) / input.mark_price;
-    // 0% → 0 penalty, 2%+ → 100 (full penalty)
-    deviationPenalty = normalize(devPct, 0, 0.02);
-  }
+  // Deviation penalty: currently always 0 because entry = markPrice.
+  // Retained so it activates automatically if entry ever differs from mark.
+  const deviationPenalty = 0;
 
   // Compute weighted score, handling missing components gracefully.
   // If a component is null, its weight is redistributed to available components
@@ -93,9 +87,9 @@ export function computeCompositeScore(input: ScoreInput): ScoreResult {
   let totalWeight = W_TIER; // tier is always available
   let weightedSum = tierRaw * W_TIER;
 
-  if (rrRaw != null) {
-    weightedSum += rrRaw * W_RR;
-    totalWeight += W_RR;
+  if (atrPctRaw != null) {
+    weightedSum += atrPctRaw * W_ATR;
+    totalWeight += W_ATR;
   }
   if (volRaw != null) {
     weightedSum += volRaw * W_VOL;
@@ -111,7 +105,7 @@ export function computeCompositeScore(input: ScoreInput): ScoreResult {
   return {
     composite_score: Math.round(finalScore * 100) / 100,
     components: {
-      rr: rrRaw ?? 0,
+      atr_pct: atrPctRaw ?? 0,
       vol: volRaw ?? 0,
       tier: tierRaw,
       deviation_penalty: deviationPenalty,

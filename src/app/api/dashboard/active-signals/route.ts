@@ -19,7 +19,7 @@ const BASE_COLUMNS = `id, symbol, decision, alert_type, alert_tf, created_at,
 
 // Columns added by migration 014 — may not exist in all environments
 const EXTENDED_COLUMNS = `${BASE_COLUMNS},
-       vol_ratio, entry_deviation_pct, composite_score,
+       atr14_1h, vol_ratio, entry_deviation_pct, composite_score,
        cluster_id, cluster_hour, cluster_size, cluster_rank,
        selected_for_execution, suppressed_reason,
        graded_outcome, resolution_path,
@@ -279,11 +279,10 @@ export async function GET(req: NextRequest) {
     let score = safeNum(d.composite_score);
     if (score == null) {
       const fallback = computeCompositeScore({
-        rr_tp1: safeNum(d.rr_tp1),
+        atr14_1h: safeNum(d.atr14_1h),
+        mark_price: currentPrice ?? safeNum(d.entry_price),
         vol_ratio: safeNum(d.vol_ratio),
         alert_type: d.alert_type,
-        entry_price: safeNum(d.entry_price),
-        mark_price: currentPrice,
       });
       score = fallback.composite_score;
     }

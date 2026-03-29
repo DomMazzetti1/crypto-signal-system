@@ -55,6 +55,9 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
   }
 
   // ── R:R minimum check ─────────────────────────────────
+  // NOTE: rr_tp1 is always exactly 1.5 while entry = markPrice (see levels.ts).
+  // This check is a no-op in current operation but is retained as a guard for
+  // when entry is eventually set to a non-mark price (e.g., limit order offset).
   const rrRounded = Math.round(rrTp1 * 100) / 100;
   if (rrRounded < 1.5) {
     return {
