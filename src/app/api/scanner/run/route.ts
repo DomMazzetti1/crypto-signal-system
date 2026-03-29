@@ -489,6 +489,7 @@ export async function GET(request: NextRequest) {
         }
 
         // STRICT_PROD and RELAXED_PROD: run full pipeline
+        // Queue push is audit-only — no active consumer. Pipeline is invoked inline below.
         await redis.lpush(ALERTS_QUEUE_KEY, JSON.stringify(alertPayload));
 
         const alertId = rawRow?.id ?? null;

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
-import { getRedis, ALERTS_QUEUE_KEY } from "@/lib/redis";
 import { runPipeline, AlertPayload } from "@/lib/pipeline";
 
 const REQUIRED_FIELDS = [
@@ -95,8 +94,8 @@ export async function POST(request: NextRequest) {
 
   const alertId: string = rawRow.id;
 
-  // Push to Redis queue (kept for audit / replay capability)
-  await getRedis().lpush(ALERTS_QUEUE_KEY, JSON.stringify(payload));
+  // Note: Redis queue push removed — pipeline is invoked inline.
+  // Re-enable if a dedicated worker consumer is implemented in /api/worker.
 
   // Run full pipeline inline
   const alert = payload as unknown as AlertPayload;
