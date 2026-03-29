@@ -62,30 +62,40 @@ ${escapeHtml(input.reasoning)}`;
 export async function sendTelegram(text: string): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
-
   if (!token || !chatId) {
     console.warn("[telegram] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID, skipping");
     return false;
   }
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-    }),
+  const body = JSON.stringify({
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
   });
 
-  if (!res.ok) {
-    const body = await res.text();
-    console.error(`[telegram] Send failed (${res.status}): ${body}`);
-    return false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      await new Promise(r => setTimeout(r, attempt * 1000)); // 1s, 2s backoff
+    }
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+      if (res.ok) {
+        console.log("[telegram] Message sent successfully");
+        return true;
+      }
+      const responseBody = await res.text();
+      console.error(`[telegram] Send failed attempt ${attempt + 1} (${res.status}): ${responseBody}`);
+      // Don't retry on 4xx client errors (except 429)
+      if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
+    } catch (err) {
+      console.error(`[telegram] Network error attempt ${attempt + 1}:`, err);
+    }
   }
-
-  console.log("[telegram] Message sent successfully");
-  return true;
+  return false;
 }
