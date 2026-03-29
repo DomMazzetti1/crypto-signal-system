@@ -135,7 +135,6 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
 
     // Apply friction model to match backtest/shadow grading methodology
     const fillEntry = isLong ? entry * (1 + SLIPPAGE) : entry * (1 - SLIPPAGE);
-    const risk = Math.abs(fillEntry - stop);
 
     // Adjust TP levels for taker fees
     if (isLong) {

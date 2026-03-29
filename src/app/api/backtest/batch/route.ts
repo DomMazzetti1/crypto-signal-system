@@ -15,11 +15,8 @@ export const maxDuration = 300;
 const MAX_CONCURRENT = 4;
 const WARMUP_BARS = 150;
 const FORWARD_BARS = 48;
-const ATR_MULT = 1.5;
+// ATR_MULT, TAKER_FEE, SLIPPAGE now applied internally by gradeSignalLib (grade-signal.ts)
 
-// Friction model (Bybit perps)
-const TAKER_FEE = 0.00055;
-const SLIPPAGE = 0.0005;
 // ── Variant configuration for frequency expansion experiments ──
 // baseline = exact live parity. relaxed/aggressive = controlled expansion.
 // NEVER applied to production code — backtest experimentation only.

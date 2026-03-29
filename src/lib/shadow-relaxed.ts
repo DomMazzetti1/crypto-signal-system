@@ -21,7 +21,6 @@ import { GateBInput, GateBResult, runGateB } from "./gate-b";
 // Must match VARIANT_CONFIGS.relaxed in backtest/batch/route.ts
 const RELAXED_COOLDOWN_TTL = 4 * 60 * 60; // 4 hours in seconds
 const RELAXED_SIDEWAYS_SQ_VOLUME_MULT = 1.5;
-const RELAXED_ALLOW_COUNTER_TREND = false;
 
 // ── Shadow cooldown (separate Redis namespace) ──────────
 
