@@ -7,6 +7,7 @@ import { classifyRegimeFromCandles, BTCRegime } from "@/lib/regime";
 import { runGateB } from "@/lib/gate-b";
 import { ema } from "@/lib/ta";
 import { STRATEGY_PROFILE } from "@/lib/reviewer";
+import { gradeSignal as gradeSignalLib } from "@/lib/grade-signal";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -48,80 +49,6 @@ const VARIANT_CONFIGS: Record<string, VariantConfig> = {
 };
 
 const VALID_VARIANTS = Object.keys(VARIANT_CONFIGS);
-
-// ── Variant-aware Gate B ─────────────────────────────────
-// Reimplements Gate B checks with configurable knobs.
-// For baseline variant, behavior is identical to production gate-b.ts.
-// For other variants, only the three knobs differ.
-// Does NOT call production runGateB — avoids double-check conflicts.
-
-function runGateBWithVariant(
-  input: Parameters<typeof runGateB>[0],
-  variant: VariantConfig
-): ReturnType<typeof runGateB> {
-  const { alertType, trend4h, btcRegime, atr1h, markPrice, rrTp1, rsi, adx1h, volume, sma20Volume } = input;
-  const lowerType = alertType.toLowerCase();
-
-  // ── Knob 1: Directional trend filter ──────────────────
-  // Production: always blocks counter-trend (gate-b.ts:31-37)
-  // aggressive variant: allows counter-trend
-  if (!variant.allow_counter_trend) {
-    if (lowerType.includes("long") && trend4h === "bearish") {
-      return { passed: false, reason: "LONG signal but 4H trend is bearish" };
-    }
-    if (lowerType.includes("short") && trend4h === "bullish") {
-      return { passed: false, reason: "SHORT signal but 4H trend is bullish" };
-    }
-  }
-
-  // ── ATR too low (unchanged across variants, gate-b.ts:40-45)
-  if (atr1h < 0.001 * markPrice) {
-    return { passed: false, reason: `ATR too low: ${atr1h.toFixed(4)} < ${(0.001 * markPrice).toFixed(4)}` };
-  }
-
-  // ── R:R minimum (unchanged across variants, gate-b.ts:48-54)
-  const rrRounded = Math.round(rrTp1 * 100) / 100;
-  if (rrRounded < 1.5) {
-    return { passed: false, reason: `R:R to TP1 too low: ${rrRounded} < 1.5` };
-  }
-
-  // ── Regime-aware gating (gate-b.ts:58-106) ────────────
-
-  if (btcRegime === "bear") {
-    if (lowerType.includes("mr_short")) {
-      return { passed: false, reason: "MR_SHORT historically fails in bear regime" };
-    }
-    if (lowerType.includes("mr_long") && rsi !== undefined && rsi >= 25) {
-      return { passed: false, reason: `MR_LONG in BEAR regime requires RSI < 25, got ${rsi.toFixed(1)}` };
-    }
-  }
-
-  if (btcRegime === "bull") {
-    if (lowerType.includes("sq_short")) {
-      if (rsi !== undefined && rsi <= 75) {
-        return { passed: false, reason: `SQ_SHORT in BULL regime requires RSI > 75, got ${rsi.toFixed(1)}` };
-      }
-      if (adx1h !== undefined && adx1h >= 15) {
-        return { passed: false, reason: `SQ_SHORT in BULL regime requires ADX < 15, got ${adx1h.toFixed(1)}` };
-      }
-    }
-  }
-
-  // ── Knob 2: Sideways SQ_SHORT volume multiplier ───────
-  // Production: 2.0x (gate-b.ts:99). Variants may use 1.5x or 1.2x.
-  if (btcRegime === "sideways") {
-    if (lowerType.includes("sq_short") && volume !== undefined && sma20Volume !== undefined) {
-      if (volume <= sma20Volume * variant.sideways_sq_volume_mult) {
-        return {
-          passed: false,
-          reason: `SQ_SHORT in SIDEWAYS requires volume > ${variant.sideways_sq_volume_mult}x SMA20 (${Math.round(volume)} <= ${Math.round(sma20Volume * variant.sideways_sq_volume_mult)})`,
-        };
-      }
-    }
-  }
-
-  return { passed: true, reason: null };
-}
 
 // Fixed BTC candle windows for regime classification
 // Must match live classifyRegime() in regime.ts:19-21
@@ -686,105 +613,12 @@ function precompute4hTrendFrame(
 
 // ── Grade a signal against future bars ──────────────────
 
-function gradeSignal(
-  rawEntry: number,
-  atrVal: number,
-  isLong: boolean,
-  futureBars: Kline[]
-): {
-  hit_tp1: boolean;
-  hit_tp2: boolean;
-  hit_tp3: boolean;
-  hit_sl: boolean;
-  bars_to_resolution: number;
-  max_favorable: number;
-  max_adverse: number;
-  tp1: number;
-  tp2: number;
-  tp3: number;
-  stop_loss: number;
-  entry_price: number;
-} {
-  const entry = isLong
-    ? rawEntry * (1 + SLIPPAGE)
-    : rawEntry * (1 - SLIPPAGE);
-
-  const risk = atrVal * ATR_MULT;
-  let tp1: number, tp2: number, tp3: number, sl: number;
-
-  if (isLong) {
-    sl = entry - risk;
-    tp1 = (entry + risk * 1.5) * (1 - TAKER_FEE);
-    tp2 = (entry + risk * 2.5) * (1 - TAKER_FEE);
-    tp3 = (entry + risk * 4.0) * (1 - TAKER_FEE);
-  } else {
-    sl = entry + risk;
-    tp1 = (entry - risk * 1.5) * (1 + TAKER_FEE);
-    tp2 = (entry - risk * 2.5) * (1 + TAKER_FEE);
-    tp3 = (entry - risk * 4.0) * (1 + TAKER_FEE);
-  }
-
-  let hit_tp1 = false, hit_tp2 = false, hit_tp3 = false, hit_sl = false;
-  let max_favorable = 0;
-  let max_adverse = 0;
-  let bars_to_resolution = futureBars.length;
-
-  for (let i = 0; i < futureBars.length; i++) {
-    const bar = futureBars[i];
-
-    if (isLong) {
-      const favorable = bar.high - entry;
-      const adverse = entry - bar.low;
-      if (favorable > max_favorable) max_favorable = favorable;
-      if (adverse > max_adverse) max_adverse = adverse;
-
-      if (!hit_sl && bar.low <= sl) {
-        hit_sl = true;
-        if (!hit_tp1) { bars_to_resolution = i + 1; break; }
-      }
-      if (!hit_tp1 && bar.high >= tp1) hit_tp1 = true;
-      if (!hit_tp2 && bar.high >= tp2) hit_tp2 = true;
-      if (!hit_tp3 && bar.high >= tp3) hit_tp3 = true;
-    } else {
-      const favorable = entry - bar.low;
-      const adverse = bar.high - entry;
-      if (favorable > max_favorable) max_favorable = favorable;
-      if (adverse > max_adverse) max_adverse = adverse;
-
-      if (!hit_sl && bar.high >= sl) {
-        hit_sl = true;
-        if (!hit_tp1) { bars_to_resolution = i + 1; break; }
-      }
-      if (!hit_tp1 && bar.low <= tp1) hit_tp1 = true;
-      if (!hit_tp2 && bar.low <= tp2) hit_tp2 = true;
-      if (!hit_tp3 && bar.low <= tp3) hit_tp3 = true;
-    }
-
-    if (hit_tp3) {
-      bars_to_resolution = i + 1;
-      break;
-    }
-  }
-
-  if (hit_tp1 && bars_to_resolution === futureBars.length) {
-    for (let i = 0; i < futureBars.length; i++) {
-      const bar = futureBars[i];
-      if (isLong && bar.high >= tp1) { bars_to_resolution = i + 1; break; }
-      if (!isLong && bar.low <= tp1) { bars_to_resolution = i + 1; break; }
-    }
-  }
-
-  return { hit_tp1, hit_tp2, hit_tp3, hit_sl, bars_to_resolution, max_favorable, max_adverse, tp1, tp2, tp3, stop_loss: sl, entry_price: entry };
-}
-
-// ── Compute R ───────────────────────────────────────────
-
-function computeR(sig: BacktestSignal): number {
+function computeRBacktest(sig: BacktestSignal): number {
   const risk = Math.abs(sig.entry_price - sig.stop_loss);
   if (risk === 0) return 0;
-  if (sig.hit_tp3) return (Math.abs(sig.tp3 - sig.entry_price)) / risk;
-  if (sig.hit_tp2) return (Math.abs(sig.tp2 - sig.entry_price)) / risk;
-  if (sig.hit_tp1) return (Math.abs(sig.tp1 - sig.entry_price)) / risk;
+  if (sig.hit_tp3) return Math.abs(sig.tp3 - sig.entry_price) / risk;
+  if (sig.hit_tp2) return Math.abs(sig.tp2 - sig.entry_price) / risk;
+  if (sig.hit_tp1) return Math.abs(sig.tp1 - sig.entry_price) / risk;
   if (sig.hit_sl) return -1;
   return 0;
 }
@@ -986,7 +820,7 @@ export async function GET(request: NextRequest) {
         const rawEntry = indicators.close;
         const atrVal = indicators.atr_1h;
 
-        const gateB = runGateBWithVariant({
+        const gateB = runGateB({
           alertType: sig.type,
           trend4h: trend4h.trend,
           btcRegime: regime,
@@ -997,7 +831,10 @@ export async function GET(request: NextRequest) {
           adx1h: indicators.adx_1h,
           volume: indicators.volume,
           sma20Volume: indicators.sma20_volume,
-        }, variantConfig);
+        }, {
+          allow_counter_trend: variantConfig.allow_counter_trend,
+          sideways_sq_volume_mult: variantConfig.sideways_sq_volume_mult,
+        });
 
         if (!gateB.passed) {
           filteredByGateB++;
@@ -1020,7 +857,7 @@ export async function GET(request: NextRequest) {
         // In backtest, passing Gate B = trade decision (no Claude override)
         cooldownUntil.set(cooldownKey, currentBarTime + cooldownMs);
 
-        const grade = gradeSignal(rawEntry, atrVal, isLong, futureBars);
+        const grade = gradeSignalLib(rawEntry, atrVal, isLong, futureBars);
 
         // Deterministic reviewer shadow classification (analytics only)
         const shadowResult = classifyReviewerShadow({
@@ -1072,7 +909,7 @@ export async function GET(request: NextRequest) {
   // Calculate live-equivalent statistics (enabled setups only)
   const total = liveSignals.length;
   const wins = liveSignals.filter((s) => s.hit_tp1).length;
-  const rValues = liveSignals.map(computeR);
+  const rValues = liveSignals.map(computeRBacktest);
   const avgR = total > 0 ? rValues.reduce((a, b) => a + b, 0) / total : 0;
   const grossProfit = rValues.filter((r) => r > 0).reduce((a, b) => a + b, 0);
   const grossLoss = Math.abs(rValues.filter((r) => r < 0).reduce((a, b) => a + b, 0));

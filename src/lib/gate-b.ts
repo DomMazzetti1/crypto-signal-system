@@ -20,17 +20,24 @@ export interface GateBInput {
   sma20Volume?: number;
 }
 
-export function runGateB(input: GateBInput): GateBResult {
+export interface GateBVariant {
+  allow_counter_trend?: boolean;
+  sideways_sq_volume_mult?: number;
+}
+
+export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult {
   const {
     alertType, trend4h, btcRegime,
     atr1h, markPrice, rrTp1, rsi, adx1h, volume, sma20Volume,
   } = input;
   const lowerType = alertType.toLowerCase();
+  const allowCounterTrend = variant?.allow_counter_trend ?? false;
+  const sidewaysSqVolMult = variant?.sideways_sq_volume_mult ?? 2.0;
 
   // ── Directional trend filter ──────────────────────────
   // Relaxed/data tiers bypass trend filter in data-collection mode
   const isRelaxedOrData = lowerType.includes("relaxed") || lowerType.includes("data");
-  if (!isRelaxedOrData) {
+  if (!isRelaxedOrData && !allowCounterTrend) {
     if (lowerType.includes("long") && trend4h === "bearish") {
       return { passed: false, reason: "LONG signal but 4H trend is bearish" };
     }
@@ -97,10 +104,10 @@ export function runGateB(input: GateBInput): GateBResult {
 
   if (btcRegime === "sideways") {
     // SIDEWAYS: allow MR_LONG, MR_SHORT freely (mean reversion preferred)
-    // SQ_SHORT: volume confirmation varies by tier
+    // SQ_SHORT: volume confirmation varies by tier/variant
     if (lowerType.includes("sq_short") && volume !== undefined && sma20Volume !== undefined) {
       const isRelaxedTier = lowerType.includes("relaxed") || lowerType.includes("data");
-      const volMult = isRelaxedTier ? 1.0 : 2.0;
+      const volMult = isRelaxedTier ? 1.0 : sidewaysSqVolMult;
       if (volume <= sma20Volume * volMult) {
         return {
           passed: false,
