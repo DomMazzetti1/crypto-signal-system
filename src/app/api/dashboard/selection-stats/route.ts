@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
@@ -24,14 +24,18 @@ export const dynamic = "force-dynamic";
  *
  * Requires migration 014 columns. Returns schema_available: false if not applied.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
   const supabase = getSupabase();
+
+  const days = Number(req.nextUrl.searchParams.get("days") || "90");
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
   // Try querying extended columns — if they don't exist, return gracefully
   const { data: rows, error } = await supabase
     .from("decisions")
     .select("selected_for_execution, suppressed_reason, cluster_rank, graded_outcome")
-    .in("decision", ["LONG", "SHORT", "MR_LONG", "MR_SHORT"]);
+    .in("decision", ["LONG", "SHORT", "MR_LONG", "MR_SHORT"])
+    .gte("created_at", cutoff);
 
   if (error) {
     if (error.message.includes("does not exist")) {
