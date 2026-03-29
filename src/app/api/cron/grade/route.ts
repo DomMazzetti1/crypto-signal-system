@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { gradeBatch } from "@/lib/grading";
+import { finalizeExpiredClusters } from "@/lib/cluster";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -23,6 +24,17 @@ export async function GET(request: NextRequest) {
     if (auth !== `Bearer ${cronSecret}`) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+  }
+
+  // Finalize any expired cluster windows so off-hours signals get selection decisions
+  // without requiring a dashboard read to trigger them.
+  try {
+    const finalized = await finalizeExpiredClusters();
+    if (finalized > 0) {
+      console.log(`[cron/grade] finalized ${finalized} expired cluster(s)`);
+    }
+  } catch (err) {
+    console.warn("[cron/grade] cluster finalization failed (non-blocking):", err);
   }
 
   let totalGraded = 0;
