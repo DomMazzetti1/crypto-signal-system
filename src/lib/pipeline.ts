@@ -17,7 +17,7 @@ import { isCooldownActive, setCooldown } from "@/lib/cooldown";
 import { reviewWithClaude, ClaudeReviewInput } from "@/lib/reviewer";
 import { buildMessage, sendTelegram } from "@/lib/telegram";
 import { computeCompositeScore } from "@/lib/scoring";
-import { assignCluster } from "@/lib/cluster";
+import { assignCluster, finalizeClusterSelection } from "@/lib/cluster";
 
 export interface AlertPayload {
   type: string;
@@ -570,6 +570,15 @@ export async function runPipeline(
   const decisionId = await storeDecision(supabase, extendedData, baseData);
 
   console.log(`[pipeline] Decision stored: ${decisionId} ${alert.symbol} ${decision}`);
+
+  // ── 10b. Try to finalize cluster if window already expired ──
+  // This handles the case where a signal arrives after the 60s window.
+  // For signals within the window, finalization is triggered by dashboard reads.
+  if (clusterData.cluster_id && !clusterData.selected_for_execution && !clusterData.suppressed_reason) {
+    finalizeClusterSelection(clusterData.cluster_id).catch((err) => {
+      console.warn("[pipeline] Post-store cluster finalization failed (non-blocking):", err);
+    });
+  }
 
   // ── 11. Mark alert processed ──────────────────────────
   await markProcessed(supabase, alertId);

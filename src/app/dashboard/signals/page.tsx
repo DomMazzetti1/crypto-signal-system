@@ -21,6 +21,11 @@ type Signal = {
   rr_tp1: number | null;
   current_price: number | null;
   status: string;
+  live_status: string;
+  live_tp1_hit: boolean;
+  live_tp2_hit: boolean;
+  live_tp3_hit: boolean;
+  live_stop_hit: boolean;
   pct_to_tp1: number | null;
   score: number;
   cluster_id: string | null;
@@ -28,6 +33,7 @@ type Signal = {
   cluster_rank: number | null;
   selected_for_execution: boolean;
   suppressed_reason: string | null;
+  selection_pending: boolean;
   // graded_outcome is persisted research truth, separate from live status.
   // Live status (OPEN/TP1_HIT/STOPPED/etc.) is derived from current price.
   // graded_outcome (WIN_FULL/LOSS/etc.) is set by the grading job and is durable.
@@ -62,6 +68,7 @@ type Cluster = {
   stopped: number;
   selected: number;
   suppressed: number;
+  pending: number;
 };
 
 // ── Helpers ────────────────────────────────────────────
@@ -92,24 +99,6 @@ function formatPrice(val: number | null): string {
   if (val >= 1000) return val.toFixed(2);
   if (val >= 1) return val.toFixed(4);
   return val.toPrecision(4);
-}
-
-function statusColor(status: string): string {
-  switch (status) {
-    case "TP3_HIT":
-      return "text-emerald-300 bg-emerald-500/20";
-    case "TP2_HIT":
-      return "text-emerald-400 bg-emerald-500/15";
-    case "TP1_HIT":
-      return "text-emerald-500 bg-emerald-500/10";
-    case "STOPPED":
-      return "text-red-400 bg-red-500/20";
-    case "OPEN":
-      return "text-neutral-300 bg-white/5";
-    default:
-      // UNKNOWN — neutral, not alarming
-      return "text-neutral-600 bg-transparent";
-  }
 }
 
 function gradedColor(outcome: string | null): string {
@@ -154,13 +143,14 @@ function positionRef(signal: Signal): string {
 }
 
 function matchesStatus(signal: Signal, filter: string): boolean {
+  const st = signal.live_status ?? signal.status;
   switch (filter) {
     case "open":
-      return signal.status === "OPEN";
+      return st === "OPEN";
     case "tp_hits":
-      return signal.status.startsWith("TP");
+      return st.startsWith("TP");
     case "stopped":
-      return signal.status === "STOPPED";
+      return st === "STOPPED";
     default:
       return true;
   }
@@ -184,7 +174,7 @@ const STATUS_OPTIONS = [
   { value: "stopped", label: "Stopped" },
 ] as const;
 
-const COL_SPAN = 16;
+const COL_SPAN = 15;
 
 // ── Selection stats type ───────────────────────────────
 
@@ -208,6 +198,7 @@ export default function SignalsDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pricesLoaded, setPricesLoaded] = useState(false);
+  const [priceSource, setPriceSource] = useState<string>("none");
   const [schemaVersion, setSchemaVersion] = useState<string>("unknown");
   const [selectionStats, setSelectionStats] = useState<SelectionStats | null>(null);
   const [filters, setFilters] = useState<Filters>({
@@ -229,6 +220,7 @@ export default function SignalsDashboard() {
       const json = await res.json();
       setSignals(json.signals ?? []);
       setPricesLoaded(json.prices_loaded ?? false);
+      setPriceSource(json.price_source ?? "none");
       setSchemaVersion(json.schema_version ?? "unknown");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Fetch failed");
@@ -277,13 +269,14 @@ export default function SignalsDashboard() {
         label: clusterLabel(key),
         signals: sigs,
         total: sigs.length,
-        open: sigs.filter((s) => s.status === "OPEN").length,
-        tp1: sigs.filter((s) => s.status === "TP1_HIT").length,
-        tp2: sigs.filter((s) => s.status === "TP2_HIT").length,
-        tp3: sigs.filter((s) => s.status === "TP3_HIT").length,
-        stopped: sigs.filter((s) => s.status === "STOPPED").length,
+        open: sigs.filter((s) => (s.live_status ?? s.status) === "OPEN").length,
+        tp1: sigs.filter((s) => (s.live_status ?? s.status) === "TP1_HIT").length,
+        tp2: sigs.filter((s) => (s.live_status ?? s.status) === "TP2_HIT").length,
+        tp3: sigs.filter((s) => (s.live_status ?? s.status) === "TP3_HIT").length,
+        stopped: sigs.filter((s) => (s.live_status ?? s.status) === "STOPPED").length,
         selected: sigs.filter((s) => s.selected_for_execution).length,
         suppressed: sigs.filter((s) => s.suppressed_reason != null).length,
+        pending: sigs.filter((s) => s.selection_pending).length,
       });
     }
     result.sort((a, b) => b.key.localeCompare(a.key));
@@ -303,7 +296,10 @@ export default function SignalsDashboard() {
               {filtered.length} signal{filtered.length !== 1 ? "s" : ""} in
               last {filters.hours}h
               {pricesLoaded ? (
-                <span className="ml-2 text-emerald-500">Live prices</span>
+                <span className="ml-2 text-emerald-500">
+                  Live prices
+                  <span className="text-neutral-600 ml-1 text-[10px]">({priceSource})</span>
+                </span>
               ) : (
                 <span className="ml-2 text-neutral-600">Prices unavailable</span>
               )}
@@ -426,8 +422,7 @@ export default function SignalsDashboard() {
                 <th className="px-2 py-2.5 text-right">Current</th>
                 <th className="px-2 py-2.5 text-right">Stop</th>
                 <th className="px-2 py-2.5 text-right">TP1</th>
-                <th className="px-2 py-2.5 text-center">Status</th>
-                <th className="px-2 py-2.5 text-right">%TP1</th>
+                <th className="px-2 py-2.5 text-center">Live</th>
                 <th className="px-2 py-2.5 text-right">10x</th>
                 {!isDegraded && <th className="px-2 py-2.5 text-center">Grade</th>}
                 <th className="px-2 py-2.5 text-center">TV</th>
@@ -539,6 +534,11 @@ function ClusterGroup({
                 {cluster.suppressed} suppressed
               </span>
             )}
+            {!isDegraded && cluster.pending > 0 && (
+              <span className="text-yellow-500">
+                {cluster.pending} pending
+              </span>
+            )}
             <span className="text-neutral-600">|</span>
             {cluster.open > 0 && (
               <span className="text-neutral-400">{cluster.open} open</span>
@@ -622,7 +622,9 @@ function SignalRow({
       )}
       {!isDegraded && (
         <td className="px-2 py-2 text-center" title={suppressTitle}>
-          {s.selected_for_execution ? (
+          {s.selection_pending ? (
+            <span className="text-yellow-500" title="Selection pending — cluster window open">...</span>
+          ) : s.selected_for_execution ? (
             <span className="text-blue-400">Y</span>
           ) : s.suppressed_reason ? (
             <span className="text-neutral-500 cursor-help">N</span>
@@ -647,28 +649,7 @@ function SignalRow({
         {formatPrice(s.tp1_price)}
       </td>
       <td className="px-2 py-2 text-center">
-        <span
-          className={`text-xs px-1.5 py-0.5 rounded ${statusColor(s.status)}`}
-        >
-          {s.status === "UNKNOWN" ? "-" : s.status.replace("_", " ")}
-        </span>
-      </td>
-      <td className="px-2 py-2 text-right tabular-nums">
-        {s.pct_to_tp1 != null && Number.isFinite(s.pct_to_tp1) ? (
-          <span
-            className={
-              s.pct_to_tp1 >= 100
-                ? "text-emerald-400"
-                : s.pct_to_tp1 >= 0
-                  ? "text-neutral-300"
-                  : "text-red-400"
-            }
-          >
-            {s.pct_to_tp1.toFixed(0)}%
-          </span>
-        ) : (
-          "-"
-        )}
+        <LiveStatusCell signal={s} />
       </td>
       <td className="px-2 py-2 text-right tabular-nums text-emerald-400/80">
         {positionRef(s)}
@@ -691,5 +672,66 @@ function SignalRow({
         </a>
       </td>
     </tr>
+  );
+}
+
+// ── Live status cell ──────────────────────────────────
+
+function LiveStatusCell({ signal: s }: { signal: Signal }) {
+  if (s.current_price == null) {
+    return <span className="text-neutral-600 text-xs">No price</span>;
+  }
+
+  if (s.live_stop_hit) {
+    return (
+      <span className="text-xs px-1.5 py-0.5 rounded text-red-400 bg-red-500/20">
+        STOPPED
+      </span>
+    );
+  }
+
+  // Show TP progress badges: each TP lights up when hit
+  return (
+    <div className="flex items-center justify-center gap-0.5">
+      <span
+        className={`text-[10px] px-1 py-0.5 rounded ${
+          s.live_tp1_hit
+            ? "text-emerald-400 bg-emerald-500/20"
+            : "text-neutral-600 bg-transparent"
+        }`}
+        title={s.live_tp1_hit ? "TP1 hit" : `TP1: ${formatPrice(s.tp1_price)}`}
+      >
+        T1
+      </span>
+      <span
+        className={`text-[10px] px-1 py-0.5 rounded ${
+          s.live_tp2_hit
+            ? "text-emerald-300 bg-emerald-500/15"
+            : "text-neutral-600 bg-transparent"
+        }`}
+        title={s.live_tp2_hit ? "TP2 hit" : `TP2: ${formatPrice(s.tp2_price)}`}
+      >
+        T2
+      </span>
+      <span
+        className={`text-[10px] px-1 py-0.5 rounded ${
+          s.live_tp3_hit
+            ? "text-emerald-200 bg-emerald-500/25"
+            : "text-neutral-600 bg-transparent"
+        }`}
+        title={s.live_tp3_hit ? "TP3 hit" : `TP3: ${formatPrice(s.tp3_price)}`}
+      >
+        T3
+      </span>
+      {!s.live_tp1_hit && s.pct_to_tp1 != null && Number.isFinite(s.pct_to_tp1) && (
+        <span
+          className={`text-[10px] ml-0.5 tabular-nums ${
+            s.pct_to_tp1 >= 0 ? "text-neutral-400" : "text-red-400"
+          }`}
+        >
+          {s.pct_to_tp1.toFixed(0)}%
+        </span>
+      )}
+    </div>
   );
 }
