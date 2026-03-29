@@ -286,114 +286,117 @@ export default function SignalsDashboard() {
   return (
     <div className="min-h-screen bg-black text-white p-6 font-[family-name:var(--font-geist-mono)]">
       <div className="max-w-[1600px] mx-auto">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">
-              Signal Dashboard
-            </h1>
-            <p className="text-neutral-500 text-sm mt-1">
-              {filtered.length} signal{filtered.length !== 1 ? "s" : ""} in
-              last {filters.hours}h
-              {pricesLoaded ? (
-                <span className="ml-2 text-emerald-500">
-                  Live prices
-                  <span className="text-neutral-600 ml-1 text-[10px]">({priceSource})</span>
-                </span>
-              ) : (
-                <span className="ml-2 text-neutral-600">Prices unavailable</span>
-              )}
-            </p>
+        {/* Sticky controls */}
+        <div className="sticky top-0 z-20 bg-black pb-4 -mx-6 px-6 pt-0 border-b border-white/10">
+          {/* Header */}
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h1 className="text-xl font-bold tracking-tight">
+                Signal Dashboard
+              </h1>
+              <p className="text-neutral-500 text-sm mt-1">
+                {filtered.length} signal{filtered.length !== 1 ? "s" : ""} in
+                last {filters.hours}h
+                {pricesLoaded ? (
+                  <span className="ml-2 text-emerald-500">
+                    Live prices
+                    <span className="text-neutral-600 ml-1 text-[10px]">({priceSource})</span>
+                  </span>
+                ) : (
+                  <span className="ml-2 text-neutral-600">Prices unavailable</span>
+                )}
+              </p>
+            </div>
+            <button
+              onClick={fetchSignals}
+              className="text-sm px-3 py-1.5 border border-white/20 rounded hover:bg-white/10 transition-colors"
+            >
+              Refresh
+            </button>
           </div>
-          <button
-            onClick={fetchSignals}
-            className="text-sm px-3 py-1.5 border border-white/20 rounded hover:bg-white/10 transition-colors"
-          >
-            Refresh
-          </button>
-        </div>
 
-        {/* Degraded schema banner */}
-        {isDegraded && (
-          <div className="mb-4 p-3 bg-yellow-900/30 border border-yellow-500/30 rounded text-yellow-300 text-xs leading-relaxed">
-            <strong>Degraded mode</strong> — migration 014 not applied.
-            Cluster metadata not persisted. Scores are fallback (not persisted).
-            Rank/Selection/Grade columns are unavailable. Research comparison disabled.
-          </div>
-        )}
-
-        {/* Selection stats — only shown when schema is full and data exists */}
-        {!isDegraded &&
-          selectionStats?.schema_available &&
-          selectionStats.by_selection &&
-          (selectionStats.comparison_eligible ?? 0) > 0 && (
-            <div className="mb-4 flex gap-6 text-xs text-neutral-400 border border-white/5 rounded p-3">
-              <span className="text-neutral-500">
-                Eligible: {selectionStats.comparison_eligible}
-                {(selectionStats.comparison_excluded_untagged ?? 0) > 0 && (
-                  <span className="text-neutral-600 ml-1">
-                    ({selectionStats.comparison_excluded_untagged} untagged excl)
-                  </span>
-                )}
-              </span>
-              <span>
-                Selected: {selectionStats.by_selection.selected.total}
-                {selectionStats.by_selection.selected.win_rate != null && (
-                  <span className="text-emerald-400 ml-1">
-                    {selectionStats.by_selection.selected.win_rate}% WR
-                  </span>
-                )}
-                {selectionStats.by_selection.selected.win_rate == null && (
-                  <span className="text-neutral-600 ml-1">no data</span>
-                )}
-              </span>
-              <span>
-                Suppressed: {selectionStats.by_selection.suppressed.total}
-                {selectionStats.by_selection.suppressed.win_rate != null && (
-                  <span className="text-neutral-500 ml-1">
-                    {selectionStats.by_selection.suppressed.win_rate}% WR
-                  </span>
-                )}
-                {selectionStats.by_selection.suppressed.win_rate == null && (
-                  <span className="text-neutral-600 ml-1">no data</span>
-                )}
-              </span>
+          {/* Degraded schema banner */}
+          {isDegraded && (
+            <div className="mb-4 p-3 bg-yellow-900/30 border border-yellow-500/30 rounded text-yellow-300 text-xs leading-relaxed">
+              <strong>Degraded mode</strong> — migration 014 not applied.
+              Cluster metadata not persisted. Scores are fallback (not persisted).
+              Rank/Selection/Grade columns are unavailable. Research comparison disabled.
             </div>
           )}
 
-        {/* Filters */}
-        <div className="flex gap-4 mb-6 flex-wrap">
-          <FilterGroup
-            label="Window"
-            options={HOUR_OPTIONS.map((h) => ({
-              value: String(h),
-              label: `${h}h`,
-            }))}
-            selected={String(filters.hours)}
-            onSelect={(v) =>
-              setFilters((f) => ({ ...f, hours: Number(v) }))
-            }
-          />
-          <FilterGroup
-            label="Tier"
-            options={["all", "strict", "relaxed"].map((t) => ({
-              value: t,
-              label: t.charAt(0).toUpperCase() + t.slice(1),
-            }))}
-            selected={filters.tier}
-            onSelect={(v) => setFilters((f) => ({ ...f, tier: v }))}
-          />
-          <FilterGroup
-            label="Status"
-            options={STATUS_OPTIONS.map((o) => ({
-              value: o.value,
-              label: o.label,
-            }))}
-            selected={filters.statusFilter}
-            onSelect={(v) =>
-              setFilters((f) => ({ ...f, statusFilter: v }))
-            }
-          />
+          {/* Selection stats — only shown when schema is full and data exists */}
+          {!isDegraded &&
+            selectionStats?.schema_available &&
+            selectionStats.by_selection &&
+            (selectionStats.comparison_eligible ?? 0) > 0 && (
+              <div className="mb-4 flex gap-6 text-xs text-neutral-400 border border-white/5 rounded p-3">
+                <span className="text-neutral-500">
+                  Eligible: {selectionStats.comparison_eligible}
+                  {(selectionStats.comparison_excluded_untagged ?? 0) > 0 && (
+                    <span className="text-neutral-600 ml-1">
+                      ({selectionStats.comparison_excluded_untagged} untagged excl)
+                    </span>
+                  )}
+                </span>
+                <span>
+                  Selected: {selectionStats.by_selection.selected.total}
+                  {selectionStats.by_selection.selected.win_rate != null && (
+                    <span className="text-emerald-400 ml-1">
+                      {selectionStats.by_selection.selected.win_rate}% WR
+                    </span>
+                  )}
+                  {selectionStats.by_selection.selected.win_rate == null && (
+                    <span className="text-neutral-600 ml-1">no data</span>
+                  )}
+                </span>
+                <span>
+                  Suppressed: {selectionStats.by_selection.suppressed.total}
+                  {selectionStats.by_selection.suppressed.win_rate != null && (
+                    <span className="text-neutral-500 ml-1">
+                      {selectionStats.by_selection.suppressed.win_rate}% WR
+                    </span>
+                  )}
+                  {selectionStats.by_selection.suppressed.win_rate == null && (
+                    <span className="text-neutral-600 ml-1">no data</span>
+                  )}
+                </span>
+              </div>
+            )}
+
+          {/* Filters */}
+          <div className="flex gap-4 flex-wrap">
+            <FilterGroup
+              label="Window"
+              options={HOUR_OPTIONS.map((h) => ({
+                value: String(h),
+                label: `${h}h`,
+              }))}
+              selected={String(filters.hours)}
+              onSelect={(v) =>
+                setFilters((f) => ({ ...f, hours: Number(v) }))
+              }
+            />
+            <FilterGroup
+              label="Tier"
+              options={["all", "strict", "relaxed"].map((t) => ({
+                value: t,
+                label: t.charAt(0).toUpperCase() + t.slice(1),
+              }))}
+              selected={filters.tier}
+              onSelect={(v) => setFilters((f) => ({ ...f, tier: v }))}
+            />
+            <FilterGroup
+              label="Status"
+              options={STATUS_OPTIONS.map((o) => ({
+                value: o.value,
+                label: o.label,
+              }))}
+              selected={filters.statusFilter}
+              onSelect={(v) =>
+                setFilters((f) => ({ ...f, statusFilter: v }))
+              }
+            />
+          </div>
         </div>
 
         {/* Error */}
