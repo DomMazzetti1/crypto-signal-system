@@ -14,6 +14,8 @@ import { Kline } from "@/lib/bybit";
 
 const MIN_AGE_MS = 48 * 60 * 60 * 1000;
 const FORWARD_BARS = 48;
+const SLIPPAGE = 0.0005;
+const TAKER_FEE = 0.00055;
 
 export interface GradeBatchResult {
   checked: number;
@@ -27,11 +29,15 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
   const supabase = getSupabase();
   const cutoff = new Date(Date.now() - MIN_AGE_MS).toISOString();
 
+  // AUDIT NOTE: "decision" column should only contain LONG, SHORT, or NO_TRADE.
+  // MR_LONG, MR_SHORT, SQ_SHORT listed here are legacy values from early operation.
+  // Run: SELECT DISTINCT decision FROM decisions; to confirm no unexpected values.
   const { data: decisions, error: decErr } = await supabase
     .from("decisions")
-    .select("id, symbol, alert_type, decision, btc_regime, entry_price, stop_price, tp1_price, atr14_1h, created_at")
+    .select("id, symbol, alert_type, decision, btc_regime, entry_price, stop_price, tp1_price, tp2_price, tp3_price, atr14_1h, created_at")
     .in("decision", ["LONG", "SHORT", "MR_LONG", "MR_SHORT", "SQ_SHORT"])
     .lte("created_at", cutoff)
+    .is("graded_outcome", null)
     .order("created_at", { ascending: true })
     .limit(batchSize);
 
@@ -40,18 +46,7 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
     return { checked: 0, graded: 0, failed: 0, skipped: 0, results: [] };
   }
 
-  const decisionIds = decisions.map(d => d.id);
-  const { data: existingGrades } = await supabase
-    .from("production_signal_grades")
-    .select("decision_id")
-    .in("decision_id", decisionIds);
-
-  const alreadyGraded = new Set((existingGrades ?? []).map(g => g.decision_id));
-  const ungraded = decisions.filter(d => !alreadyGraded.has(d.id));
-
-  if (ungraded.length === 0) {
-    return { checked: decisions.length, graded: 0, failed: 0, skipped: decisions.length, results: [] };
-  }
+  const ungraded = decisions;
 
   let graded = 0;
   let failed = 0;
@@ -80,7 +75,13 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
     let futureBars: Kline[];
     try {
       const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${dec.symbol}&interval=60&start=${startAfter}&limit=${FORWARD_BARS}`;
-      const res = await fetch(url, { cache: "no-store" });
+      let res: Response;
+      try {
+        res = await fetch(url, { cache: "no-store" });
+      } catch {
+        await new Promise(r => setTimeout(r, 600));
+        res = await fetch(url, { cache: "no-store" });
+      }
       const data = await res.json();
 
       if (data.retCode !== 0 || !data.result?.list?.length) {
@@ -109,8 +110,9 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
 
     if (futureBars.length < 10) continue;
 
-    const risk = Math.abs(entry - stop);
-    if (risk === 0) {
+    // Use stored levels — avoids future multiplier changes corrupting historical grades
+    const rawRisk = Math.abs(entry - stop);
+    if (rawRisk === 0) {
       await insertGrade(supabase, dec, "FAILED");
       await writeLifecycleToDecision(supabase, dec.id, {
         graded_outcome: "INVALID",
@@ -121,15 +123,29 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
       continue;
     }
 
-    let tp1: number, tp2: number, tp3: number;
+    let tp1: number = Number.isFinite(Number(dec.tp1_price)) && Number(dec.tp1_price) > 0
+      ? Number(dec.tp1_price)
+      : isLong ? entry + rawRisk * 1.5 : entry - rawRisk * 1.5;
+    let tp2: number = Number.isFinite(Number(dec.tp2_price)) && Number(dec.tp2_price) > 0
+      ? Number(dec.tp2_price)
+      : isLong ? entry + rawRisk * 2.5 : entry - rawRisk * 2.5;
+    let tp3: number = Number.isFinite(Number(dec.tp3_price)) && Number(dec.tp3_price) > 0
+      ? Number(dec.tp3_price)
+      : isLong ? entry + rawRisk * 4.0 : entry - rawRisk * 4.0;
+
+    // Apply friction model to match backtest/shadow grading methodology
+    const fillEntry = isLong ? entry * (1 + SLIPPAGE) : entry * (1 - SLIPPAGE);
+    const risk = Math.abs(fillEntry - stop);
+
+    // Adjust TP levels for taker fees
     if (isLong) {
-      tp1 = entry + risk * 1.5;
-      tp2 = entry + risk * 2.5;
-      tp3 = entry + risk * 4.0;
+      tp1 = tp1 * (1 - TAKER_FEE);
+      tp2 = tp2 * (1 - TAKER_FEE);
+      tp3 = tp3 * (1 - TAKER_FEE);
     } else {
-      tp1 = entry - risk * 1.5;
-      tp2 = entry - risk * 2.5;
-      tp3 = entry - risk * 4.0;
+      tp1 = tp1 * (1 + TAKER_FEE);
+      tp2 = tp2 * (1 + TAKER_FEE);
+      tp3 = tp3 * (1 + TAKER_FEE);
     }
 
     let hit_tp1 = false, hit_tp2 = false, hit_tp3 = false, hit_sl = false;
@@ -145,8 +161,8 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
       const barTime = new Date(bar.startTime).toISOString();
 
       if (isLong) {
-        const fav = bar.high - entry;
-        const adv = entry - bar.low;
+        const fav = bar.high - fillEntry;
+        const adv = fillEntry - bar.low;
         if (fav > max_favorable) max_favorable = fav;
         if (adv > max_adverse) max_adverse = adv;
 
@@ -159,8 +175,8 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
         if (!hit_tp2 && bar.high >= tp2) { hit_tp2 = true; tp2HitAt = barTime; }
         if (!hit_tp3 && bar.high >= tp3) { hit_tp3 = true; tp3HitAt = barTime; }
       } else {
-        const fav = entry - bar.low;
-        const adv = bar.high - entry;
+        const fav = fillEntry - bar.low;
+        const adv = bar.high - fillEntry;
         if (fav > max_favorable) max_favorable = fav;
         if (adv > max_adverse) max_adverse = adv;
 
@@ -193,7 +209,7 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
       alert_type: dec.alert_type,
       decision: dec.decision,
       btc_regime: dec.btc_regime,
-      entry_price: entry,
+      entry_price: fillEntry,
       stop_price: stop,
       atr14_1h: atr,
       grade_status: "GRADED",
@@ -229,7 +245,7 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
     }
   }
 
-  return { checked: ungraded.length, graded, failed, skipped: alreadyGraded.size, results };
+  return { checked: ungraded.length, graded, failed, skipped: 0, results };
 }
 
 // ── Outcome derivation ───────────────────────────────────
