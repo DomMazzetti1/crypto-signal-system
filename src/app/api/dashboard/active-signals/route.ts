@@ -142,7 +142,8 @@ function computeLiveStatus(
 
   let tp1Hit = false, tp2Hit = false, tp3Hit = false, stopHit = false;
 
-  if (decision === "LONG") {
+  const isLong = decision === "LONG" || decision === "MR_LONG";
+  if (isLong) {
     if (tp1 != null && current >= tp1) tp1Hit = true;
     if (tp2 != null && current >= tp2) tp2Hit = true;
     if (tp3 != null && current >= tp3) tp3Hit = true;
@@ -171,7 +172,7 @@ function computePctToTp1(
   tp1: number | null
 ): number | null {
   if (current == null || entry == null || tp1 == null) return null;
-  if (decision === "LONG") {
+  if (decision === "LONG" || decision === "MR_LONG") {
     const range = tp1 - entry;
     if (range === 0) return null;
     return ((current - entry) / range) * 100;
@@ -201,7 +202,7 @@ export async function GET(req: NextRequest) {
     let q = supabase
       .from("decisions")
       .select(columns)
-      .in("decision", ["LONG", "SHORT"])
+      .in("decision", ["LONG", "SHORT", "MR_LONG", "MR_SHORT"])
       .gte("created_at", cutoff)
       .order("created_at", { ascending: false })
       .limit(1000);

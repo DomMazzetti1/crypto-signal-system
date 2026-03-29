@@ -614,7 +614,7 @@ function SignalRow({
       <td className="px-2 py-2">
         <span
           className={
-            s.decision === "LONG" ? "text-emerald-400" : "text-red-400"
+            s.decision.includes("LONG") ? "text-emerald-400" : "text-red-400"
           }
         >
           {s.decision}
