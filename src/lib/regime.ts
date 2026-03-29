@@ -56,7 +56,8 @@ export function classifyRegimeFromCandles(
     : 0;
 
   // ADX on 4H for sideways detection
-  const btc4hAdx = adx(btc4h, 14);
+  const btc4hAdxRaw = adx(btc4h, 14);
+  const btc4hAdxValue = typeof btc4hAdxRaw === 'number' && Number.isFinite(btc4hAdxRaw) ? btc4hAdxRaw : 50;
 
   let btc_regime: BTCRegime;
 
@@ -69,7 +70,7 @@ export function classifyRegimeFromCandles(
     } else {
       btc_regime = "sideways";
     }
-  } else if (Math.abs(distFromEma200) < 0.03 || btc4hAdx < 20) {
+  } else if (Math.abs(distFromEma200) < 0.03 || btc4hAdxValue < 20) {
     // Within 3% of EMA200 OR low ADX — sideways
     btc_regime = "sideways";
   } else if (btcClose > currentEma200 && ema200Slope > 0) {

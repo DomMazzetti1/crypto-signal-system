@@ -17,7 +17,7 @@ import { isCooldownActive, setCooldown } from "@/lib/cooldown";
 import { reviewWithClaude, ClaudeReviewInput } from "@/lib/reviewer";
 import { buildMessage, sendTelegram } from "@/lib/telegram";
 import { computeCompositeScore } from "@/lib/scoring";
-import { assignCluster, finalizeClusterSelection } from "@/lib/cluster";
+import { assignCluster, finalizeClusterSelection, deriveTier } from "@/lib/cluster";
 
 export interface AlertPayload {
   type: string;
@@ -117,7 +117,8 @@ export async function runPipeline(
 
   const rawType = alert.type.toLowerCase();
   const direction: "long" | "short" = rawType.includes("short") ? "short" : "long";
-  const isRelaxed = rawType.includes("relaxed");
+  const tier = deriveTier(alert.type);
+  const isRelaxed = tier === "RELAXED";
   console.log(`[pipeline] Processing: ${alert.symbol} type=${alert.type} direction=${direction}`);
 
   // ── 1. Enrichment: market data (parallel) ─────────────
