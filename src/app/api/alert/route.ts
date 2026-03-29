@@ -15,6 +15,16 @@ const REQUIRED_FIELDS = [
 ] as const;
 
 export async function POST(request: NextRequest) {
+  const secret = process.env.WEBHOOK_SECRET;
+  if (secret) {
+    const provided =
+      request.headers.get("x-webhook-secret") ??
+      request.nextUrl.searchParams.get("secret");
+    if (provided !== secret) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+  }
+
   let payload: Record<string, unknown>;
 
   try {

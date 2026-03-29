@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { Kline } from "@/lib/bybit";
 import { gradeSignal, computeR } from "@/lib/grade-signal";
@@ -11,7 +11,15 @@ export const maxDuration = 300;
 const MIN_AGE_MS = 48 * 60 * 60 * 1000;
 const FORWARD_BARS = 48;
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret) {
+    const auth = request.headers.get("authorization");
+    if (auth !== `Bearer ${cronSecret}`) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+  }
+
   const supabase = getSupabase();
   const now = Date.now();
 

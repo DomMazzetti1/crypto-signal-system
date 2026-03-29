@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { getRedis, ALERTS_QUEUE_KEY } from "@/lib/redis";
 import { fetchKlines, Kline } from "@/lib/bybit";
@@ -78,7 +78,15 @@ async function fetchKlinesRetry(
 
 // ── Main handler ────────────────────────────────────────
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret) {
+    const auth = request.headers.get("authorization");
+    if (auth !== `Bearer ${cronSecret}`) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+  }
+
   const startTime = Date.now();
   const redis = getRedis();
   const supabase = getSupabase();

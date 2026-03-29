@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { gradeBatch } from "@/lib/grading";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +16,15 @@ const BATCH_SIZE = 50;
  *
  * Called by Vercel cron every 15 minutes.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret) {
+    const auth = request.headers.get("authorization");
+    if (auth !== `Bearer ${cronSecret}`) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+  }
+
   let totalGraded = 0;
   let totalFailed = 0;
   let totalSkipped = 0;
