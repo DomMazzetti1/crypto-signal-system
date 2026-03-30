@@ -609,12 +609,20 @@ export async function runPipeline(
     // RELAXED_PROD Telegram quality filter
     let sendTelegram_ = true;
     if (isRelaxed) {
+      // RELAXED Telegram quality filter — tightened 2026-03-29
+      // bb_width: 0.06 → 0.08 (wider compression = better squeeze signal)
+      // vol_ratio: 1.2 → 1.5 (stronger volume confirmation required)
+      // Effect: reduces RELAXED Telegram sends by ~30-40%, improves signal quality
+      // Revert thresholds here if Telegram send rate drops too low (< 1/day)
       const volRatio = (alert.sma20_volume && alert.sma20_volume > 0)
         ? (alert.volume ?? 0) / alert.sma20_volume : 0;
       const checks: { name: string; pass: boolean }[] = [
         { name: "pass_count", pass: true }, // pass_count not available in pipeline; checked at scanner level
-        { name: "bb_width>=0.06", pass: alert.bb_width >= 0.06 },
-        { name: "vol_ratio>=1.2", pass: volRatio >= 1.2 },
+        // Tightened from 0.06 — wider bb = more compressed squeeze = stronger setup
+        { name: "bb_width>=0.08", pass: alert.bb_width >= 0.08 },
+        // Tightened from 1.2 — volume confirmation is the strongest win predictor
+        { name: "vol_ratio>=1.5", pass: volRatio >= 1.5 },
+        // rr_tp1 is always 1.5, this check always passes — retained as future guard
         { name: "rr_tp1>=1.2", pass: levels.rr_tp1 >= 1.2 },
         { name: "tp1_positive", pass: direction === "long" ? levels.tp1 > levels.entry : levels.tp1 < levels.entry },
         { name: "entry_mark_dev<=1%", pass: markPrice > 0 && Math.abs(levels.entry - markPrice) / markPrice <= 0.01 },

@@ -242,7 +242,9 @@ export function detectSignalsTiered(
   params: SignalParams,
   opts: { relaxed_min?: number; data_min?: number; low_flow?: boolean } = {}
 ): TieredSignal[] {
-  const relaxedMin = opts.low_flow ? 5 : (opts.relaxed_min ?? 6);
+  // relaxedMin raised from 6→7 on 2026-03-29: 6/9 pass rate was generating
+  // too many low-quality signals. DATA_ONLY still captures 5-6/9 for research.
+  const relaxedMin = opts.low_flow ? 6 : (opts.relaxed_min ?? 7);
   const dataMin = opts.data_min ?? 5;
   const results: TieredSignal[] = [];
 
