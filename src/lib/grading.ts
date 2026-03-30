@@ -222,6 +222,7 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
       bars_to_resolution,
       max_favorable, max_adverse,
       close_at_48h_price,
+      sl_moved_to_tp2: hit_tp2,
     }, { onConflict: "decision_id" });
 
     if (upsertErr) {
