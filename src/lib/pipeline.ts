@@ -16,6 +16,7 @@ import { calculateLevels } from "@/lib/levels";
 import { isCooldownActive, setCooldown } from "@/lib/cooldown";
 import { reviewWithClaude, ClaudeReviewInput } from "@/lib/reviewer";
 import { buildMessage, sendTelegram } from "@/lib/telegram";
+import { sendToExecutionEngine } from "@/lib/exec-webhook";
 import { computeCompositeScore } from "@/lib/scoring";
 import { assignCluster, finalizeClusterSelection, deriveTier } from "@/lib/cluster";
 import { runPreTradeRiskChecks, RiskCheckResult } from "@/lib/risk-manager";
@@ -746,6 +747,26 @@ export async function runPipeline(
         });
         telegramSent = await sendTelegram(msg);
         if (telegramSent) {
+          // Send to execution engine (non-blocking, fire-and-forget)
+          sendToExecutionEngine({
+            symbol: alert.symbol,
+            direction: direction.toUpperCase() as 'LONG' | 'SHORT',
+            entry_price: levels.entry,
+            stop_price: levels.stop,
+            tp1_price: levels.tp1,
+            tp2_price: levels.tp2,
+            tp3_price: levels.tp3,
+            risk_amount: levels.risk,
+            btc_regime: regime.btc_regime,
+            composite_score: scoreResult.composite_score,
+            alert_type: alert.type,
+            confidence: claudeConfidence ?? 0,
+            decision_id: decisionId ?? '',
+            timestamp: new Date().toISOString(),
+          }).catch(err => {
+            console.error('[pipeline] Exec webhook fire-and-forget error:', err);
+          });
+
           // Set repeat suppression key after successful send
           const redis = getRedis();
           const setupFamily = alert.type.replace(/_RELAXED$|_DATA$/i, "");
