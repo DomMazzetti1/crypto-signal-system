@@ -127,7 +127,9 @@ Your role is to assess signals that already passed detection, Gate B, and cooldo
 1. Whether the setup is coherent (indicators align with the signal direction).
 2. Whether market microstructure supports the trade (spread, depth, funding, OI flow).
 3. Whether risk levels are sensible relative to current volatility.
-If the supplied BTC regime conflicts with the signal direction, increase skepticism.`;
+If the supplied BTC regime conflicts with the signal direction, increase skepticism.
+
+HARD RULE: If stop distance exceeds 8% of entry price, always reject — the TP ladder is mathematically unreliable on micro-cap tokens with oversized ATR. Return NO_TRADE with reasoning citing stop_too_wide.`;
 
 const OUTPUT_SCHEMA = {
   type: "object" as const,
@@ -210,6 +212,7 @@ Regime:
 Price Levels:
   Entry: ${input.entry}
   Stop: ${input.stop}
+  Stop Distance: ${input.entry > 0 ? (Math.abs(input.stop - input.entry) / input.entry * 100).toFixed(2) : "N/A"}%
   TP1: ${input.tp1}
   TP2: ${input.tp2}
   TP3: ${input.tp3}

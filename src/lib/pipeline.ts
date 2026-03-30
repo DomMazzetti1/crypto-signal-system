@@ -334,6 +334,39 @@ export async function runPipeline(
     };
   }
 
+  // ── 5c. Stop distance filter ────────────────────────────
+  const maxStopDistPct = parseFloat(process.env.MAX_STOP_DIST_PCT ?? "0.08");
+  const stopDistPct = Math.abs(levels.stop - levels.entry) / levels.entry;
+  if (stopDistPct > maxStopDistPct) {
+    const pctDisplay = (stopDistPct * 100).toFixed(1);
+    console.log(`[pipeline] ${alert.symbol} REJECTED: stop_too_wide: ${pctDisplay}%`);
+    await storeDecision(supabase, {
+      snapshot_id: snapshotId,
+      alert_id: alertId,
+      symbol: alert.symbol,
+      alert_type: alert.type,
+      alert_tf: alert.tf,
+      decision: "NO_TRADE",
+      gate_a_passed: gateA.passed,
+      gate_a_quality: gateA.quality,
+      gate_b_passed: false,
+      gate_b_reason: `stop_too_wide: ${pctDisplay}%`,
+      trend_4h: trend4h.trend,
+      trend_1d: trend1d.trend,
+      btc_regime: regime.btc_regime,
+      alt_environment: regime.alt_environment,
+      cooldown_active: false,
+    });
+    await markProcessed(supabase, alertId);
+    return {
+      status: "decision_made",
+      symbol: alert.symbol,
+      decision: "NO_TRADE",
+      gate_a: { passed: gateA.passed, quality: gateA.quality, reject_reason: gateA.rejectReason },
+      gate_b: { passed: false, reason: `stop_too_wide: ${pctDisplay}%` },
+    };
+  }
+
   // ── 6. Gate B ─────────────────────────────────────────
   const gateB = runGateB({
     alertType: alert.type,
