@@ -48,11 +48,23 @@ export async function checkDailyLossLimit(): Promise<RiskCheckResult> {
   const supabase = getSupabase();
   const todayStart = new Date().toISOString().slice(0, 10);
 
+  // Only count signals that were actually sent to Telegram (not DATA_ONLY research signals)
+  const { data: tradedDecisions } = await supabase
+    .from("decisions")
+    .select("id")
+    .eq("telegram_sent", true)
+    .in("decision", ["LONG", "SHORT", "MR_LONG", "MR_SHORT"]);
+
+  if (!tradedDecisions || tradedDecisions.length === 0) return { approved: true };
+
+  const tradedIds = tradedDecisions.map(d => d.id);
+
   const { data: grades } = await supabase
     .from("production_signal_grades")
     .select("outcome_r")
     .gte("graded_at", todayStart)
-    .eq("grade_status", "GRADED");
+    .eq("grade_status", "GRADED")
+    .in("decision_id", tradedIds);
 
   if (!grades || grades.length === 0) return { approved: true };
 
