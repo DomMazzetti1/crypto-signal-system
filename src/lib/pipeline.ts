@@ -18,6 +18,7 @@ import { reviewWithClaude, ClaudeReviewInput } from "@/lib/reviewer";
 import { buildMessage, sendTelegram } from "@/lib/telegram";
 import { computeCompositeScore } from "@/lib/scoring";
 import { assignCluster, finalizeClusterSelection, deriveTier } from "@/lib/cluster";
+import { runPreTradeRiskChecks, RiskCheckResult } from "@/lib/risk-manager";
 
 export interface AlertPayload {
   type: string;
@@ -550,6 +551,21 @@ export async function runPipeline(
     }
   }
 
+  // ── 9d. Portfolio risk checks ──────────────────────────
+  let riskCheckResult: RiskCheckResult | null = null;
+  if (isTradeBefore) {
+    try {
+      riskCheckResult = await runPreTradeRiskChecks(levels.risk);
+      if (!riskCheckResult.approved) {
+        console.log(`[pipeline] ${alert.symbol} risk check rejected: ${riskCheckResult.reason}`);
+        decision = "NO_TRADE";
+        finalGateBReason = riskCheckResult.reason ?? "RISK_CHECK_FAILED";
+      }
+    } catch (err) {
+      console.warn("[pipeline] Risk check error (non-blocking, fail open):", err);
+    }
+  }
+
   // ── 10. Store decision ────────────────────────────────
   // Base fields always exist. Extended fields (migration 014) are attempted
   // first; if insert fails due to missing columns, retry with base only.
@@ -585,6 +601,7 @@ export async function runPipeline(
     rr_tp2: levels.rr_tp2,
     rr_tp3: levels.rr_tp3,
     cooldown_active: cooldownActive,
+    risk_check_result: riskCheckResult ? { approved: riskCheckResult.approved, reason: riskCheckResult.reason } : null,
   };
 
   const extendedData: Record<string, unknown> = {

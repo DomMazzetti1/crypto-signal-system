@@ -8,6 +8,7 @@ import { runGateBRelaxed, isShadowCooldownActive, setShadowCooldown } from "@/li
 import { runGateB } from "@/lib/gate-b";
 import { computeHTFTrend } from "@/lib/ta";
 import { classifyRegime } from "@/lib/regime";
+import { isKillSwitchActive } from "@/lib/kill-switch";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -85,6 +86,15 @@ export async function GET(request: NextRequest) {
     if (auth !== `Bearer ${cronSecret}`) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+  }
+
+  // Kill switch check — abort before any processing
+  try {
+    if (await isKillSwitchActive()) {
+      return NextResponse.json({ status: "kill_switch_active", message: "System paused due to drawdown limit" });
+    }
+  } catch (err) {
+    console.warn("[scanner] Kill switch check failed (non-blocking):", err);
   }
 
   const startTime = Date.now();

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { gradeBatch } from "@/lib/grading";
 import { finalizeExpiredClusters } from "@/lib/cluster";
+import { updateAccountState } from "@/lib/kill-switch";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -55,6 +56,13 @@ export async function GET(request: NextRequest) {
       if (batch.checked === 0 || (batch.graded === 0 && batch.failed === 0)) {
         break;
       }
+    }
+
+    // Update account state for kill switch after grading
+    try {
+      await updateAccountState();
+    } catch (err) {
+      console.error("[cron/grade] Kill switch state update failed (non-blocking):", err);
     }
 
     console.log(
