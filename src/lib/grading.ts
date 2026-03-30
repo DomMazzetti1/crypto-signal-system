@@ -191,6 +191,10 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
       if (hit_tp3) { bars_to_resolution = i + 1; break; }
     }
 
+    const close_at_48h_price = futureBars.length > 0
+      ? futureBars[futureBars.length - 1].close
+      : null;
+
     let outcome_r = 0;
     if (hit_tp3) outcome_r = 4.0;
     else if (hit_tp2) outcome_r = 2.5;
@@ -217,6 +221,7 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
       hit_tp1, hit_tp2, hit_tp3, hit_sl,
       bars_to_resolution,
       max_favorable, max_adverse,
+      close_at_48h_price,
     }, { onConflict: "decision_id" });
 
     if (upsertErr) {
