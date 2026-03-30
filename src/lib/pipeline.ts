@@ -656,21 +656,46 @@ export async function runPipeline(
   const isTrade = decision === "LONG" || decision === "SHORT";
 
   if (isTrade) {
-    // RELAXED_PROD Telegram quality filter
     let sendTelegram_ = true;
-    if (isRelaxed) {
+    const volRatio = (alert.sma20_volume && alert.sma20_volume > 0)
+      ? (alert.volume ?? 0) / alert.sma20_volume : 0;
+
+    // ── Regime-specific Telegram quality filter (all tiers) ──────
+    // Based on 11,208-signal backtest (run_20260330115254):
+    // - Sideways: PF 3.28 with bb>=0.08, vol>=1.5 (keep as-is)
+    // - Bear: PF 2.01 only with bb 0.08-0.12 AND excluding vol 2.0-2.5
+    // - Bull: Already blocked by Gate B (no change needed)
+    if (sendTelegram_ && regime.btc_regime === "bear") {
+      const bearBbMax = parseFloat(process.env.BEAR_BB_WIDTH_MAX ?? "0.12");
+      const bearVolDeadLow = parseFloat(process.env.BEAR_VOL_DEAD_ZONE_LOW ?? "2.0");
+      const bearVolDeadHigh = parseFloat(process.env.BEAR_VOL_DEAD_ZONE_HIGH ?? "2.5");
+
+      const bearChecks = [
+        { name: "bear_bb_width>=0.08", pass: alert.bb_width >= 0.08 },
+        { name: `bear_bb_width<${bearBbMax}`, pass: alert.bb_width < bearBbMax },
+        { name: "bear_vol_not_dead_zone", pass: !(volRatio >= bearVolDeadLow && volRatio < bearVolDeadHigh) },
+        { name: "bear_vol_ratio>=1.5", pass: volRatio >= 1.5 },
+      ];
+      const bearFailed = bearChecks.filter(c => !c.pass);
+      if (bearFailed.length > 0) {
+        sendTelegram_ = false;
+        telegramBlockReason = `BEAR regime filtered: ${bearFailed.map(f => f.name).join(", ")}`;
+        console.log(`[pipeline] ${alert.symbol} BEAR regime filter: BLOCKED ${bearFailed.map(f => f.name).join(", ")} (bb_width=${alert.bb_width?.toFixed(3)}, vol_ratio=${volRatio.toFixed(2)})`);
+      } else {
+        console.log(`[pipeline] ${alert.symbol} BEAR regime filter: PASSED (bb_width=${alert.bb_width?.toFixed(3)}, vol_ratio=${volRatio.toFixed(2)})`);
+      }
+    }
+
+    // ── RELAXED tier quality filter (additional checks on top of regime filter) ──
+    if (sendTelegram_ && isRelaxed) {
       // RELAXED Telegram quality filter — tightened 2026-03-29
       // bb_width: 0.06 → 0.08 (wider compression = better squeeze signal)
       // vol_ratio: 1.2 → 1.5 (stronger volume confirmation required)
       // Effect: reduces RELAXED Telegram sends by ~30-40%, improves signal quality
       // Revert thresholds here if Telegram send rate drops too low (< 1/day)
-      const volRatio = (alert.sma20_volume && alert.sma20_volume > 0)
-        ? (alert.volume ?? 0) / alert.sma20_volume : 0;
       const checks: { name: string; pass: boolean }[] = [
         { name: "pass_count", pass: true }, // pass_count not available in pipeline; checked at scanner level
-        // Tightened from 0.06 — wider bb = more compressed squeeze = stronger setup
         { name: "bb_width>=0.08", pass: alert.bb_width >= 0.08 },
-        // Tightened from 1.2 — volume confirmation is the strongest win predictor
         { name: "vol_ratio>=1.5", pass: volRatio >= 1.5 },
         // rr_tp1 is always 1.5, this check always passes — retained as future guard
         { name: "rr_tp1>=1.2", pass: levels.rr_tp1 >= 1.2 },
