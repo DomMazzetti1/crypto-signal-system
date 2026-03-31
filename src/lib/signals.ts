@@ -327,9 +327,8 @@ export function detectSignalsTiered(
 
   if (sqlPassed >= dataMin) {
     // SQ_LONG is always DATA_ONLY — collecting data for future bull market analysis
-    const typeSuffix = sqlPassed === sqlTotal ? "" : sqlPassed >= relaxedMin ? "_RELAXED" : "_DATA";
     results.push({
-      type: `SQ_LONG${typeSuffix}`,
+      type: `SQ_LONG_DATA`,
       symbol,
       indicators: ind,
       tier: "DATA_ONLY", // Always DATA_ONLY regardless of pass count
@@ -347,6 +346,8 @@ export function detectSignalsTiered(
       results.push({
         ...sig,
         tier: "STRICT_PROD",
+        // MR signals from detectSignalsWithParams only return if ALL conditions pass
+        // pass_count is always total_conditions. If MR conditions change, update this.
         pass_count: sig.type === "MR_LONG" ? 8 : 8,
         total_conditions: 8,
         failed_conditions: [],
@@ -499,6 +500,10 @@ export function evaluateNearMisses(ind: SymbolIndicators): NearMissResult[] {
   });
 
   // ── SQ_SHORT ──
+  // TODO: Near-miss evaluation uses event-based triggers but production uses state-based
+  // (DEFAULT_SIGNAL_PARAMS.sq_trigger_mode = "state"). This means near-miss diagnostics
+  // evaluate a different signal definition than production. Pass trigger_mode through
+  // to align them.
   const crossedBelowBasis = ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis;
   const rsiCrossedBelow48 = ind.prev_rsi >= 48 && ind.rsi < 48;
   const sqShortConds: ConditionResult[] = [

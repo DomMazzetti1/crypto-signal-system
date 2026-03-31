@@ -70,6 +70,13 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
 
   if (btcRegime === "bear") {
     // BEAR: allow SQ_SHORT freely
+    // SQ_LONG: blocked in bear regime — counter-trend long squeeze has no edge
+    if (lowerType.includes("sq_long")) {
+      return {
+        passed: false,
+        reason: "SQ_LONG blocked in bear regime",
+      };
+    }
     // MR_SHORT: blocked — 0% win rate, -1.00R in backtest
     if (lowerType.includes("mr_short")) {
       return {

@@ -337,7 +337,7 @@ export async function runPipeline(
   }
 
   // ── 5c. Stop distance filter ────────────────────────────
-  const maxStopDistPct = parseFloat(process.env.MAX_STOP_DIST_PCT ?? "0.08");
+  const maxStopDistPct = parseFloat(process.env.MAX_STOP_DIST_PCT ?? "0.05");
   const stopDistPct = Math.abs(levels.stop - levels.entry) / levels.entry;
   if (stopDistPct > maxStopDistPct) {
     const pctDisplay = (stopDistPct * 100).toFixed(1);
@@ -491,6 +491,7 @@ export async function runPipeline(
         reasoning = "Claude review unavailable (non-blocking fallback)";
       }
     }
+
   }
 
   // Set cooldown only if final decision is a trade
@@ -514,6 +515,12 @@ export async function runPipeline(
     vol_ratio: volRatio,
     alert_type: alert.type,
   });
+
+  // Deterministic fallback when Claude API is unavailable — avoids "0/10, unknown" in Telegram
+  if (!claudeConfidence && scoreResult) {
+    claudeConfidence = scoreResult.composite_score > 70 ? 7 : scoreResult.composite_score > 50 ? 5 : 3;
+    setupType = alert.type.includes("SQ_") ? "squeeze_breakout" : "mean_reversion";
+  }
 
   // ── 9c. Cluster assignment + execution selection ──────
   const isTradeBefore = decision === "LONG" || decision === "SHORT";
@@ -576,7 +583,7 @@ export async function runPipeline(
     alert_type: alert.type,
     alert_tf: alert.tf,
     decision,
-    gate_a_passed: true,
+    gate_a_passed: gateA.passed,
     gate_a_quality: gateA.quality,
     gate_b_passed: gateB.passed,
     gate_b_reason: finalGateBReason,
@@ -657,7 +664,7 @@ export async function runPipeline(
 
   if (isTrade) {
     let sendTelegram_ = true;
-    const volRatio = (alert.sma20_volume && alert.sma20_volume > 0)
+    const telegramVolRatio = (alert.sma20_volume && alert.sma20_volume > 0)
       ? (alert.volume ?? 0) / alert.sma20_volume : 0;
 
     // ── Regime-specific Telegram quality filter (all tiers) ──────
@@ -673,15 +680,15 @@ export async function runPipeline(
       const bearChecks = [
         // bb_width>=0.08 removed 2026-03-31: ALL bb_width buckets profitable (PF 1.81-2.54 across 9488 trades)
         { name: `bear_bb_width<${bearBbMax}`, pass: alert.bb_width < bearBbMax },
-        { name: "bear_vol_not_dead_zone", pass: !(volRatio >= bearVolDeadLow && volRatio < bearVolDeadHigh) },
+        { name: "bear_vol_not_dead_zone", pass: !(telegramVolRatio >= bearVolDeadLow && telegramVolRatio < bearVolDeadHigh) },
       ];
       const bearFailed = bearChecks.filter(c => !c.pass);
       if (bearFailed.length > 0) {
         sendTelegram_ = false;
         telegramBlockReason = `BEAR regime filtered: ${bearFailed.map(f => f.name).join(", ")}`;
-        console.log(`[pipeline] ${alert.symbol} BEAR regime filter: BLOCKED ${bearFailed.map(f => f.name).join(", ")} (bb_width=${alert.bb_width?.toFixed(3)}, vol_ratio=${volRatio.toFixed(2)})`);
+        console.log(`[pipeline] ${alert.symbol} BEAR regime filter: BLOCKED ${bearFailed.map(f => f.name).join(", ")} (bb_width=${alert.bb_width?.toFixed(3)}, vol_ratio=${telegramVolRatio.toFixed(2)})`);
       } else {
-        console.log(`[pipeline] ${alert.symbol} BEAR regime filter: PASSED (bb_width=${alert.bb_width?.toFixed(3)}, vol_ratio=${volRatio.toFixed(2)})`);
+        console.log(`[pipeline] ${alert.symbol} BEAR regime filter: PASSED (bb_width=${alert.bb_width?.toFixed(3)}, vol_ratio=${telegramVolRatio.toFixed(2)})`);
       }
     }
 

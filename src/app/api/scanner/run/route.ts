@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
-import { getRedis, ALERTS_QUEUE_KEY } from "@/lib/redis";
+import { getRedis } from "@/lib/redis";
 import { fetchKlines, Kline } from "@/lib/bybit";
 import { runPipeline, AlertPayload } from "@/lib/pipeline";
 import { computeIndicators, detectSignals, detectSignalsWithParams, detectSignalsTiered, evaluateNearMisses, NearMissResult, DEFAULT_SIGNAL_PARAMS, TieredSignal } from "@/lib/signals";
@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const LOCK_KEY = "scanner:lock";
-const LOCK_TTL = 290; // Must be < maxDuration (300s) so lock releases if Vercel kills the function
+const LOCK_TTL = 270; // Must be < maxDuration (300s) — 30s safety margin so lock releases before Vercel kills the function
 const MAX_CONCURRENT = 8;
 
 // ── Bucket helpers ──────────────────────────────────────
@@ -512,8 +512,6 @@ export async function GET(request: NextRequest) {
         }
 
         // STRICT_PROD and RELAXED_PROD: collect for burst ranking (executed after all symbols scanned)
-        await redis.lpush(ALERTS_QUEUE_KEY, JSON.stringify(alertPayload));
-
         const alertId = rawRow?.id ?? null;
 
         // Compute composite score for ranking

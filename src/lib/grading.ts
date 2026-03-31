@@ -17,6 +17,32 @@ const FORWARD_BARS = 48;
 const SLIPPAGE = 0.0005;
 const TAKER_FEE = 0.00055;
 
+/**
+ * Compute ladder-adjusted R for 33/33/34 TP split with SL→breakeven after TP1.
+ * outcome_r tracks full-position R; this reflects the actual execution strategy.
+ */
+function computeLadderR(hit_tp1: boolean, hit_tp2: boolean, hit_tp3: boolean, hit_sl: boolean): number {
+  if (!hit_tp1 && hit_sl) return -1.0;       // Full stop
+  if (!hit_tp1 && !hit_sl) return 0;          // Expired, no TP hits
+  // TP1 hit — SL moves to breakeven
+  let r = 0.33 * 1.5;                         // TP1 tranche locked in
+  if (hit_tp2) {
+    r += 0.33 * 2.5;                          // TP2 tranche locked in
+    if (hit_tp3) {
+      r += 0.34 * 4.0;                        // TP3 tranche
+    } else if (hit_sl) {
+      r += 0.34 * 0.0;                        // Last tranche stopped at breakeven
+    } else {
+      r += 0.34 * 2.0;                        // Expired near TP2 area (estimate)
+    }
+  } else if (hit_sl) {
+    r += 0.67 * 0.0;                          // Remaining stopped at breakeven
+  } else {
+    r += 0.67 * 0.75;                         // Expired between entry and TP1 area (estimate)
+  }
+  return Math.round(r * 100) / 100;
+}
+
 export interface GradeBatchResult {
   checked: number;
   graded: number;
@@ -165,12 +191,23 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
         if (fav > max_favorable) max_favorable = fav;
         if (adv > max_adverse) max_adverse = adv;
 
-        if (!hit_sl && bar.low <= stop) {
+        const sl_hit_this_bar = !hit_sl && bar.low <= stop;
+        const tp1_hit_this_bar = !hit_tp1 && bar.high >= tp1;
+
+        // Same bar conflict — SL wins ties (conservative)
+        if (sl_hit_this_bar && tp1_hit_this_bar && !hit_tp1) {
+          hit_sl = true;
+          stoppedAt = barTime;
+          bars_to_resolution = i + 1;
+          break;
+        }
+
+        if (sl_hit_this_bar) {
           hit_sl = true;
           stoppedAt = barTime;
           if (!hit_tp1) { bars_to_resolution = i + 1; break; }
         }
-        if (!hit_tp1 && bar.high >= tp1) { hit_tp1 = true; tp1HitAt = barTime; }
+        if (tp1_hit_this_bar) { hit_tp1 = true; tp1HitAt = barTime; }
         if (!hit_tp2 && bar.high >= tp2) { hit_tp2 = true; tp2HitAt = barTime; }
         if (!hit_tp3 && bar.high >= tp3) { hit_tp3 = true; tp3HitAt = barTime; }
       } else {
@@ -179,12 +216,23 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
         if (fav > max_favorable) max_favorable = fav;
         if (adv > max_adverse) max_adverse = adv;
 
-        if (!hit_sl && bar.high >= stop) {
+        const sl_hit_this_bar = !hit_sl && bar.high >= stop;
+        const tp1_hit_this_bar = !hit_tp1 && bar.low <= tp1;
+
+        // Same bar conflict — SL wins ties (conservative)
+        if (sl_hit_this_bar && tp1_hit_this_bar && !hit_tp1) {
+          hit_sl = true;
+          stoppedAt = barTime;
+          bars_to_resolution = i + 1;
+          break;
+        }
+
+        if (sl_hit_this_bar) {
           hit_sl = true;
           stoppedAt = barTime;
           if (!hit_tp1) { bars_to_resolution = i + 1; break; }
         }
-        if (!hit_tp1 && bar.low <= tp1) { hit_tp1 = true; tp1HitAt = barTime; }
+        if (tp1_hit_this_bar) { hit_tp1 = true; tp1HitAt = barTime; }
         if (!hit_tp2 && bar.low <= tp2) { hit_tp2 = true; tp2HitAt = barTime; }
         if (!hit_tp3 && bar.low <= tp3) { hit_tp3 = true; tp3HitAt = barTime; }
       }
@@ -195,11 +243,15 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
       ? futureBars[futureBars.length - 1].close
       : null;
 
+    // outcome_r = full-position R (as if entire position exits at highest TP hit)
     let outcome_r = 0;
     if (hit_tp3) outcome_r = 4.0;
     else if (hit_tp2) outcome_r = 2.5;
     else if (hit_tp1) outcome_r = 1.5;
     else if (hit_sl) outcome_r = -1;
+
+    // outcome_r_ladder = adjusted for 33/33/34 TP ladder with SL→breakeven after TP1
+    const outcome_r_ladder = computeLadderR(hit_tp1, hit_tp2, hit_tp3, hit_sl);
 
     const { gradedOutcome, resolutionPath, resolvedAt } = deriveOutcome({
       hit_tp1, hit_tp2, hit_tp3, hit_sl,
@@ -218,6 +270,7 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
       grade_status: "GRADED",
       graded_at: new Date().toISOString(),
       outcome_r,
+      outcome_r_ladder,
       hit_tp1, hit_tp2, hit_tp3, hit_sl,
       bars_to_resolution,
       max_favorable, max_adverse,

@@ -57,6 +57,10 @@ export async function updateAccountState(): Promise<AccountState> {
     .eq("grade_status", "GRADED");
 
   const totalR = (allGrades ?? []).reduce((sum, g) => sum + (Number(g.outcome_r) || 0), 0);
+  // NOTE: This uses linear equity approximation (initialValue + totalR * riskPerTradeUsd).
+  // With compounding, actual equity diverges. This makes the kill switch slightly
+  // conservative (triggers earlier than true equity), which is the safer direction.
+  // TODO: Query actual Bybit account balance once execution engine is live.
   const currentEquity = initialValue + totalR * riskPerTradeUsd;
 
   // Get or create this week's state

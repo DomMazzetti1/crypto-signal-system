@@ -53,6 +53,7 @@ export async function checkDailyLossLimit(): Promise<RiskCheckResult> {
     .from("decisions")
     .select("id")
     .eq("telegram_sent", true)
+    .gte("created_at", todayStart)
     .in("decision", ["LONG", "SHORT", "MR_LONG", "MR_SHORT"]);
 
   if (!tradedDecisions || tradedDecisions.length === 0) return { approved: true };
@@ -82,6 +83,8 @@ export async function checkDailyLossLimit(): Promise<RiskCheckResult> {
 /**
  * Check 2: Max concurrent positions.
  * Counts Telegram-sent signals in last 48h that haven't been graded.
+ * TODO: Replace ungraded-signal proxy with actual position state from execution engine
+ * once Bybit testnet validation is complete. Query /api/positions on exec engine.
  */
 export async function checkMaxConcurrentPositions(): Promise<RiskCheckResult> {
   const maxPos = envNum("MAX_CONCURRENT_POSITIONS", 10);
