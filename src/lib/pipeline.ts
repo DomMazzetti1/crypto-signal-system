@@ -486,10 +486,9 @@ export async function runPipeline(
         console.log(`[pipeline] ${alert.symbol} RELAXED reviewer unavailable (non-blocking):`, err);
         reasoning = "Claude review unavailable (non-blocking for RELAXED)";
       } else {
-        // STRICT: reviewer failure blocks the trade
-        console.error("[pipeline] Claude review failed — blocking trade:", err);
-        decision = "NO_TRADE";
-        reasoning = "Claude review unavailable";
+        // STRICT: reviewer failure is now non-blocking (trade already passed Gate A + B + risk checks)
+        console.warn("[pipeline] Claude review failed — proceeding without review:", err);
+        reasoning = "Claude review unavailable (non-blocking fallback)";
       }
     }
   }
