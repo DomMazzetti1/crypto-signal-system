@@ -299,6 +299,47 @@ export function detectSignalsTiered(
     });
   }
 
+  // ── SQ_LONG condition evaluation (DATA_ONLY — bull market data collection) ──
+  // Mirrors SQ_SHORT but for upside expansion: close above basis/EMA20, RSI > 52,
+  // close on 4H above EMA50. Always DATA_ONLY tier — no Telegram, no execution.
+  const sqlBasis = params.sq_trigger_mode === "event"
+    ? (ind.prev_close <= ind.prev_bb_basis && ind.close > ind.bb_basis)
+    : (ind.close > ind.bb_basis);
+  const sqlRsi = params.sq_trigger_mode === "event"
+    ? (ind.prev_rsi <= 52 && ind.rsi > 52)
+    : (ind.rsi > 52);
+
+  const sqlConditions: { name: string; passed: boolean }[] = [
+    { name: "bb_width", passed: ind.bb_width_ratio < sqBbWidth },
+    { name: "basis_trigger", passed: sqlBasis },
+    { name: "close_gt_ema20", passed: ind.close > ind.ema20 },
+    { name: "rsi_trigger", passed: sqlRsi },
+    { name: "volume", passed: ind.volume > ind.sma20_volume * sqVolMult },
+    { name: "adx_1h", passed: ind.adx_1h < params.sq_adx_1h_max },
+    { name: "close_4h_gt_ema50", passed: ind.close_4h > ind.ema50_4h },
+    { name: "range_vs_atr", passed: ind.candle_range < ind.atr_1h * 2.2 },
+    { name: "close_near_ema20", passed: Math.abs(ind.close - ind.ema20) < ind.atr_1h * 1.5 },
+  ];
+
+  const sqlPassed = sqlConditions.filter(c => c.passed).length;
+  const sqlFailed = sqlConditions.filter(c => !c.passed).map(c => c.name);
+  const sqlTotal = sqlConditions.length;
+
+  if (sqlPassed >= dataMin) {
+    // SQ_LONG is always DATA_ONLY — collecting data for future bull market analysis
+    const typeSuffix = sqlPassed === sqlTotal ? "" : sqlPassed >= relaxedMin ? "_RELAXED" : "_DATA";
+    results.push({
+      type: `SQ_LONG${typeSuffix}`,
+      symbol,
+      indicators: ind,
+      tier: "DATA_ONLY", // Always DATA_ONLY regardless of pass count
+      pass_count: sqlPassed,
+      total_conditions: sqlTotal,
+      failed_conditions: sqlFailed,
+      priority: false,
+    });
+  }
+
   // ── MR_LONG (strict only — no tiering for MR) ─────
   const strictSignals = detectSignalsWithParams(symbol, ind, params);
   for (const sig of strictSignals) {
