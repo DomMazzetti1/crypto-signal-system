@@ -602,7 +602,7 @@ export async function runPipeline(
     rr_tp2: levels.rr_tp2,
     rr_tp3: levels.rr_tp3,
     cooldown_active: cooldownActive,
-    risk_check_result: riskCheckResult ? { approved: riskCheckResult.approved, reason: riskCheckResult.reason } : null,
+    risk_check_result: riskCheckResult ? { approved: riskCheckResult.approved, reason: riskCheckResult.reason, composite_score: scoreResult.composite_score } : null,
   };
 
   const extendedData: Record<string, unknown> = {
@@ -675,7 +675,7 @@ export async function runPipeline(
         { name: "bear_bb_width>=0.08", pass: alert.bb_width >= 0.08 },
         { name: `bear_bb_width<${bearBbMax}`, pass: alert.bb_width < bearBbMax },
         { name: "bear_vol_not_dead_zone", pass: !(volRatio >= bearVolDeadLow && volRatio < bearVolDeadHigh) },
-        { name: "bear_vol_ratio>=1.5", pass: volRatio >= 1.5 },
+        // vol_ratio>=1.5 removed 2026-03-31: backtest shows vol<1.5 outperforms (49.6% WR, PF 2.46 vs 45.3% WR, PF 2.24)
       ];
       const bearFailed = bearChecks.filter(c => !c.pass);
       if (bearFailed.length > 0) {
@@ -691,13 +691,10 @@ export async function runPipeline(
     if (sendTelegram_ && isRelaxed) {
       // RELAXED Telegram quality filter — tightened 2026-03-29
       // bb_width: 0.06 → 0.08 (wider compression = better squeeze signal)
-      // vol_ratio: 1.2 → 1.5 (stronger volume confirmation required)
-      // Effect: reduces RELAXED Telegram sends by ~30-40%, improves signal quality
-      // Revert thresholds here if Telegram send rate drops too low (< 1/day)
+      // vol_ratio>=1.5 removed 2026-03-31: backtest shows vol<1.5 outperforms (PF 2.46 vs 2.24)
       const checks: { name: string; pass: boolean }[] = [
         { name: "pass_count", pass: true }, // pass_count not available in pipeline; checked at scanner level
         { name: "bb_width>=0.08", pass: alert.bb_width >= 0.08 },
-        { name: "vol_ratio>=1.5", pass: volRatio >= 1.5 },
         // rr_tp1 is always 1.5, this check always passes — retained as future guard
         { name: "rr_tp1>=1.2", pass: levels.rr_tp1 >= 1.2 },
         { name: "tp1_positive", pass: direction === "long" ? levels.tp1 > levels.entry : levels.tp1 < levels.entry },
