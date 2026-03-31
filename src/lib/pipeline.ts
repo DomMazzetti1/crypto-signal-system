@@ -671,10 +671,9 @@ export async function runPipeline(
       const bearVolDeadHigh = parseFloat(process.env.BEAR_VOL_DEAD_ZONE_HIGH ?? "2.5");
 
       const bearChecks = [
-        { name: "bear_bb_width>=0.08", pass: alert.bb_width >= 0.08 },
+        // bb_width>=0.08 removed 2026-03-31: ALL bb_width buckets profitable (PF 1.81-2.54 across 9488 trades)
         { name: `bear_bb_width<${bearBbMax}`, pass: alert.bb_width < bearBbMax },
         { name: "bear_vol_not_dead_zone", pass: !(volRatio >= bearVolDeadLow && volRatio < bearVolDeadHigh) },
-        // vol_ratio>=1.5 removed 2026-03-31: backtest shows vol<1.5 outperforms (49.6% WR, PF 2.46 vs 45.3% WR, PF 2.24)
       ];
       const bearFailed = bearChecks.filter(c => !c.pass);
       if (bearFailed.length > 0) {
@@ -688,12 +687,11 @@ export async function runPipeline(
 
     // ── RELAXED tier quality filter (additional checks on top of regime filter) ──
     if (sendTelegram_ && isRelaxed) {
-      // RELAXED Telegram quality filter — tightened 2026-03-29
-      // bb_width: 0.06 → 0.08 (wider compression = better squeeze signal)
-      // vol_ratio>=1.5 removed 2026-03-31: backtest shows vol<1.5 outperforms (PF 2.46 vs 2.24)
+      // RELAXED Telegram quality filter
+      // bb_width>=0.08 removed 2026-03-31: all bb_width buckets profitable in backtest
+      // vol_ratio>=1.5 removed 2026-03-31: vol<1.5 outperforms (PF 2.46 vs 2.24)
       const checks: { name: string; pass: boolean }[] = [
         { name: "pass_count", pass: true }, // pass_count not available in pipeline; checked at scanner level
-        { name: "bb_width>=0.08", pass: alert.bb_width >= 0.08 },
         // rr_tp1 is always 1.5, this check always passes — retained as future guard
         { name: "rr_tp1>=1.2", pass: levels.rr_tp1 >= 1.2 },
         { name: "tp1_positive", pass: direction === "long" ? levels.tp1 > levels.entry : levels.tp1 < levels.entry },
