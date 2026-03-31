@@ -9,6 +9,7 @@ import { runGateB } from "@/lib/gate-b";
 import { computeHTFTrend } from "@/lib/ta";
 import { classifyRegime } from "@/lib/regime";
 import { isKillSwitchActive } from "@/lib/kill-switch";
+import { computeCompositeScore } from "@/lib/scoring";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -126,6 +127,18 @@ export async function GET(request: NextRequest) {
     let skippedCooldown = 0;
     let skippedIdempotency = 0;
     let symbolsEvaluated = 0;
+
+    // ── Burst ranking: collect STRICT/RELAXED candidates for post-scan sorting ──
+    interface PipelineCandidate {
+      alertPayload: AlertPayload;
+      alertId: string | null;
+      tier: string;
+      compositeScore: number;
+      symbol: string;
+      signalType: string;
+      candleTime: string;
+    }
+    const pipelineCandidates: PipelineCandidate[] = [];
 
     // ── Throughput-based low-flow detection ──
     // If fewer than 5 decisions in last 24h, widen detection automatically
@@ -498,35 +511,66 @@ export async function GET(request: NextRequest) {
           continue;
         }
 
-        // STRICT_PROD and RELAXED_PROD: run full pipeline
-        // Queue push is audit-only — no active consumer. Pipeline is invoked inline below.
+        // STRICT_PROD and RELAXED_PROD: collect for burst ranking (executed after all symbols scanned)
         await redis.lpush(ALERTS_QUEUE_KEY, JSON.stringify(alertPayload));
 
         const alertId = rawRow?.id ?? null;
-        try {
-          const result = await runPipeline(alertPayload, alertId);
-          if (result.decision === "LONG" || result.decision === "SHORT") {
-            // Pipeline already set the cooldown key inside runPipeline (pipeline.ts:setCooldown).
-            // We only skip re-setting it here to avoid resetting the TTL to a shorter value.
-            await supabase.from("candle_signals").upsert({
-              symbol,
-              setup_type: sig.type,
-              candle_start_time: candleTime,
-            }, { onConflict: "symbol,setup_type,candle_start_time", ignoreDuplicates: true });
-            candidatesQueued++;
-            console.log(`[scanner] Queued: ${symbol} ${sig.type} tier=${tieredSig.tier} close=${indicators.close}`);
-          }
-          // Update shadow row with baseline final decision
-          await supabase.from("shadow_signals")
-            .update({ baseline_decision: result.decision })
-            .eq("symbol", symbol)
-            .eq("setup_type", sig.type)
-            .eq("candle_time", candleTime);
-        } catch (err) {
-          console.error(`[scanner] Pipeline error for ${symbol} ${sig.type}:`, err);
-        }
+
+        // Compute composite score for ranking
+        const scoreResult = computeCompositeScore({
+          atr14_1h: indicators.atr_1h,
+          mark_price: indicators.close,
+          vol_ratio: indicators.sma20_volume > 0 ? indicators.volume / indicators.sma20_volume : null,
+          alert_type: sig.type,
+        });
+
+        pipelineCandidates.push({
+          alertPayload,
+          alertId,
+          tier: tieredSig.tier,
+          compositeScore: scoreResult.composite_score,
+          symbol,
+          signalType: sig.type,
+          candleTime,
+        });
       }
     });
+
+    // ── Burst ranking: sort candidates by composite score, execute in order ──
+    pipelineCandidates.sort((a, b) => b.compositeScore - a.compositeScore);
+
+    console.log(`[scanner] Burst ranking: ${pipelineCandidates.length} candidates sorted by score`);
+    if (pipelineCandidates.length > 0) {
+      console.log(`[scanner] Top 3: ${pipelineCandidates.slice(0, 3).map(c => `${c.symbol}(${c.compositeScore.toFixed(1)})`).join(', ')}`);
+    }
+
+    for (let rank = 0; rank < pipelineCandidates.length; rank++) {
+      const candidate = pipelineCandidates[rank];
+      try {
+        const result = await runPipeline(candidate.alertPayload, candidate.alertId);
+
+        if (result.decision === "LONG" || result.decision === "SHORT") {
+          await supabase.from("candle_signals").upsert({
+            symbol: candidate.symbol,
+            setup_type: candidate.signalType,
+            candle_start_time: candidate.candleTime,
+          }, { onConflict: "symbol,setup_type,candle_start_time", ignoreDuplicates: true });
+          candidatesQueued++;
+          console.log(`[scanner] Ranked #${rank + 1}: ${candidate.symbol} ${candidate.signalType} score=${candidate.compositeScore.toFixed(1)} → TRADED`);
+        } else {
+          console.log(`[scanner] Ranked #${rank + 1}: ${candidate.symbol} ${candidate.signalType} score=${candidate.compositeScore.toFixed(1)} → ${result.decision} (${result.gate_b?.reason || 'filtered'})`);
+        }
+
+        // Update shadow row with baseline final decision
+        await supabase.from("shadow_signals")
+          .update({ baseline_decision: result.decision })
+          .eq("symbol", candidate.symbol)
+          .eq("setup_type", candidate.signalType)
+          .eq("candle_time", candidate.candleTime);
+      } catch (err) {
+        console.error(`[scanner] Pipeline error for ${candidate.symbol} ${candidate.signalType}:`, err);
+      }
+    }
 
     const runtimeMs = Date.now() - startTime;
 
