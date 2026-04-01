@@ -145,7 +145,7 @@ async function fetchDashboard(): Promise<DashboardData> {
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return (
-    <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-500 mb-3 border-b border-white/10 pb-1">
+    <h2 className="text-sm font-bold uppercase tracking-wider text-slate-500 mb-3 border-b border-slate-600/10 pb-1">
       {children}
     </h2>
   );
@@ -153,8 +153,8 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
 
 function Stat({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
   return (
-    <div className="flex justify-between text-sm border-b border-white/5 py-1.5">
-      <span className="text-neutral-500">{label}</span>
+    <div className="flex justify-between text-sm border-b border-slate-600/5 py-1.5">
+      <span className="text-slate-500">{label}</span>
       <span className={warn ? "text-red-400 font-medium" : ""}>{value}</span>
     </div>
   );
@@ -166,7 +166,7 @@ function Badge({ text, color }: { text: string; color: string }) {
     red: "bg-red-900/50 text-red-400 border-red-800",
     yellow: "bg-yellow-900/50 text-yellow-400 border-yellow-800",
     blue: "bg-blue-900/50 text-blue-400 border-blue-800",
-    neutral: "bg-neutral-800/50 text-neutral-400 border-neutral-700",
+    neutral: "bg-slate-800/50 text-slate-400 border-slate-700",
   };
   return (
     <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${colors[color] ?? colors.neutral}`}>
@@ -205,7 +205,7 @@ function ExecEngineSection({ exec }: { exec: ExecHealth | null }) {
           <Stat label="Last Bybit success" value={exec.last_bybit_success ? timeAgo(exec.last_bybit_success) : "never"} warn={isStale} />
         </div>
       ) : (
-        <p className="text-sm text-neutral-600">Unable to connect to execution engine</p>
+        <p className="text-sm text-slate-600">Unable to connect to execution engine</p>
       )}
     </section>
   );
@@ -221,7 +221,7 @@ function OpenPositionsSection({ signals }: { signals: Signal[] }) {
       <SectionHeader>Open Positions ({open.length})</SectionHeader>
 
       {open.length === 0 ? (
-        <p className="text-sm text-neutral-600">No open positions</p>
+        <p className="text-sm text-slate-600">No open positions</p>
       ) : (
         <div className="space-y-2">
           {open.map(s => {
@@ -239,31 +239,31 @@ function OpenPositionsSection({ signals }: { signals: Signal[] }) {
                     <Badge text={s.decision} color={isLong ? "green" : "red"} />
                     <Badge text={deriveTier(s.alert_type)} color={deriveTier(s.alert_type) === "STRICT" ? "blue" : "yellow"} />
                   </div>
-                  <span className="text-neutral-500">{timeAgo(s.created_at)}</span>
+                  <span className="text-slate-500">{timeAgo(s.created_at)}</span>
                 </div>
 
-                <div className="grid grid-cols-4 gap-x-4 gap-y-1 text-neutral-400">
-                  <div>Entry <span className="text-white">{fmtPrice(s.entry_price)}</span></div>
+                <div className="grid grid-cols-4 gap-x-4 gap-y-1 text-slate-400">
+                  <div>Entry <span className="text-slate-100">{fmtPrice(s.entry_price)}</span></div>
                   <div>Current <span className={movingRight ? "text-emerald-400" : "text-red-400"}>{fmtPrice(s.current_price)}</span></div>
                   <div>Stop <span className="text-red-400/70">{fmtPrice(s.stop_price)}</span></div>
                   <div>R <span className={currentR != null && currentR >= 0 ? "text-emerald-400 font-medium" : "text-red-400 font-medium"}>{currentR != null ? `${currentR >= 0 ? "+" : ""}${currentR.toFixed(2)}` : "--"}</span></div>
                 </div>
 
-                <div className="grid grid-cols-4 gap-x-4 mt-1 text-neutral-400">
-                  <div>TP1 <span className="text-neutral-300">{fmtPrice(s.tp1_price)}</span></div>
-                  <div>TP2 <span className="text-neutral-300">{fmtPrice(s.tp2_price)}</span></div>
-                  <div>TP3 <span className="text-neutral-300">{fmtPrice(s.tp3_price)}</span></div>
-                  <div>Exp <span className="text-neutral-300">{hoursLeft.toFixed(0)}h</span></div>
+                <div className="grid grid-cols-4 gap-x-4 mt-1 text-slate-400">
+                  <div>TP1 <span className="text-slate-300">{fmtPrice(s.tp1_price)}</span></div>
+                  <div>TP2 <span className="text-slate-300">{fmtPrice(s.tp2_price)}</span></div>
+                  <div>TP3 <span className="text-slate-300">{fmtPrice(s.tp3_price)}</span></div>
+                  <div>Exp <span className="text-slate-300">{hoursLeft.toFixed(0)}h</span></div>
                 </div>
 
                 {/* Progress bar to TP1 */}
-                <div className="mt-2 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+                <div className="mt-2 h-1.5 bg-slate-800 rounded-full overflow-hidden">
                   <div
                     className={`h-full rounded-full transition-all ${pctTp1 != null && pctTp1 >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
                     style={{ width: `${Math.max(0, Math.min(100, pctTp1 ?? 0))}%` }}
                   />
                 </div>
-                <div className="text-[10px] text-neutral-600 mt-0.5">
+                <div className="text-[10px] text-slate-600 mt-0.5">
                   {pctTp1 != null ? `${pctTp1.toFixed(0)}% to TP1` : "no price data"}
                 </div>
               </div>
@@ -334,25 +334,25 @@ function PerformanceSection({ signals }: { signals: Signal[] }) {
       <SectionHeader>Performance (TG Signals)</SectionHeader>
 
       <div className="grid grid-cols-5 gap-2 mb-4">
-        <div className="bg-neutral-900 rounded px-2 py-1.5 text-center">
+        <div className="bg-slate-900 rounded px-2 py-1.5 text-center">
           <div className="text-lg font-bold">{graded.length}</div>
-          <div className="text-[10px] text-neutral-500 uppercase">Graded</div>
+          <div className="text-[10px] text-slate-500 uppercase">Graded</div>
         </div>
-        <div className="bg-neutral-900 rounded px-2 py-1.5 text-center">
+        <div className="bg-slate-900 rounded px-2 py-1.5 text-center">
           <div className="text-lg font-bold text-emerald-400">{winRate}%</div>
-          <div className="text-[10px] text-neutral-500 uppercase">Win Rate</div>
+          <div className="text-[10px] text-slate-500 uppercase">Win Rate</div>
         </div>
-        <div className="bg-neutral-900 rounded px-2 py-1.5 text-center">
+        <div className="bg-slate-900 rounded px-2 py-1.5 text-center">
           <div className="text-lg font-bold">{avgR}</div>
-          <div className="text-[10px] text-neutral-500 uppercase">Avg R</div>
+          <div className="text-[10px] text-slate-500 uppercase">Avg R</div>
         </div>
-        <div className="bg-neutral-900 rounded px-2 py-1.5 text-center">
+        <div className="bg-slate-900 rounded px-2 py-1.5 text-center">
           <div className="text-lg font-bold">{pf}</div>
-          <div className="text-[10px] text-neutral-500 uppercase">PF</div>
+          <div className="text-[10px] text-slate-500 uppercase">PF</div>
         </div>
-        <div className="bg-neutral-900 rounded px-2 py-1.5 text-center">
+        <div className="bg-slate-900 rounded px-2 py-1.5 text-center">
           <div className={`text-lg font-bold ${totalR >= 0 ? "text-emerald-400" : "text-red-400"}`}>{totalR >= 0 ? "+" : ""}{totalR.toFixed(1)}</div>
-          <div className="text-[10px] text-neutral-500 uppercase">Total R</div>
+          <div className="text-[10px] text-slate-500 uppercase">Total R</div>
         </div>
       </div>
 
@@ -368,7 +368,7 @@ function PerformanceSection({ signals }: { signals: Signal[] }) {
                 </div>
               )}
             </div>
-            <span className="text-[9px] text-neutral-600 mt-1">{d.day}</span>
+            <span className="text-[9px] text-slate-600 mt-1">{d.day}</span>
           </div>
         ))}
       </div>
@@ -386,28 +386,28 @@ function RecentSignalsSection({ health }: { health: ProdHealth | null }) {
       <SectionHeader>Recent Signals</SectionHeader>
 
       {decisions.length === 0 ? (
-        <p className="text-sm text-neutral-600">No recent decisions</p>
+        <p className="text-sm text-slate-600">No recent decisions</p>
       ) : (
         <div className="space-y-1">
           {decisions.map((d, i) => {
             const isTrade = d.decision === "LONG" || d.decision === "SHORT";
             const tier = deriveTier(d.alert_type);
             return (
-              <div key={i} className="flex items-center gap-2 text-xs py-1 border-b border-white/5">
+              <div key={i} className="flex items-center gap-2 text-xs py-1 border-b border-slate-600/5">
                 <span className="font-medium w-24 shrink-0">{d.symbol}</span>
                 <Badge text={tier} color={tier === "STRICT" ? "blue" : "yellow"} />
                 <Badge text={d.decision} color={isTrade ? "green" : "neutral"} />
                 {!isTrade && d.gate_b_reason && (
-                  <span className="text-neutral-600 truncate max-w-[200px]" title={d.gate_b_reason}>{d.gate_b_reason}</span>
+                  <span className="text-slate-600 truncate max-w-[200px]" title={d.gate_b_reason}>{d.gate_b_reason}</span>
                 )}
                 <span className="ml-auto shrink-0">
                   {d.telegram_sent ? (
                     <span className="text-emerald-600">TG sent</span>
                   ) : isTrade ? (
-                    <span className="text-neutral-600">TG no</span>
+                    <span className="text-slate-600">TG no</span>
                   ) : null}
                 </span>
-                <span className="text-neutral-600 shrink-0 w-16 text-right">{timeAgo(d.created_at)}</span>
+                <span className="text-slate-600 shrink-0 w-16 text-right">{timeAgo(d.created_at)}</span>
               </div>
             );
           })}
@@ -441,19 +441,19 @@ function ScannerSection({ health }: { health: ProdHealth | null }) {
       {runs.length > 0 ? (
         <div className="space-y-0">
           {runs.map((r, i) => (
-            <div key={i} className="flex items-center text-xs py-1.5 border-b border-white/5 gap-3">
-              <span className="text-neutral-500 w-16 shrink-0">{timeAgo(r.completed_at)}</span>
+            <div key={i} className="flex items-center text-xs py-1.5 border-b border-slate-600/5 gap-3">
+              <span className="text-slate-500 w-16 shrink-0">{timeAgo(r.completed_at)}</span>
               <span>{r.symbols_scanned} symbols</span>
               <span className="text-emerald-500">{r.candidates_found} found</span>
               {r.candidates_queued != null && (
                 <span className="text-blue-400">{r.candidates_queued} queued</span>
               )}
-              <span className="ml-auto text-neutral-600">{(r.runtime_ms / 1000).toFixed(1)}s</span>
+              <span className="ml-auto text-slate-600">{(r.runtime_ms / 1000).toFixed(1)}s</span>
             </div>
           ))}
         </div>
       ) : (
-        <p className="text-sm text-neutral-600">No scanner run data</p>
+        <p className="text-sm text-slate-600">No scanner run data</p>
       )}
     </section>
   );
@@ -494,7 +494,7 @@ export default function Home() {
   }, [lastFetch]);
 
   return (
-    <div className="min-h-screen bg-black text-white p-4 md:p-8 font-[family-name:var(--font-geist-mono)]">
+    <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans">
       <div className="max-w-5xl mx-auto">
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
@@ -508,11 +508,11 @@ export default function Home() {
                 <span className="text-emerald-400 text-sm font-medium">Live</span>
               </div>
               {data?.priceSource && data.priceSource !== "none" && (
-                <span className="text-[10px] text-neutral-600">prices: {data.priceSource}</span>
+                <span className="text-[10px] text-slate-600">prices: {data.priceSource}</span>
               )}
             </div>
           </div>
-          <div className="text-right text-xs text-neutral-600">
+          <div className="text-right text-xs text-slate-600">
             <div>Updated {secondsAgo}s ago</div>
             <div>Refresh every 30s</div>
             {loading && <div className="text-yellow-600 mt-1">Loading...</div>}
