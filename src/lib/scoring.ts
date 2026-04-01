@@ -50,9 +50,21 @@ function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
 }
 
-function normalize(val: number, min: number, max: number): number {
-  if (max === min) return 0;
-  return clamp((val - min) / (max - min), 0, 1) * 100;
+/**
+ * Non-linear vol_ratio scoring that penalizes the 2.0-2.5 dead zone.
+ * Backtest data: dead zone PF 0.88 (losing), <2.0 PF 2.24-2.46, >2.5 strong.
+ * Returns a raw score that gets normalized into the 0-100 composite range.
+ */
+function scoreVolRatio(volRatio: number | null): number {
+  if (volRatio === null || volRatio === 0) return 0;
+  // Dead zone: 2.0-2.5 — penalize heavily (PF 0.88 in backtest)
+  if (volRatio >= 2.0 && volRatio < 2.5) return -5;
+  // Below 1.5: good performance (PF 2.46 in backtest)
+  if (volRatio < 1.5) return volRatio * 5; // 0-7.5 points
+  // 1.5-2.0: decent (PF 2.24)
+  if (volRatio < 2.0) return 7.5;
+  // Above 2.5: strong volume confirmation
+  return Math.min(volRatio * 3, 15); // 7.5-15 points, capped
 }
 
 function tierScore(alertType: string): number {
@@ -74,7 +86,9 @@ export function computeCompositeScore(input: ScoreInput): ScoreResult {
     atrPctRaw = (1 - (clamped - 0.001) / (0.04 - 0.001)) * 100;
   }
 
-  const volRaw = input.vol_ratio != null ? normalize(input.vol_ratio, 0, 5) : null;
+  // Non-linear vol scoring: penalizes dead zone 2.0-2.5, rewards extremes
+  // scoreVolRatio returns -5 to 15; map to 0-100 scale for weighting
+  const volRaw = input.vol_ratio != null ? clamp((scoreVolRatio(input.vol_ratio) + 5) / 20 * 100, 0, 100) : null;
   const tierRaw = tierScore(input.alert_type);
 
   // Deviation penalty: currently always 0 because entry = markPrice.
