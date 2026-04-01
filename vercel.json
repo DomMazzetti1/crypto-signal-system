@@ -16,6 +16,10 @@
     {
       "path": "/api/cron/grade",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/morning-summary",
+      "schedule": "0 13 * * *"
     }
   ]
 }
