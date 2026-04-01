@@ -303,6 +303,27 @@ export async function runPipeline(
     };
   }
 
+  // ── 4b. BTC 4h price change (data collection) ─────────
+  let btc4hChange: number | null = null;
+  try {
+    const btcRes = await fetch(
+      "https://api.bybit.com/v5/market/kline?symbol=BTCUSDT&interval=240&limit=2&category=linear",
+      { cache: "no-store" }
+    );
+    const btcData = await btcRes.json();
+    const btcCandles = btcData?.result?.list;
+    if (btcCandles && btcCandles.length >= 2) {
+      const currentClose = parseFloat(btcCandles[0][4]);
+      const prevClose = parseFloat(btcCandles[1][4]);
+      if (prevClose > 0) {
+        btc4hChange = ((currentClose - prevClose) / prevClose) * 100;
+        console.log(`[pipeline] BTC 4h change: ${btc4hChange.toFixed(2)}%`);
+      }
+    }
+  } catch (err) {
+    console.warn("[pipeline] Failed to fetch BTC 4h change:", err);
+  }
+
   // ── 5. Price levels ───────────────────────────────────
   const levels = calculateLevels(markPrice, atr14_1h, direction);
 
@@ -598,6 +619,7 @@ export async function runPipeline(
     btc_regime: regime.btc_regime,
     alt_environment: regime.alt_environment,
     btc_atr_ratio: regime.btc_atr_ratio,
+    btc_4h_change: btc4hChange,
     entry_price: levels.entry,
     stop_price: levels.stop,
     tp1_price: levels.tp1,
