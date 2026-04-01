@@ -829,7 +829,7 @@ export async function runPipeline(
       telegram_attempted: telegramAttempted,
       telegram_sent: telegramSent,
       telegram_error: telegramError ?? telegramBlockReason,
-      blocked_reason: blockedReason,
+      blocked_reason: blockedReason ?? telegramBlockReason,
     }).eq("id", decisionId);
   }
 
