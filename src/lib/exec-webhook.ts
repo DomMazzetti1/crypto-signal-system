@@ -1,6 +1,4 @@
-// Sends a signal to the execution engine webhook
-// Non-blocking: failures are logged but never prevent Telegram delivery or pipeline completion
-// Only fires if EXEC_WEBHOOK_URL is set in env
+import { getSupabase } from "@/lib/supabase";
 
 export interface ExecSignalPayload {
   symbol: string;
@@ -39,12 +37,35 @@ export async function sendToExecutionEngine(payload: ExecSignalPayload): Promise
 
     clearTimeout(timeout);
 
-    if (res.ok) {
+    const body = await res.json().catch(() => null);
+
+    if (res.ok && body?.executed === true) {
       console.log(`[exec-webhook] Sent signal: ${payload.symbol} ${payload.direction} to execution engine`);
       return true;
     }
 
-    console.error(`[exec-webhook] Failed to send signal: HTTP ${res.status}`);
+    // Exec engine rejected the signal — mark it in Supabase immediately
+    const reason = body?.error ?? `HTTP ${res.status}`;
+    console.warn(`[exec-webhook] Signal rejected by exec engine: ${payload.symbol} — ${reason}`);
+
+    if (payload.decision_id) {
+      const supabase = getSupabase();
+      const { error } = await supabase
+        .from("decisions")
+        .update({
+          graded_outcome: "EXEC_REJECTED",
+          resolved_at: new Date().toISOString(),
+          resolution_path: "EXEC_REJECTED",
+        })
+        .eq("id", payload.decision_id);
+
+      if (error) {
+        console.error(`[exec-webhook] Failed to mark decision ${payload.decision_id} as rejected:`, error.message);
+      } else {
+        console.log(`[exec-webhook] Marked decision ${payload.decision_id} as EXEC_REJECTED`);
+      }
+    }
+
     return false;
   } catch (err) {
     console.error(`[exec-webhook] Failed to send signal: ${err}`);
