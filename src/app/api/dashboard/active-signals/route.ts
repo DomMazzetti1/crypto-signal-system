@@ -334,6 +334,7 @@ export async function GET(req: NextRequest) {
       telegram_sent: d.telegram_sent ?? false,
       telegram_attempted: d.telegram_attempted ?? false,
       blocked_reason: d.blocked_reason ?? null,
+      btc_regime: d.btc_regime ?? null,
       gate_a_quality: d.gate_a_quality ?? null,
       gate_b_passed: d.gate_b_passed ?? false,
     };
