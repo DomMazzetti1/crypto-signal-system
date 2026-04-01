@@ -718,6 +718,13 @@ export async function runPipeline(
       telegramBlockReason = `score_too_low: ${scoreResult.composite_score.toFixed(1)}`;
       console.log(`[pipeline] ${alert.symbol} blocked: composite_score ${scoreResult.composite_score.toFixed(1)} < 20`);
     }
+    // Low-confidence filter: block RELAXED signals where Claude confidence is available but low
+    if (sendTelegram_ && isRelaxed && claudeConfidence !== null && claudeConfidence > 0 && claudeConfidence < 5) {
+      sendTelegram_ = false;
+      telegramBlockReason = `LOW_CONFIDENCE: ${claudeConfidence}/10 — below minimum threshold of 5`;
+      console.log(`[pipeline] ${alert.symbol} blocked: Claude confidence ${claudeConfidence}/10 < 5 minimum`);
+    }
+
     // Repeat suppression: prevent same symbol+direction from flooding Telegram
     if (sendTelegram_) {
       const redis = getRedis();
