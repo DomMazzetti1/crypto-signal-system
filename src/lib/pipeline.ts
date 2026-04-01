@@ -712,6 +712,12 @@ export async function runPipeline(
       }
     }
 
+    // Score filter: block signals with composite_score < 20 (0% win rate, PF 0.00 across 6 signals 2026-04-01)
+    if (sendTelegram_ && scoreResult.composite_score < 20) {
+      sendTelegram_ = false;
+      telegramBlockReason = `score_too_low: ${scoreResult.composite_score.toFixed(1)}`;
+      console.log(`[pipeline] ${alert.symbol} blocked: composite_score ${scoreResult.composite_score.toFixed(1)} < 20`);
+    }
     // Repeat suppression: prevent same symbol+direction from flooding Telegram
     if (sendTelegram_) {
       const redis = getRedis();
