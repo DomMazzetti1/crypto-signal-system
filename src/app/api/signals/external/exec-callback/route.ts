@@ -6,13 +6,14 @@ export const dynamic = "force-dynamic";
 /**
  * POST /api/signals/external/exec-callback
  *
- * Receives position close events from the execution engine.
- * Updates the decisions table with graded_outcome and resolution_path.
+ * Receives position lifecycle events from the execution engine.
+ * - POSITION_OPENED: stamps exec_opened_at on the decision
+ * - Close events: updates graded_outcome and resolution_path
  *
  * Expected payload:
  * {
  *   decision_id: string,
- *   status: "SL_HIT" | "TP1_HIT" | "TP2_HIT" | "TP3_HIT" | "EXPIRED" | "EXEC_REJECTED",
+ *   status: "POSITION_OPENED" | "SL_HIT" | "TP1_HIT" | "TP2_HIT" | "TP3_HIT" | "EXPIRED" | "EXEC_REJECTED",
  *   realized_pnl?: number,
  *   close_price?: number,
  *   closed_at?: string,
@@ -54,12 +55,28 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Missing required fields: decision_id, status" }, { status: 400 });
   }
 
+  const supabase = getSupabase();
+
+  // Handle POSITION_OPENED: just stamp exec_opened_at
+  if (status === "POSITION_OPENED") {
+    const { error } = await supabase
+      .from("decisions")
+      .update({ exec_opened_at: new Date().toISOString() })
+      .eq("id", decisionId);
+
+    if (error) {
+      console.error(`[exec-callback] Failed to set exec_opened_at for ${decisionId}:`, error.message);
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    console.log(`[exec-callback] Decision ${decisionId}: POSITION_OPENED — exec_opened_at set`);
+    return NextResponse.json({ updated: true, decision_id: decisionId, status: "POSITION_OPENED" });
+  }
+
   const mapping = STATUS_TO_OUTCOME[status];
   if (!mapping) {
     return NextResponse.json({ error: `Unknown status: ${status}` }, { status: 400 });
   }
-
-  const supabase = getSupabase();
 
   // Don't overwrite existing graded_outcome (first-hit semantics)
   const { data: existing } = await supabase
