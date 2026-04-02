@@ -644,6 +644,7 @@ export async function runPipeline(
     cluster_rank: clusterData.cluster_rank,
     selected_for_execution: clusterData.selected_for_execution,
     suppressed_reason: clusterData.suppressed_reason,
+    claude_confidence: claudeConfidence,
   };
 
   const decisionId = await storeDecision(supabase, extendedData, baseData);
