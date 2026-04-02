@@ -500,18 +500,21 @@ export function evaluateNearMisses(ind: SymbolIndicators): NearMissResult[] {
   });
 
   // ── SQ_SHORT ──
-  // TODO: Near-miss evaluation uses event-based triggers but production uses state-based
-  // (DEFAULT_SIGNAL_PARAMS.sq_trigger_mode = "state"). This means near-miss diagnostics
-  // evaluate a different signal definition than production. Pass trigger_mode through
-  // to align them.
-  const crossedBelowBasis = ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis;
-  const rsiCrossedBelow48 = ind.prev_rsi >= 48 && ind.rsi < 48;
+  // Aligned with production: uses state-based triggers (DEFAULT_SIGNAL_PARAMS.sq_trigger_mode = "state")
+  const sqTriggerMode = DEFAULT_SIGNAL_PARAMS.sq_trigger_mode;
+  const basisTrigger = sqTriggerMode === "event"
+    ? (ind.prev_close >= ind.prev_bb_basis && ind.close < ind.bb_basis)
+    : (ind.close < ind.bb_basis);
+  const rsiTrigger = sqTriggerMode === "event"
+    ? (ind.prev_rsi >= 48 && ind.rsi < 48)
+    : (ind.rsi < 48);
+  const sqVolMult = DEFAULT_SIGNAL_PARAMS.sq_volume_mult;
   const sqShortConds: ConditionResult[] = [
     { name: "bb_width_lt_0.12", passed: ind.bb_width_ratio < 0.12, actual: ind.bb_width_ratio, threshold: 0.12, op: "lt" },
-    { name: "crossed_below_basis", passed: crossedBelowBasis, actual: ind.close - ind.bb_basis, threshold: 0, op: "lt" },
+    { name: "basis_trigger", passed: basisTrigger, actual: ind.close - ind.bb_basis, threshold: 0, op: "lt" },
     { name: "close_lt_ema20", passed: ind.close < ind.ema20, actual: ind.close, threshold: ind.ema20, op: "lt" },
-    { name: "rsi_crossed_below_48", passed: rsiCrossedBelow48, actual: ind.rsi, threshold: 48, op: "lt" },
-    { name: "volume_gt_1.5x_sma", passed: ind.volume > ind.sma20_volume * 1.5, actual: ind.sma20_volume > 0 ? ind.volume / ind.sma20_volume : 0, threshold: 1.5, op: "gt" },
+    { name: "rsi_trigger", passed: rsiTrigger, actual: ind.rsi, threshold: 48, op: "lt" },
+    { name: `volume_gt_${sqVolMult}x_sma`, passed: ind.volume > ind.sma20_volume * sqVolMult, actual: ind.sma20_volume > 0 ? ind.volume / ind.sma20_volume : 0, threshold: sqVolMult, op: "gt" },
     { name: `adx_1h_lt_${DEFAULT_SIGNAL_PARAMS.sq_adx_1h_max}`, passed: ind.adx_1h < DEFAULT_SIGNAL_PARAMS.sq_adx_1h_max, actual: ind.adx_1h, threshold: DEFAULT_SIGNAL_PARAMS.sq_adx_1h_max, op: "lt" },
     { name: "close_4h_lt_ema50_4h", passed: ind.close_4h < ind.ema50_4h, actual: ind.close_4h, threshold: ind.ema50_4h, op: "lt" },
     { name: "range_lt_2.2x_atr", passed: ind.candle_range < ind.atr_1h * 2.2, actual: ind.atr_1h > 0 ? ind.candle_range / ind.atr_1h : 0, threshold: 2.2, op: "lt" },

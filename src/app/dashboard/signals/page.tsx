@@ -646,8 +646,10 @@ function SignalRow({
         <td className="px-2 py-2 text-center" title={suppressTitle}>
           {s.selection_pending ? (
             <span className="text-yellow-500" title="Selection pending — cluster window open">...</span>
-          ) : s.selected_for_execution ? (
+          ) : s.telegram_sent ? (
             <span className="text-blue-400">Y</span>
+          ) : s.blocked_reason ? (
+            <span className="text-neutral-500 cursor-help" title={s.blocked_reason}>N</span>
           ) : s.suppressed_reason ? (
             <span className="text-neutral-500 cursor-help">N</span>
           ) : (
