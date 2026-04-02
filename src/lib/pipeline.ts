@@ -633,6 +633,45 @@ export async function runPipeline(
     risk_check_result: riskCheckResult ? { approved: riskCheckResult.approved, reason: riskCheckResult.reason, composite_score: scoreResult.composite_score } : null,
   };
 
+  // ── Burst context (data collection only) ──────────────
+  let hours_since_last_burst: number | null = null;
+  let last_burst_size: number | null = null;
+
+  const { data: lastBurst } = await supabase
+    .from("decisions")
+    .select("created_at")
+    .eq("telegram_sent", true)
+    .gte("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+    .order("created_at", { ascending: false });
+
+  if (lastBurst && lastBurst.length > 0) {
+    const hourCounts = new Map<string, number>();
+    for (const row of lastBurst) {
+      const hour = (row.created_at as string).slice(0, 13); // YYYY-MM-DDTHH
+      hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+    }
+
+    const currentHour = new Date().toISOString().slice(0, 13);
+    let lastBurstHour: string | null = null;
+    let lastBurstSize = 0;
+
+    const sortedHours = (Array.from(hourCounts.entries()) as [string, number][]).sort((a, b) => b[0].localeCompare(a[0]));
+    for (const [hour, count] of sortedHours) {
+      if (count >= 5 && hour !== currentHour) {
+        lastBurstHour = hour;
+        lastBurstSize = count;
+        break;
+      }
+    }
+
+    if (lastBurstHour) {
+      const burstTime = new Date(lastBurstHour + ":00:00Z");
+      const hoursSince = (Date.now() - burstTime.getTime()) / (1000 * 60 * 60);
+      hours_since_last_burst = Math.round(hoursSince * 10) / 10;
+      last_burst_size = lastBurstSize;
+    }
+  }
+
   const extendedData: Record<string, unknown> = {
     ...baseData,
     vol_ratio: volRatio,
@@ -645,6 +684,8 @@ export async function runPipeline(
     selected_for_execution: clusterData.selected_for_execution,
     suppressed_reason: clusterData.suppressed_reason,
     claude_confidence: claudeConfidence,
+    hours_since_last_burst,
+    last_burst_size,
   };
 
   const decisionId = await storeDecision(supabase, extendedData, baseData);
