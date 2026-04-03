@@ -279,10 +279,6 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    if (findings?.enrichment_insights) {
-      tgMsg += `\n<b>Enrichment insights:</b> ${findings.enrichment_insights}\n`;
-    }
-
     if (Array.isArray(findings?.parameter_changes) && findings.parameter_changes.length > 0) {
       tgMsg += "\n<b>Parameter changes:</b>\n";
       for (const p of findings.parameter_changes.slice(0, 3)) {
