@@ -36,6 +36,7 @@ interface Finding {
 interface ResearchResponse {
   findings?: Finding[];
   loss_streak_analysis?: string;
+  enrichment_insights?: string;
   parameter_changes?: { parameter: string; current: string; recommended: string; reason: string }[];
   overall_assessment?: string;
   raw?: string;
@@ -259,6 +260,9 @@ export async function GET(request: NextRequest) {
     if (findings?.overall_assessment) {
       tgMsg += `\n${findings.overall_assessment}\n`;
     }
+    if (findings?.enrichment_insights) {
+      tgMsg += `\n<b>Data insights:</b> ${findings.enrichment_insights}\n`;
+    }
     if (findings?.loss_streak_analysis) {
       tgMsg += `\n<b>Loss streak:</b> ${findings.loss_streak_analysis}\n`;
     }
@@ -273,6 +277,10 @@ export async function GET(request: NextRequest) {
           tgMsg += `${icon} ${f.title}\n→ ${f.recommendation}\n`;
         }
       }
+    }
+
+    if (findings?.enrichment_insights) {
+      tgMsg += `\n<b>Enrichment insights:</b> ${findings.enrichment_insights}\n`;
     }
 
     if (Array.isArray(findings?.parameter_changes) && findings.parameter_changes.length > 0) {
