@@ -8,6 +8,7 @@ import { runGateBRelaxed, isShadowCooldownActive, setShadowCooldown } from "@/li
 import { runGateB } from "@/lib/gate-b";
 import { computeHTFTrend } from "@/lib/ta";
 import { classifyRegime } from "@/lib/regime";
+import { selectFromBurst } from "@/lib/portfolio-manager";
 import { isKillSwitchActive } from "@/lib/kill-switch";
 import { computeCompositeScore } from "@/lib/scoring";
 
@@ -542,8 +543,30 @@ export async function GET(request: NextRequest) {
       console.log(`[scanner] Top 3: ${pipelineCandidates.slice(0, 3).map(c => `${c.symbol}(${c.compositeScore.toFixed(1)})`).join(', ')}`);
     }
 
-    for (let rank = 0; rank < pipelineCandidates.length; rank++) {
-      const candidate = pipelineCandidates[rank];
+    // ── Portfolio Manager: correlation-aware filtering ──
+    let portfolioFiltered = pipelineCandidates;
+    if (pipelineCandidates.length > 1) {
+      try {
+        const portfolioDecisions = await selectFromBurst(
+          pipelineCandidates.map(c => ({
+            symbol: c.symbol,
+            compositeScore: c.compositeScore,
+            tier: c.tier,
+            signalType: c.signalType,
+          }))
+        );
+        const acceptedSymbols = new Set(
+          portfolioDecisions.filter(d => d.accepted).map(d => d.symbol)
+        );
+        portfolioFiltered = pipelineCandidates.filter(c => acceptedSymbols.has(c.symbol));
+        console.log(`[scanner] Portfolio manager: ${acceptedSymbols.size}/${pipelineCandidates.length} accepted`);
+      } catch (err) {
+        console.warn(`[scanner] Portfolio manager failed, proceeding with all candidates:`, err);
+      }
+    }
+
+    for (let rank = 0; rank < portfolioFiltered.length; rank++) {
+      const candidate = portfolioFiltered[rank];
       try {
         const result = await runPipeline(candidate.alertPayload, candidate.alertId);
 
