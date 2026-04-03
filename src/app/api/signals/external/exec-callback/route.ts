@@ -38,10 +38,13 @@ export async function POST(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
   const provided = request.headers.get("x-webhook-secret") ?? request.headers.get("authorization")?.replace("Bearer ", "");
 
-  if (execSecret || cronSecret) {
-    if (provided !== execSecret && provided !== cronSecret) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+  if (!execSecret && !cronSecret) {
+    console.error('[exec-callback] CRITICAL: No auth secrets configured — rejecting all requests');
+    return NextResponse.json({ error: "Server misconfiguration" }, { status: 500 });
+  }
+
+  if (provided !== execSecret && provided !== cronSecret) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   let body: Record<string, unknown>;
