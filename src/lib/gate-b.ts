@@ -55,14 +55,13 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
   }
 
   // ── R:R minimum check ─────────────────────────────────
-  // NOTE: rr_tp1 is always exactly 1.5 while entry = markPrice (see levels.ts).
-  // This check is a no-op in current operation but is retained as a guard for
-  // when entry is eventually set to a non-mark price (e.g., limit order offset).
+  // NOTE: rr_tp1 is now 1.0 after TP ladder tightening (was 1.5).
+  // Guard retained for when entry is set to a non-mark price (e.g., limit order offset).
   const rrRounded = Math.round(rrTp1 * 100) / 100;
-  if (rrRounded < 1.5) {
+  if (rrRounded < 0.8) {
     return {
       passed: false,
-      reason: `R:R to TP1 too low: ${rrRounded} < 1.5`,
+      reason: `R:R to TP1 too low: ${rrRounded} < 0.8`,
     };
   }
 
