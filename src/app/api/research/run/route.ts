@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { getSupabase } from "@/lib/supabase";
-import { sendTelegram } from "@/lib/telegram";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -34,6 +33,15 @@ interface Finding {
   data_support: string;
 }
 
+interface ResearchResponse {
+  findings?: Finding[];
+  loss_streak_analysis?: string;
+  parameter_changes?: { parameter: string; current: string; recommended: string; reason: string }[];
+  overall_assessment?: string;
+  raw?: string;
+  parse_error?: boolean;
+}
+
 async function gatherData(lookbackHours: number) {
   const supabase = getSupabase();
   const since = new Date(Date.now() - lookbackHours * 3600 * 1000).toISOString();
@@ -60,8 +68,6 @@ async function gatherData(lookbackHours: number) {
     .limit(20);
 
   // All-time stats for context
-  const { data: allTimeStats } = await supabase.rpc("exec_sql", { query: "" }).maybeSingle();
-  // Fallback: compute stats inline
   const { data: allResolved } = await supabase
     .from("decisions")
     .select("graded_outcome, resolution_path, vol_ratio, composite_score, btc_regime, alert_type")
@@ -190,12 +196,11 @@ export async function GET(request: NextRequest) {
       .map(b => (b as { type: "text"; text: string }).text)
       .join("");
 
-    let findings: any = null;
+    let findings: ResearchResponse | null = null;
     try {
       const clean = text.replace(/```json|```/g, "").trim();
-      findings = JSON.parse(clean);
+      findings = JSON.parse(clean) as ResearchResponse;
     } catch {
-      console.warn("[research] Failed to parse JSON response");
       findings = { raw: text, parse_error: true };
     }
 
@@ -224,8 +229,8 @@ export async function GET(request: NextRequest) {
       tgMsg += `\n<b>Loss streak:</b> ${findings.loss_streak_analysis}\n`;
     }
     if (Array.isArray(findings?.findings)) {
-      const critical = findings.findings.filter((f: Finding) => f.severity === "critical");
-      const warnings = findings.findings.filter((f: Finding) => f.severity === "warning");
+      const critical = findings.findings.filter(f => f.severity === "critical");
+      const warnings = findings.findings.filter(f => f.severity === "warning");
       const top = [...critical, ...warnings].slice(0, 4);
       if (top.length > 0) {
         tgMsg += "\n<b>Top findings:</b>\n";
@@ -267,8 +272,9 @@ export async function GET(request: NextRequest) {
       findings,
       tokens: { input: response.usage?.input_tokens, output: response.usage?.output_tokens },
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Research failed";
     console.error("[research] Failed:", err);
-    return NextResponse.json({ error: err.message ?? "Research failed" }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
