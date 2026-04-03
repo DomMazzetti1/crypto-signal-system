@@ -47,6 +47,14 @@ export interface ClaudeReviewInput {
   snapshot_quality: string;
   gate_a_quality: string;
   gate_b_passed: boolean;
+  // Enrichment context from data collector
+  enrichment_funding_rate: number | null;
+  enrichment_funding_interval: number | null;
+  enrichment_oi_delta_1h_pct: number | null;
+  enrichment_oi_delta_4h_pct: number | null;
+  enrichment_spread_pct: number | null;
+  enrichment_btc_correlation: number | null;
+  enrichment_btc_beta: number | null;
 }
 
 export interface ClaudeReviewOutput {
@@ -128,6 +136,19 @@ Your role is to assess signals that already passed detection, Gate B, and cooldo
 2. Whether market microstructure supports the trade (spread, depth, funding, OI flow).
 3. Whether risk levels are sensible relative to current volatility.
 If the supplied BTC regime conflicts with the signal direction, increase skepticism.
+
+Enrichment Context (from real-time data collector, may be null if unavailable):
+- Funding Rate: negative = shorts pay longs (hostile for shorts). Hourly funding coins (interval=1) are expensive — flag as risk.
+- OI Delta 1h/4h: positive = new longs entering. For shorts, rising OI + falling price = good (longs getting trapped). Rising OI + rising price = bad (momentum against you).
+- Spread %: >0.05% = thin book, slippage risk. >0.1% = dangerous.
+- BTC Correlation: >0.7 = highly correlated to BTC, macro-driven. <0.3 = idiosyncratic move. For shorts in bear regime, high correlation is good (BTC dragging it down). Low correlation means the signal is about this specific token.
+- BTC Beta: >1 = amplifies BTC moves. For shorts, high beta in bear = good leverage. High beta in bull = dangerous.
+
+Use enrichment context to adjust confidence. Key patterns:
+- Short + negative funding + rising OI = STRONG (funding hostile to longs, new longs getting trapped)
+- Short + positive funding + falling OI = WEAK (longs exiting, not building)
+- Short + hourly funding (interval=1) with rate > 0.01% = funding cost RISK FLAG
+- Any signal + spread > 0.05% = slippage risk flag
 
 HARD RULE: If stop distance exceeds 8% of entry price, always reject — the TP ladder is mathematically unreliable on micro-cap tokens with oversized ATR. Return NO_TRADE with reasoning citing stop_too_wide.`;
 
@@ -221,7 +242,16 @@ Price Levels:
 Quality:
   Snapshot: ${input.snapshot_quality}
   Gate A: ${input.gate_a_quality}
-  Gate B Passed: ${input.gate_b_passed}`;
+  Gate B Passed: ${input.gate_b_passed}
+
+Enrichment Context (real-time from data collector):
+  Funding Rate: ${input.enrichment_funding_rate !== null ? input.enrichment_funding_rate.toFixed(6) : "N/A"}
+  Funding Interval: ${input.enrichment_funding_interval !== null ? input.enrichment_funding_interval + "h" : "N/A"}
+  OI Delta 1h: ${input.enrichment_oi_delta_1h_pct !== null ? input.enrichment_oi_delta_1h_pct.toFixed(2) + "%" : "N/A"}
+  OI Delta 4h: ${input.enrichment_oi_delta_4h_pct !== null ? input.enrichment_oi_delta_4h_pct.toFixed(2) + "%" : "N/A"}
+  Spread: ${input.enrichment_spread_pct !== null ? input.enrichment_spread_pct.toFixed(4) + "%" : "N/A"}
+  BTC Correlation (24h): ${input.enrichment_btc_correlation !== null ? input.enrichment_btc_correlation.toFixed(3) : "N/A"}
+  BTC Beta (24h): ${input.enrichment_btc_beta !== null ? input.enrichment_btc_beta.toFixed(3) : "N/A"}`;
 
   const request = {
     model: "claude-haiku-4-5-20251001",

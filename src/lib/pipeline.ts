@@ -428,6 +428,9 @@ export async function runPipeline(
   );
 
   // ── 9. Claude review (only if deterministic passed) ───
+  // Fetch enrichment context early so it's available for the reviewer
+  const signalCtx = await getSignalContext(alert.symbol);
+
   let claudeDecision: string | null = null;
   let claudeConfidence: number | null = null;
   let setupType: string | null = null;
@@ -476,6 +479,13 @@ export async function runPipeline(
       snapshot_quality: gateA.quality,
       gate_a_quality: gateA.quality,
       gate_b_passed: gateB.passed,
+      enrichment_funding_rate: signalCtx.funding_rate,
+      enrichment_funding_interval: signalCtx.funding_interval,
+      enrichment_oi_delta_1h_pct: signalCtx.oi_delta_1h_pct,
+      enrichment_oi_delta_4h_pct: signalCtx.oi_delta_4h_pct,
+      enrichment_spread_pct: signalCtx.spread_pct,
+      enrichment_btc_correlation: signalCtx.btc_correlation,
+      enrichment_btc_beta: signalCtx.btc_beta,
     };
 
     try {
@@ -673,8 +683,7 @@ export async function runPipeline(
     }
   }
 
-  // ── Signal context enrichment from data collector ──
-  const signalCtx = await getSignalContext(alert.symbol);
+  // ── Signal context enrichment (already fetched before reviewer) ──
 
   const extendedData: Record<string, unknown> = {
     ...baseData,
