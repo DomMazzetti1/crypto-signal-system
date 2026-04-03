@@ -19,26 +19,29 @@ const TAKER_FEE = 0.00055;
 
 /**
  * Compute ladder-adjusted R for 33/33/34 TP split with SL→breakeven after TP1.
- * outcome_r tracks full-position R; this reflects the actual execution strategy.
+ * Uses actual R-multiples from stored prices (not hardcoded).
  */
-function computeLadderR(hit_tp1: boolean, hit_tp2: boolean, hit_tp3: boolean, hit_sl: boolean): number {
+function computeLadderR(
+  hit_tp1: boolean, hit_tp2: boolean, hit_tp3: boolean, hit_sl: boolean,
+  tp1R: number, tp2R: number, tp3R: number
+): number {
   if (!hit_tp1 && hit_sl) return -1.0;       // Full stop
   if (!hit_tp1 && !hit_sl) return 0;          // Expired, no TP hits
   // TP1 hit — SL moves to breakeven
-  let r = 0.33 * 1.5;                         // TP1 tranche locked in
+  let r = 0.33 * tp1R;                        // TP1 tranche locked in
   if (hit_tp2) {
-    r += 0.33 * 2.5;                          // TP2 tranche locked in
+    r += 0.33 * tp2R;                         // TP2 tranche locked in
     if (hit_tp3) {
-      r += 0.34 * 4.0;                        // TP3 tranche
+      r += 0.34 * tp3R;                       // TP3 tranche
     } else if (hit_sl) {
       r += 0.34 * 0.0;                        // Last tranche stopped at breakeven
     } else {
-      r += 0.34 * 2.0;                        // Expired near TP2 area (estimate)
+      r += 0.34 * (tp2R * 0.8);              // Expired near TP2 area (estimate)
     }
   } else if (hit_sl) {
     r += 0.67 * 0.0;                          // Remaining stopped at breakeven
   } else {
-    r += 0.67 * 0.75;                         // Expired between entry and TP1 area (estimate)
+    r += 0.67 * (tp1R * 0.5);                // Expired between entry and TP1 area (estimate)
   }
   return Math.round(r * 100) / 100;
 }
@@ -243,15 +246,20 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
       ? futureBars[futureBars.length - 1].close
       : null;
 
+    // Compute actual R-multiples from stored prices (not hardcoded)
+    const tp1R = rawRisk > 0 ? Math.abs(tp1 - entry) / rawRisk : 1.0;
+    const tp2R = rawRisk > 0 ? Math.abs(tp2 - entry) / rawRisk : 2.0;
+    const tp3R = rawRisk > 0 ? Math.abs(tp3 - entry) / rawRisk : 3.5;
+
     // outcome_r = full-position R (as if entire position exits at highest TP hit)
     let outcome_r = 0;
-    if (hit_tp3) outcome_r = 4.0;
-    else if (hit_tp2) outcome_r = 2.5;
-    else if (hit_tp1) outcome_r = 1.5;
+    if (hit_tp3) outcome_r = tp3R;
+    else if (hit_tp2) outcome_r = tp2R;
+    else if (hit_tp1) outcome_r = tp1R;
     else if (hit_sl) outcome_r = -1;
 
     // outcome_r_ladder = adjusted for 33/33/34 TP ladder with SL→breakeven after TP1
-    const outcome_r_ladder = computeLadderR(hit_tp1, hit_tp2, hit_tp3, hit_sl);
+    const outcome_r_ladder = computeLadderR(hit_tp1, hit_tp2, hit_tp3, hit_sl, tp1R, tp2R, tp3R);
 
     const { gradedOutcome, resolutionPath, resolvedAt } = deriveOutcome({
       hit_tp1, hit_tp2, hit_tp3, hit_sl,

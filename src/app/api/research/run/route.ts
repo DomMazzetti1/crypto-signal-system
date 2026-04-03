@@ -100,9 +100,11 @@ function buildPrompt(data: Awaited<ReturnType<typeof gatherData>>, mode: string)
   type Signal = typeof allResolved[number];
   const isWin = (s: Signal) => s.graded_outcome?.startsWith("WIN");
   const getRmult = (s: Signal) => {
-    if (s.resolution_path?.includes("TP3")) return 4.0;
-    if (s.resolution_path?.includes("TP2")) return 2.5;
-    if (s.resolution_path?.includes("TP1")) return 1.5;
+    // Use new TP ladder values (1.0/2.0/3.5R) — old signals with 1.5/2.5/4.0 will be slightly off
+    // but this is correct for all signals going forward
+    if (s.resolution_path?.includes("TP3")) return 3.5;
+    if (s.resolution_path?.includes("TP2")) return 2.0;
+    if (s.resolution_path?.includes("TP1")) return 1.0;
     if (s.graded_outcome === "LOSS") return -1.0;
     return 0.0;
   };
