@@ -46,17 +46,17 @@ async function gatherData(lookbackHours: number) {
   const supabase = getSupabase();
   const since = new Date(Date.now() - lookbackHours * 3600 * 1000).toISOString();
 
-  // Resolved signals in the period
+  // Resolved signals with enrichment context
   const { data: resolved } = await supabase
     .from("decisions")
-    .select("symbol, alert_type, btc_regime, composite_score, vol_ratio, claude_confidence, graded_outcome, resolution_path, created_at, resolved_at, btc_4h_change, cluster_size, cluster_rank, entry_price, stop_price")
+    .select("symbol, alert_type, btc_regime, composite_score, vol_ratio, claude_confidence, graded_outcome, resolution_path, created_at, resolved_at, btc_4h_change, cluster_size, cluster_rank, entry_price, stop_price, signal_funding_rate, signal_funding_interval, signal_oi_delta_1h_pct, signal_oi_delta_4h_pct, signal_spread_pct, signal_btc_correlation, signal_btc_beta")
     .eq("telegram_sent", true)
     .not("graded_outcome", "is", null)
     .not("resolution_path", "in", '("PRE_LIVE_CLEANUP","EXEC_REJECTED")')
     .neq("graded_outcome", "EXEC_REJECTED")
     .gte("created_at", since)
     .order("resolved_at", { ascending: false })
-    .limit(100);
+    .limit(200);
 
   // Open positions (unresolved)
   const { data: openPositions } = await supabase
@@ -70,7 +70,7 @@ async function gatherData(lookbackHours: number) {
   // All-time stats for context
   const { data: allResolved } = await supabase
     .from("decisions")
-    .select("graded_outcome, resolution_path, vol_ratio, composite_score, btc_regime, alert_type")
+    .select("symbol, graded_outcome, resolution_path, vol_ratio, composite_score, btc_regime, alert_type, entry_price, stop_price, signal_funding_rate, signal_funding_interval, signal_oi_delta_1h_pct, signal_oi_delta_4h_pct, signal_spread_pct, signal_btc_correlation, signal_btc_beta")
     .eq("telegram_sent", true)
     .not("graded_outcome", "is", null)
     .not("resolution_path", "in", '("PRE_LIVE_CLEANUP","EXEC_REJECTED")')
@@ -83,92 +83,124 @@ async function gatherData(lookbackHours: number) {
     .order("ts", { ascending: false })
     .limit(44);
 
-  return { resolved: resolved ?? [], openPositions: openPositions ?? [], allResolved: allResolved ?? [], latestMarket: latestMarket ?? [] };
+  // Latest derived metrics
+  const { data: derivedMetrics } = await supabase
+    .from("market_derived_metrics")
+    .select("symbol, oi_delta_1h_pct, oi_delta_4h_pct, btc_beta_24h, btc_correlation_24h, funding_annualized_pct, avg_spread_1h_pct")
+    .order("ts", { ascending: false })
+    .limit(44);
+
+  return { resolved: resolved ?? [], openPositions: openPositions ?? [], allResolved: allResolved ?? [], latestMarket: latestMarket ?? [], derivedMetrics: derivedMetrics ?? [] };
 }
 
 function buildPrompt(data: Awaited<ReturnType<typeof gatherData>>, mode: string): string {
-  const { resolved, openPositions, allResolved, latestMarket } = data;
+  const { resolved, openPositions, allResolved, derivedMetrics } = data;
 
-  // Compute summary stats
-  const wins = allResolved.filter(s => s.resolution_path?.includes("TP1"));
-  const losses = allResolved.filter(s => s.graded_outcome === "LOSS");
-  const totalR = allResolved.reduce((sum, s) => {
-    if (s.resolution_path?.includes("TP3")) return sum + 4;
-    if (s.resolution_path?.includes("TP2")) return sum + 2.5;
-    if (s.resolution_path?.includes("TP1")) return sum + 1.5;
-    if (s.graded_outcome === "LOSS") return sum - 1;
-    return sum;
-  }, 0);
+  // ── Pre-compute breakdowns (don't make Sonnet find these patterns) ──
+  type Signal = typeof allResolved[number];
+  const isWin = (s: Signal) => s.graded_outcome?.startsWith("WIN");
+  const getRmult = (s: Signal) => {
+    if (s.resolution_path?.includes("TP3")) return 4.0;
+    if (s.resolution_path?.includes("TP2")) return 2.5;
+    if (s.resolution_path?.includes("TP1")) return 1.5;
+    if (s.graded_outcome === "LOSS") return -1.0;
+    return 0.0;
+  };
 
-  // Recent resolved as compact table
-  const recentTable = resolved.slice(0, 30).map(s => {
+  const withEnrichment = allResolved.filter((s: Signal) => s.signal_oi_delta_1h_pct != null);
+  const totalWins = allResolved.filter(isWin).length;
+  const totalLosses = allResolved.filter((s: Signal) => s.graded_outcome === "LOSS").length;
+  const totalR = allResolved.reduce((sum: number, s: Signal) => sum + getRmult(s), 0);
+
+  // Win rate by OI direction at signal time
+  const oiRising = withEnrichment.filter((s: Signal) => Number(s.signal_oi_delta_1h_pct) > 0);
+  const oiFalling = withEnrichment.filter((s: Signal) => Number(s.signal_oi_delta_1h_pct) <= 0);
+
+  // Win rate by funding direction
+  const fundingPos = withEnrichment.filter((s: Signal) => Number(s.signal_funding_rate) > 0);
+  const fundingNeg = withEnrichment.filter((s: Signal) => Number(s.signal_funding_rate) < 0);
+
+  // Win rate by BTC correlation
+  const highCorr = withEnrichment.filter((s: Signal) => Number(s.signal_btc_correlation) > 0.5);
+  const lowCorr = withEnrichment.filter((s: Signal) => Number(s.signal_btc_correlation) <= 0.5);
+
+  function bucket(signals: Signal[]) {
+    const n = signals.length;
+    if (n === 0) return "no data";
+    const w = signals.filter(isWin).length;
+    const r = signals.reduce((s: number, sig: Signal) => s + getRmult(sig), 0);
+    return `${n} trades, ${w} wins (${Math.round(w/n*100)}%), ${r.toFixed(1)}R`;
+  }
+
+  // Recent resolved table
+  const recentTable = resolved.slice(0, 30).map((s: Signal) => {
     const stopDist = s.entry_price && s.stop_price
-      ? ((Math.abs(s.entry_price - s.stop_price) / s.entry_price) * 100).toFixed(1)
+      ? ((Math.abs(Number(s.entry_price) - Number(s.stop_price)) / Number(s.entry_price)) * 100).toFixed(1)
       : "?";
-    return `${s.symbol}|${s.graded_outcome}|${s.btc_regime}|${s.composite_score ?? "?"}|${s.vol_ratio ?? "?"}|${stopDist}%|${s.cluster_rank ?? "?"}/${s.cluster_size ?? "?"}`;
+    return `${s.symbol}|${s.graded_outcome}|${s.btc_regime}|${s.composite_score ?? "?"}|${s.vol_ratio ?? "?"}|${stopDist}%|oi1h=${s.signal_oi_delta_1h_pct ?? "?"}|fund=${s.signal_funding_rate ?? "?"}|btcCorr=${s.signal_btc_correlation ?? "?"}`;
   }).join("\n");
 
-  const openTable = openPositions.map(s => {
+  // Open positions
+  const openTable = openPositions.map((s: Record<string, unknown>) => {
     const stopDist = s.entry_price && s.stop_price
-      ? ((Math.abs(s.entry_price - s.stop_price) / s.entry_price) * 100).toFixed(1)
-      : "?";
+      ? ((Math.abs(Number(s.entry_price) - Number(s.stop_price)) / Number(s.entry_price)) * 100).toFixed(1) : "?";
     return `${s.symbol}|${s.btc_regime}|${s.composite_score ?? "?"}|${s.vol_ratio ?? "?"}|${stopDist}%`;
   }).join("\n");
 
-  // Market context from data collector
-  const fundingAlerts = latestMarket
-    .filter(m => m.funding_interval_hours === 1 || Math.abs(m.funding_rate) > 0.001)
-    .map(m => `${m.symbol}: rate=${m.funding_rate} interval=${m.funding_interval_hours}h`)
+  // Market snapshot from derived metrics
+  const dangerousCoins = derivedMetrics
+    .filter((d: typeof derivedMetrics[number]) => Math.abs(Number(d.funding_annualized_pct)) > 50 || Number(d.avg_spread_1h_pct) > 0.05)
+    .map((d: typeof derivedMetrics[number]) => `${d.symbol}: fundAnn=${Number(d.funding_annualized_pct).toFixed(0)}%, spread=${Number(d.avg_spread_1h_pct).toFixed(3)}%, btcBeta=${Number(d.btc_beta_24h).toFixed(1)}, btcCorr=${Number(d.btc_correlation_24h).toFixed(2)}`)
     .join("\n");
 
-  const wideSpread = latestMarket
-    .filter(m => m.spread_pct && parseFloat(m.spread_pct) > 0.05)
-    .map(m => `${m.symbol}: ${parseFloat(m.spread_pct).toFixed(3)}%`)
+  const highBetaCoins = derivedMetrics
+    .filter((d: typeof derivedMetrics[number]) => Number(d.btc_beta_24h) > 2.0)
+    .map((d: typeof derivedMetrics[number]) => `${d.symbol}: beta=${Number(d.btc_beta_24h).toFixed(1)}, corr=${Number(d.btc_correlation_24h).toFixed(2)}`)
     .join("\n");
 
-  return `You are the quant researcher for a live crypto perpetual futures trading system (SQ_SHORT — BB squeeze detection, short-biased).
+  return `You are the quant researcher for a live crypto perpetual futures trading system (SQ_SHORT — BB squeeze detection, short-biased). TP ladder: 1.0/2.0/3.5R. Risk: 4% per trade, 2% burst.
 
 SYSTEM STATE:
-- Total resolved signals: ${allResolved.length}
-- Win rate (hit TP1+): ${allResolved.length > 0 ? ((wins.length / allResolved.length) * 100).toFixed(1) : 0}%
-- Total R: ${totalR.toFixed(1)}
-- Wins: ${wins.length}, Losses: ${losses.length}
-- Currently open: ${openPositions.length} positions
-- Mode: ${mode} analysis
+- Total resolved: ${allResolved.length} signals | ${totalWins}W ${totalLosses}L | ${totalR.toFixed(1)}R total
+- Win rate: ${allResolved.length > 0 ? ((totalWins / allResolved.length) * 100).toFixed(1) : 0}%
+- Open positions: ${openPositions.length}
+- Signals with enrichment data: ${withEnrichment.length}
+- Mode: ${mode}
 
-RECENT SIGNALS (symbol|outcome|regime|score|vol_ratio|stop_dist|rank/burst_size):
+PRE-COMPUTED BREAKDOWNS (from ${withEnrichment.length} enriched signals):
+OI rising at signal time: ${bucket(oiRising)}
+OI falling at signal time: ${bucket(oiFalling)}
+Positive funding (crowd long, good for shorts): ${bucket(fundingPos)}
+Negative funding (crowd short, bad for shorts): ${bucket(fundingNeg)}
+High BTC correlation (>0.5): ${bucket(highCorr)}
+Low BTC correlation (<=0.5): ${bucket(lowCorr)}
+
+RECENT SIGNALS (symbol|outcome|regime|score|vol_ratio|stop%|oi1h|funding|btcCorr):
 ${recentTable || "No recent resolved signals"}
 
-OPEN POSITIONS (symbol|regime|score|vol_ratio|stop_dist):
-${openTable || "No open positions"}
+OPEN POSITIONS:
+${openTable || "None"}
 
-MARKET CONTEXT:
-Dangerous funding rates (hourly or extreme):
-${fundingAlerts || "None detected"}
+DANGEROUS COINS (extreme funding or wide spreads):
+${dangerousCoins || "None"}
 
-Wide spreads (>0.05%):
-${wideSpread || "None"}
+HIGH BTC BETA (>2x, will spike on BTC moves):
+${highBetaCoins || "None"}
 
-ANALYZE AND RESPOND IN JSON ONLY (no markdown, no backticks):
+INSTRUCTIONS:
+1. Focus on the pre-computed breakdowns. If any dimension shows a clear win/loss split, flag it.
+2. Check if open positions are in dangerous coins (high funding, high beta, wide spreads).
+3. Look for patterns in the recent signal sequence — regime transitions, burst clustering, time-of-day.
+4. If enrichment data is sparse (signals with enrichment < 10), note this and say what you CAN conclude vs what needs more data.
+5. Every recommendation must cite specific numbers from the data above.
+
+RESPOND IN JSON ONLY (no markdown, no backticks):
 {
-  "findings": [
-    {
-      "category": "risk|signal_quality|regime|execution|correlation|new_opportunity",
-      "severity": "critical|warning|info",
-      "title": "short finding title",
-      "detail": "what you found in the data",
-      "recommendation": "specific action to take",
-      "data_support": "which data points support this finding"
-    }
-  ],
-  "loss_streak_analysis": "If there are consecutive losses, explain the likely cause and whether to pause trading",
-  "parameter_changes": [
-    {"parameter": "name", "current": "value", "recommended": "value", "reason": "why"}
-  ],
-  "overall_assessment": "1-2 sentence system health summary"
-}
-
-Focus on ACTIONABLE findings. No generic advice. Every finding must reference specific data from above.`;
+  "findings": [{"category": "risk|signal_quality|regime|execution|correlation|new_opportunity", "severity": "critical|warning|info", "title": "short title", "detail": "what the data shows", "recommendation": "specific action", "data_support": "numbers cited"}],
+  "enrichment_insights": "What the new OI/funding/correlation data reveals that was invisible before",
+  "parameter_changes": [{"parameter": "name", "current": "value", "recommended": "value", "reason": "why"}],
+  "overall_assessment": "1-2 sentence system health"
+}`;
 }
 
 export async function GET(request: NextRequest) {
