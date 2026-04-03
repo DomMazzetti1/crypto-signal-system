@@ -17,6 +17,9 @@ export const dynamic = "force-dynamic";
  *   realized_pnl?: number,
  *   close_price?: number,
  *   closed_at?: string,
+ *   funding_cost_usd?: number,           // total funding paid (negative = cost)
+ *   funding_settlements?: object[],       // individual settlement records
+ *   funding_settlement_count?: number,    // count of settlements
  * }
  */
 
@@ -112,6 +115,34 @@ export async function POST(request: NextRequest) {
   }
 
   console.log(`[exec-callback] Decision ${decisionId}: ${status} → ${mapping.graded_outcome} (${mapping.resolution_path})`);
+
+  // For full-close events, persist funding data to production_signal_grades
+  const FULL_CLOSE_STATUSES = ["SL_HIT", "TP3_HIT", "EXPIRED"];
+  if (FULL_CLOSE_STATUSES.includes(status)) {
+    const fundingCostUsd = typeof body.funding_cost_usd === "number" ? body.funding_cost_usd : null;
+    const fundingSettlements = Array.isArray(body.funding_settlements) ? body.funding_settlements : null;
+    const fundingSettlementCount = typeof body.funding_settlement_count === "number" ? body.funding_settlement_count : null;
+
+    if (fundingCostUsd !== null || fundingSettlements !== null) {
+      const fundingUpdate: Record<string, unknown> = {};
+      if (fundingCostUsd !== null) fundingUpdate.funding_cost_usd = fundingCostUsd;
+      if (fundingSettlements !== null) fundingUpdate.funding_settlements = fundingSettlements;
+      if (fundingSettlementCount !== null) fundingUpdate.funding_settlement_count = fundingSettlementCount;
+
+      const { error: gradeError } = await supabase
+        .from("production_signal_grades")
+        .update(fundingUpdate)
+        .eq("decision_id", decisionId);
+
+      if (gradeError) {
+        // Non-fatal: log but don't fail the callback
+        console.warn(`[exec-callback] Failed to update funding on production_signal_grades for ${decisionId}:`, gradeError.message);
+      } else {
+        console.log(`[exec-callback] Decision ${decisionId}: funding_cost_usd=$${fundingCostUsd?.toFixed(4)} (${fundingSettlementCount ?? 0} settlements) written to grades`);
+      }
+    }
+  }
+
   return NextResponse.json({
     updated: true,
     decision_id: decisionId,
