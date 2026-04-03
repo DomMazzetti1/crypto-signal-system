@@ -20,6 +20,7 @@ import { sendToExecutionEngine } from "@/lib/exec-webhook";
 import { computeCompositeScore } from "@/lib/scoring";
 import { assignCluster, finalizeClusterSelection, deriveTier } from "@/lib/cluster";
 import { runPreTradeRiskChecks, RiskCheckResult } from "@/lib/risk-manager";
+import { getSignalContext } from "@/lib/signal-context";
 
 export interface AlertPayload {
   type: string;
@@ -672,6 +673,9 @@ export async function runPipeline(
     }
   }
 
+  // ── Signal context enrichment from data collector ──
+  const signalCtx = await getSignalContext(alert.symbol);
+
   const extendedData: Record<string, unknown> = {
     ...baseData,
     vol_ratio: volRatio,
@@ -686,6 +690,13 @@ export async function runPipeline(
     claude_confidence: claudeConfidence,
     hours_since_last_burst,
     last_burst_size,
+    signal_funding_rate: signalCtx.funding_rate,
+    signal_funding_interval: signalCtx.funding_interval,
+    signal_oi_delta_1h_pct: signalCtx.oi_delta_1h_pct,
+    signal_oi_delta_4h_pct: signalCtx.oi_delta_4h_pct,
+    signal_spread_pct: signalCtx.spread_pct,
+    signal_btc_correlation: signalCtx.btc_correlation,
+    signal_btc_beta: signalCtx.btc_beta,
   };
 
   const decisionId = await storeDecision(supabase, extendedData, baseData);
