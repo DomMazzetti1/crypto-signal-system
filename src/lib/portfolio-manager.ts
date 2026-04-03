@@ -57,7 +57,7 @@ export async function selectFromBurst(
     .not("resolution_path", "in", '("PRE_LIVE_CLEANUP","EXEC_REJECTED")');
   
   const openSymbols = new Set((openPositions ?? []).map(p => p.symbol));
-  console.log(`[portfolio] Open positions: ${openSymbols.size} (${[...openSymbols].join(', ')})`);
+  console.log(`[portfolio] Open positions: ${openSymbols.size} (${Array.from(openSymbols).join(', ')})`);
 
   // ── 2. Get latest price movements for correlation check ──
   const { data: latestSnapshots } = await supabase
@@ -79,7 +79,7 @@ export async function selectFromBurst(
 
   // Also track 1h moves of open positions for correlation check
   const openMoves: number[] = [];
-  for (const sym of openSymbols) {
+  for (const sym of Array.from(openSymbols)) {
     const snap = priceMap.get(sym);
     if (snap?.price_1h_pct != null) {
       openMoves.push(snap.price_1h_pct);
