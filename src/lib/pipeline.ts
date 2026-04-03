@@ -782,6 +782,12 @@ export async function runPipeline(
       telegramBlockReason = `score_too_low: ${scoreResult.composite_score.toFixed(1)}`;
       console.log(`[pipeline] ${alert.symbol} blocked: composite_score ${scoreResult.composite_score.toFixed(1)} < 20`);
     }
+    // Vol ratio filter: block signals with vol_ratio < 1.0 (0% win rate across 9 trades, p=0.001)
+    if (sendTelegram_ && volRatio !== null && volRatio < 1.0) {
+      sendTelegram_ = false;
+      telegramBlockReason = `vol_ratio_too_low: ${volRatio.toFixed(2)}`;
+      console.log(`[pipeline] ${alert.symbol} blocked: vol_ratio ${volRatio.toFixed(2)} < 1.0 (0% WR, p=0.001)`);
+    }
     // Low-confidence filter: block RELAXED signals where Claude confidence is available but low
     if (sendTelegram_ && isRelaxed && claudeConfidence !== null && claudeConfidence > 0 && claudeConfidence < 5) {
       sendTelegram_ = false;
