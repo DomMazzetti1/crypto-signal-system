@@ -763,8 +763,8 @@ export async function runPipeline(
       // vol_ratio>=1.5 removed 2026-03-31: vol<1.5 outperforms (PF 2.46 vs 2.24)
       const checks: { name: string; pass: boolean }[] = [
         { name: "pass_count", pass: true }, // pass_count not available in pipeline; checked at scanner level
-        // rr_tp1 is always 1.5, this check always passes — retained as future guard
-        { name: "rr_tp1>=1.2", pass: levels.rr_tp1 >= 1.2 },
+        // rr_tp1 is always 1.0 now (tightened from 1.5) — guard retained for future changes
+        { name: "rr_tp1>=0.8", pass: levels.rr_tp1 >= 0.8 },
         { name: "tp1_positive", pass: direction === "long" ? levels.tp1 > levels.entry : levels.tp1 < levels.entry },
         { name: "entry_mark_dev<=1%", pass: markPrice > 0 && Math.abs(levels.entry - markPrice) / markPrice <= 0.01 },
       ];

@@ -28,16 +28,16 @@ export function calculateLevels(
     entry = markPrice;
     stop = entry - riskDistance;
     const risk = riskDistance;
-    tp1 = entry + risk * 1.5;
-    tp2 = entry + risk * 2.5;
-    tp3 = entry + risk * 4.0;
+    tp1 = entry + risk * 1.0;
+    tp2 = entry + risk * 2.0;
+    tp3 = entry + risk * 3.5;
   } else {
     entry = markPrice;
     stop = entry + riskDistance;
     const risk = riskDistance;
-    tp1 = entry - risk * 1.5;
-    tp2 = entry - risk * 2.5;
-    tp3 = entry - risk * 4.0;
+    tp1 = entry - risk * 1.0;
+    tp2 = entry - risk * 2.0;
+    tp3 = entry - risk * 3.5;
   }
 
   const risk = Math.abs(entry - stop);
