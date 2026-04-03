@@ -24,12 +24,6 @@ export interface PortfolioDecision {
 
 // ─── Configuration ────────────────────────────────────────
 const MAX_NEW_PER_BURST = parseInt(process.env.MAX_BURST_ENTRIES ?? "3");
-const CORRELATION_THRESHOLD = 0.70;
-
-interface OpenPosition {
-  symbol: string;
-  created_at: string;
-}
 
 interface PriceSnapshot {
   symbol: string;
@@ -125,7 +119,7 @@ export async function selectFromBurst(
         m => Math.abs(m - move) < 0.5
       ).length;
 
-      if (tooSimilarToAccepted && accepted.length >= 2) {
+      if ((tooSimilarToAccepted || tooSimilarToOpen) && accepted.length >= 2) {
         // Allow first 2 even if similar, block 3rd+ similar move
         decisions.push({ 
           symbol: candidate.symbol, accepted: false, 
