@@ -96,6 +96,7 @@ export interface PipelineResult {
   levels?: {
     entry: number;
     stop: number;
+    tp0: number;
     tp1: number;
     tp2: number;
     tp3: number;
@@ -710,6 +711,7 @@ export async function runPipeline(
 
   const extendedData: Record<string, unknown> = {
     ...baseData,
+    tp0_price: levels.tp0,
     vol_ratio: volRatio,
     entry_deviation_pct: entryDeviationPct,
     composite_score: scoreResult.composite_score,
@@ -891,6 +893,7 @@ export async function runPipeline(
               direction: direction.toUpperCase() as 'LONG' | 'SHORT',
               entry_price: levels.entry,
               stop_price: levels.stop,
+              tp0_price: levels.tp0,
               tp1_price: levels.tp1,
               tp2_price: levels.tp2,
               tp3_price: levels.tp3,
@@ -963,6 +966,7 @@ export async function runPipeline(
     levels: {
       entry: levels.entry,
       stop: levels.stop,
+      tp0: levels.tp0,
       tp1: levels.tp1,
       tp2: levels.tp2,
       tp3: levels.tp3,

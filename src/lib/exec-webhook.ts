@@ -5,6 +5,7 @@ export interface ExecSignalPayload {
   direction: 'LONG' | 'SHORT';
   entry_price: number;
   stop_price: number;
+  tp0_price: number;
   tp1_price: number;
   tp2_price: number;
   tp3_price: number;
