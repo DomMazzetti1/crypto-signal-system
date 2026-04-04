@@ -51,6 +51,17 @@ const COOLDOWN_HOURS = 8; // 8 candles at 1H
 const FORWARD_BARS = 48;
 const LOG_PREFIX = "[extended-backtest]";
 
+const SCANNER_SYMBOLS: string[] = [
+  "1000BONKUSDT","1000PEPEUSDT","ADAUSDT","ALGOUSDT","APTUSDT","ARBUSDT",
+  "ARIAUSDT","ASTERUSDT","AVAXUSDT","BANKUSDT","BARDUSDT","BEATUSDT",
+  "BLURUSDT","BRUSDT","CRVUSDT","DOGEUSDT","DOTUSDT","DRIFTUSDT",
+  "ENAUSDT","FARTCOINUSDT","FIDAUSDT","GALAUSDT","HBARUSDT","HEMIUSDT",
+  "HYPEUSDT","KERNELUSDT","KITEUSDT","LINKUSDT","LITUSDT","MONUSDT",
+  "NEARUSDT","NOMUSDT","ONDOUSDT","ONTUSDT","OPUSDT","PENGUUSDT",
+  "PIPPINUSDT","PUMPFUNUSDT","RENDERUSDT","RESOLVUSDT","SEIUSDT",
+  "SIRENUSDT","SOLUSDT","BTCUSDT",
+];
+
 // Scoring weights (mirrors scoring.ts)
 const W_ATR = 0.35;
 const W_VOL = 0.35;
@@ -75,19 +86,6 @@ function clamp(val: number, min: number, max: number): number {
 }
 
 // ── Supabase data fetching ─────────────────────────────────
-
-async function fetchSymbols(): Promise<string[]> {
-  const url = `${SUPABASE_URL}/rest/v1/candle_cache?interval=eq.60&select=symbol`;
-  const res = await fetch(url, {
-    headers: { ...SB_HEADERS, Prefer: "return=representation" },
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`fetchSymbols error: ${text}`);
-  }
-  const rows: { symbol: string }[] = await res.json();
-  return Array.from(new Set(rows.map((r) => r.symbol)));
-}
 
 async function fetchCandles(symbol: string): Promise<Candle[]> {
   const all: Candle[] = [];
@@ -347,9 +345,9 @@ function processSymbol(
       const entry = candles[i].close;
       const stop = upper;  // upper BB as stop loss
       const R = stop - entry;
-      if (R <= 0) {
+      if (R <= 0 || R / entry > 0.05) {
         prevBbWidth = bbWidth;
-        continue; // skip degenerate case where entry >= upper_bb
+        continue; // skip degenerate or wide-stop signals
       }
       const tp1 = entry - 1.0 * R;
       const tp2 = entry - 2.0 * R;
@@ -482,9 +480,9 @@ async function main() {
   // 1. Fetch regime map
   const regimeMap = await fetchRegimeMap();
 
-  // 2. Get distinct symbols
-  const symbols = await fetchSymbols();
-  console.log(`${LOG_PREFIX} ${symbols.length} symbols found in candle_cache`);
+  // 2. Scanner symbols (hardcoded — matches fetch-historical-klines.ts)
+  const symbols = SCANNER_SYMBOLS;
+  console.log(`${LOG_PREFIX} ${symbols.length} scanner symbols to backtest`);
 
   // 3. Process each symbol sequentially
   let totalSignals = 0;
