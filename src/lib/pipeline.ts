@@ -449,7 +449,10 @@ export async function runPipeline(
     (volRatio !== null && volRatio < 1.0) ||
     scoreResult.composite_score < 20;
 
+  let reasoning: string | null = null;
+
   if (preReviewBlocked) {
+    reasoning = "skipped: deterministic filter";
     console.log(
       `[pipeline] ${alert.symbol} skipping Claude review: vol_ratio=${volRatio?.toFixed(2) ?? "null"} composite=${scoreResult.composite_score.toFixed(1)}`
     );
@@ -463,7 +466,6 @@ export async function runPipeline(
   let claudeConfidence: number | null = null;
   let setupType: string | null = null;
   let riskFlags: string[] = [];
-  let reasoning: string | null = null;
 
   if ((decision === "LONG" || decision === "SHORT") && !preReviewBlocked) {
     // Prompt version lookup disabled — migration 004 not applied
