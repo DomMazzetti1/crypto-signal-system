@@ -112,6 +112,10 @@ interface MfeResult {
   mfe_4h: number | null;  mae_4h: number | null;
   mfe_8h: number | null;  mae_8h: number | null;
   mfe_24h: number | null; mae_24h: number | null;
+  time_to_03r_min: number | null;
+  time_to_05r_min: number | null;
+  time_to_07r_min: number | null;
+  time_to_1r_min: number | null;
   strategy_a_r: number;
   strategy_b_r: number;
   strategy_c_r: number;
@@ -129,6 +133,9 @@ async function fetchSignals(runGroup: string | null): Promise<BacktestSignal[]> 
     let url = `${SUPABASE_URL}/rest/v1/backtest_signals?select=id,symbol,setup_type,candle_time,entry_price,stop_loss,tp1,tp2,tp3,hit_tp1,hit_tp2,hit_tp3,hit_sl,max_favorable,max_adverse,regime_production,backtest_run_id&order=candle_time.asc&limit=${LIMIT}&offset=${offset}`;
     if (runGroup) {
       url += `&backtest_run_id=eq.${runGroup}`;
+    } else {
+      // Default: extended_2yr_v1 + original signals (NULL run_id)
+      url += `&or=(backtest_run_id.eq.extended_2yr_v1,backtest_run_id.is.null)`;
     }
     const res = await fetch(url, { headers: SB_HEADERS });
     if (!res.ok) {
@@ -233,6 +240,34 @@ function computeMfeAtHorizons(
   }
 
   return { mfe, mae };
+}
+
+const R_THRESHOLDS = [0.3, 0.5, 0.7, 1.0] as const;
+
+function computeTimeToR(
+  entry: number,
+  riskPerUnit: number,
+  entryTimeMs: number,
+  candles: Candle[]
+): (number | null)[] {
+  const results: (number | null)[] = new Array(R_THRESHOLDS.length).fill(null);
+  let found = 0;
+
+  for (const bar of candles) {
+    const fav = (entry - bar.low) / riskPerUnit; // short: entry - low
+    const barTimeMs = new Date(bar.start_time).getTime();
+    const elapsedMin = (barTimeMs - entryTimeMs) / 60_000 + 15; // end of bar
+
+    for (let t = 0; t < R_THRESHOLDS.length; t++) {
+      if (results[t] === null && fav >= R_THRESHOLDS[t]) {
+        results[t] = elapsedMin;
+        found++;
+      }
+    }
+    if (found === R_THRESHOLDS.length) break;
+  }
+
+  return results;
 }
 
 // ── Exit Strategy Simulation ─────────────────────────────
@@ -414,6 +449,7 @@ function writeCsv(results: MfeResult[]): void {
     "mfe_1h", "mae_1h", "mfe_2h", "mae_2h",
     "mfe_4h", "mae_4h", "mfe_8h", "mae_8h",
     "mfe_24h", "mae_24h",
+    "time_to_03r_min", "time_to_05r_min", "time_to_07r_min", "time_to_1r_min",
     "strategy_a_r", "strategy_b_r", "strategy_c_r", "strategy_d_r",
   ];
 
@@ -426,6 +462,7 @@ function writeCsv(results: MfeResult[]): void {
       r.mfe_1h ?? "", r.mae_1h ?? "", r.mfe_2h ?? "", r.mae_2h ?? "",
       r.mfe_4h ?? "", r.mae_4h ?? "", r.mfe_8h ?? "", r.mae_8h ?? "",
       r.mfe_24h ?? "", r.mae_24h ?? "",
+      r.time_to_03r_min ?? "", r.time_to_05r_min ?? "", r.time_to_07r_min ?? "", r.time_to_1r_min ?? "",
       r.strategy_a_r, r.strategy_b_r, r.strategy_c_r, r.strategy_d_r,
     ].join(","));
   }
@@ -433,6 +470,51 @@ function writeCsv(results: MfeResult[]): void {
   const outPath = resolve(outDir, "mfe-analysis.csv");
   writeFileSync(outPath, lines.join("\n") + "\n", "utf8");
   console.log(`${LOG_PREFIX} CSV written to ${outPath}`);
+}
+
+// ── Upsert to Supabase ──────────────────────────────────
+
+async function upsertMfe(results: MfeResult[]): Promise<void> {
+  const url = `${SUPABASE_URL}/rest/v1/backtest_mfe`;
+  const BATCH = 200;
+
+  for (let i = 0; i < results.length; i += BATCH) {
+    const batch = results.slice(i, i + BATCH).map((r) => ({
+      signal_id: r.signal_id,
+      mfe_15m: r.mfe_15m,
+      mfe_30m: r.mfe_30m,
+      mfe_1h: r.mfe_1h,
+      mfe_2h: r.mfe_2h,
+      mfe_4h: r.mfe_4h,
+      mfe_8h: r.mfe_8h,
+      mae_15m: r.mae_15m,
+      mae_1h: r.mae_1h,
+      time_to_03r_min: r.time_to_03r_min,
+      time_to_05r_min: r.time_to_05r_min,
+      time_to_1r_min: r.time_to_1r_min,
+      strategy_a_r: r.strategy_a_r,
+      strategy_b_r: r.strategy_b_r,
+      strategy_c_r: r.strategy_c_r,
+      strategy_d_r: r.strategy_d_r,
+      regime_production: r.regime_production,
+    }));
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        ...SB_HEADERS,
+        Prefer: "return=minimal,resolution=merge-duplicates",
+      },
+      body: JSON.stringify(batch),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`${LOG_PREFIX} UPSERT batch ${Math.floor(i / BATCH) + 1} error: ${text}`);
+    }
+  }
+
+  console.log(`${LOG_PREFIX} Upserted ${results.length} rows to backtest_mfe`);
 }
 
 // ── Main ─────────────────────────────────────────────────
@@ -514,6 +596,9 @@ async function main() {
       // MFE/MAE at horizons
       const { mfe, mae } = computeMfeAtHorizons(sig.entry_price, R, candles);
 
+      // Time-to-R thresholds
+      const timeToR = computeTimeToR(sig.entry_price, R, entryTimeMs, candles);
+
       // Strategy simulation
       const strats = simulateStrategies(sig.entry_price, sig.stop_loss, R, candles);
 
@@ -532,6 +617,10 @@ async function main() {
         mfe_4h: mfe[4],  mae_4h: mae[4],
         mfe_8h: mfe[5],  mae_8h: mae[5],
         mfe_24h: mfe[6], mae_24h: mae[6],
+        time_to_03r_min: timeToR[0],
+        time_to_05r_min: timeToR[1],
+        time_to_07r_min: timeToR[2],
+        time_to_1r_min: timeToR[3],
         strategy_a_r: strats.a,
         strategy_b_r: strats.b,
         strategy_c_r: strats.c,
@@ -547,6 +636,11 @@ async function main() {
   // 4. Write CSV
   if (results.length > 0) {
     writeCsv(results);
+  }
+
+  // 4b. Upsert to backtest_mfe
+  if (results.length > 0) {
+    await upsertMfe(results);
   }
 
   // 5. Print summary table grouped by regime
@@ -609,6 +703,37 @@ async function main() {
       const p90 = vals[Math.floor(vals.length * 0.9)];
       console.log(
         `  ${h.label.padEnd(4)}: median=${median.toFixed(3)}R  mean=${mean.toFixed(3)}R  p75=${p75.toFixed(3)}R  p90=${p90.toFixed(3)}R  (n=${vals.length})`
+      );
+    }
+  }
+
+  // 7. Time-to-profit distribution
+  if (results.length > 0) {
+    console.log(`\n${LOG_PREFIX} Time-to-profit distribution:`);
+    const rThresholds = ["0.3R", "0.5R", "1.0R"] as const;
+    const timeWindows = [
+      { label: "15m", mins: 15 },
+      { label: "1h", mins: 60 },
+      { label: "4h", mins: 240 },
+    ];
+    const ttFields: (keyof MfeResult)[] = [
+      "time_to_03r_min", "time_to_05r_min", "time_to_1r_min",
+    ];
+
+    console.log(`  ${"".padEnd(6)} │ ${timeWindows.map((w) => w.label.padStart(8)).join(" │ ")}`);
+
+    for (let t = 0; t < rThresholds.length; t++) {
+      const field = ttFields[t];
+      const pcts: string[] = [];
+      for (const tw of timeWindows) {
+        const reached = results.filter((r) => {
+          const v = r[field] as number | null;
+          return v !== null && v <= tw.mins;
+        }).length;
+        pcts.push(((reached / results.length) * 100).toFixed(1) + "%");
+      }
+      console.log(
+        `  ${rThresholds[t].padEnd(6)} │ ${pcts.map((p) => p.padStart(8)).join(" │ ")}`
       );
     }
   }
