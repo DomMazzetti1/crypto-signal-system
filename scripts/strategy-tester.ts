@@ -3,9 +3,9 @@
  * against stored candle_cache data in Supabase.
  *
  * Usage:
- *   npx tsx scripts/strategy-tester.ts --config path/to/strategy.json
- *   npx tsx scripts/strategy-tester.ts --name 'test1' --direction SHORT --entry BB_SQUEEZE \
- *     --regime bear,bull --tp '1.0,2.0,3.5' --split '0.33,0.33,0.34' --sl UPPER_BB --interval 60
+ *   npx tsx scripts/strategy-tester.ts --config strategy.json
+ *   npx tsx scripts/strategy-tester.ts --name 'SQ_SHORT_bear' --direction SHORT --entry BB_SQUEEZE \
+ *     --regime bear --tp '1.0,2.0,3.5' --split '0.33,0.33,0.34' --sl-method UPPER_BB --interval 60
  */
 
 import { readFileSync } from "fs";
@@ -164,17 +164,18 @@ function parseArgs(): StrategyConfig {
   raw.entry_logic = getArg(args, "entry") ?? "BB_SQUEEZE";
   const regimeStr = getArg(args, "regime") ?? "all";
   raw.regime_filter = regimeStr.split(",").map((s: string) => s.trim());
-  raw.sl_method = getArg(args, "sl") ?? "UPPER_BB";
-  raw.sl_param = getArg(args, "sl_param") ? Number(getArg(args, "sl_param")) : 0;
+  raw.sl_method = getArg(args, "sl-method") ?? "UPPER_BB";
+  raw.sl_param = getArg(args, "sl-param") ? Number(getArg(args, "sl-param")) : 0.02;
   const tpStr = getArg(args, "tp") ?? "1.0,2.0,3.5";
   raw.tp_levels = tpStr.split(",").map(Number);
   const splitStr = getArg(args, "split") ?? "0.33,0.33,0.34";
   raw.tp_split = splitStr.split(",").map(Number);
-  raw.move_sl_to_be = !args.includes("--no_move_sl_to_be");
-  raw.min_vol_ratio = getArg(args, "min_vol_ratio") ? Number(getArg(args, "min_vol_ratio")) : null;
-  raw.min_score = getArg(args, "min_score") ? Number(getArg(args, "min_score")) : null;
-  raw.max_stop_pct = getArg(args, "max_stop_pct") ? Number(getArg(args, "max_stop_pct")) : 0.05;
-  raw.cooldown_bars = getArg(args, "cooldown_bars") ? Number(getArg(args, "cooldown_bars")) : 8;
+  const movSlArg = getArg(args, "move-sl-be");
+  raw.move_sl_to_be = movSlArg == null ? true : movSlArg !== "false";
+  raw.min_vol_ratio = getArg(args, "min-vol") ? Number(getArg(args, "min-vol")) : 0;
+  raw.min_score = getArg(args, "min-score") ? Number(getArg(args, "min-score")) : 0;
+  raw.max_stop_pct = getArg(args, "max-stop") ? Number(getArg(args, "max-stop")) : 0.05;
+  raw.cooldown_bars = getArg(args, "cooldown") ? Number(getArg(args, "cooldown")) : 8;
   const symStr = getArg(args, "symbols") ?? "all";
   raw.symbols = symStr === "all" ? SCANNER_SYMBOLS : symStr.split(",").map((s: string) => s.trim());
   raw.interval = getArg(args, "interval") ? Number(getArg(args, "interval")) : 60;
@@ -238,7 +239,7 @@ function normalizeConfig(raw: Record<string, unknown>): StrategyConfig {
 async function fetchCandles(symbol: string, interval: number): Promise<Candle[]> {
   const all: Candle[] = [];
   let offset = 0;
-  const LIMIT = 1000;
+  const LIMIT = 5000;
 
   while (true) {
     const url = `${SUPABASE_URL}/rest/v1/candle_cache?symbol=eq.${symbol}&interval=eq.${interval}&select=start_time,open,high,low,close,volume&order=start_time.asc&limit=${LIMIT}&offset=${offset}`;
@@ -271,7 +272,7 @@ async function fetchCandles(symbol: string, interval: number): Promise<Candle[]>
 async function fetchRegimeMap(): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   let offset = 0;
-  const LIMIT = 1000;
+  const LIMIT = 5000;
 
   while (true) {
     const url = `${SUPABASE_URL}/rest/v1/btc_regime_history?select=date,regime&order=date.asc&limit=${LIMIT}&offset=${offset}`;
@@ -470,8 +471,8 @@ function processSymbolStrategy(
         continue;
       }
 
-      // Vol ratio filter
-      if (config.min_vol_ratio != null && volRatio < config.min_vol_ratio) {
+      // Vol ratio filter (0 = no filter)
+      if (config.min_vol_ratio != null && config.min_vol_ratio > 0 && volRatio < config.min_vol_ratio) {
         continue;
       }
 
@@ -479,8 +480,8 @@ function processSymbolStrategy(
       const entry = candles[i].close;
       const compositeScore = computeCompositeScore(atrVal, entry, volRatio);
 
-      // Score filter
-      if (config.min_score != null && compositeScore < config.min_score) {
+      // Score filter (0 = no filter)
+      if (config.min_score != null && config.min_score > 0 && compositeScore < config.min_score) {
         continue;
       }
 
@@ -869,13 +870,14 @@ function printSummary(summary: TestSummary): void {
 // ── Supabase Storage ───────────────────────────────────────
 
 // Migration SQL (run manually or via Supabase dashboard):
-// CREATE TABLE IF NOT EXISTS strategy_test_runs (
+// CREATE TABLE IF NOT EXISTS strategy_test_results (
 //   id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
 //   name text NOT NULL,
 //   config jsonb NOT NULL,
 //   total_trades integer NOT NULL,
 //   win_rate numeric NOT NULL,
 //   avg_r numeric NOT NULL,
+//   total_r numeric NOT NULL,
 //   profit_factor numeric NOT NULL,
 //   max_consec_loss integer NOT NULL,
 //   max_drawdown numeric NOT NULL,
@@ -892,6 +894,7 @@ async function storeResults(summary: TestSummary): Promise<void> {
     total_trades: summary.total_trades,
     win_rate: summary.win_rate,
     avg_r: summary.avg_r,
+    total_r: summary.total_r,
     profit_factor: summary.profit_factor === Infinity ? 9999 : summary.profit_factor,
     max_consec_loss: summary.max_consecutive_losses,
     max_drawdown: summary.max_drawdown_r,
@@ -902,7 +905,7 @@ async function storeResults(summary: TestSummary): Promise<void> {
   };
 
   try {
-    const url = `${SUPABASE_URL}/rest/v1/strategy_test_runs`;
+    const url = `${SUPABASE_URL}/rest/v1/strategy_test_results`;
     const res = await fetch(url, {
       method: "POST",
       headers: {
@@ -918,7 +921,7 @@ async function storeResults(summary: TestSummary): Promise<void> {
         `${LOG_PREFIX} WARNING: Failed to store results (table may not exist): ${text}`
       );
     } else {
-      console.log(`${LOG_PREFIX} Results stored in strategy_test_runs`);
+      console.log(`${LOG_PREFIX} Results stored in strategy_test_results`);
     }
   } catch (err) {
     console.warn(`${LOG_PREFIX} WARNING: Could not store results:`, err);
