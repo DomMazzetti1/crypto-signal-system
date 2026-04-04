@@ -43,7 +43,7 @@ const SB_HEADERS = {
 // ── Constants ──────────────────────────────────────────────
 
 const RUN_GROUP_ID = "extended_2yr_v1";
-const BACKTEST_RUN_UUID = crypto.randomUUID();
+const BACKTEST_RUN_UUID = "a0000000-0000-4000-8000-000000000001";
 const BB_PERIOD = 20;
 const BB_STDEV = 2.0;
 const SQUEEZE_LOOKBACK = 120; // rolling 120-bar minimum per spec
