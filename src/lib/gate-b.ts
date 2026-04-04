@@ -22,17 +22,23 @@ export interface GateBInput {
 
 export interface GateBVariant {
   allow_counter_trend?: boolean;
-  sideways_sq_volume_mult?: number;
 }
 
 export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult {
   const {
     alertType, trend4h, btcRegime,
-    atr1h, markPrice, rrTp1, rsi, adx1h, volume, sma20Volume,
+    atr1h, markPrice, rrTp1, rsi,
   } = input;
   const lowerType = alertType.toLowerCase();
   const allowCounterTrend = variant?.allow_counter_trend ?? false;
-  const sidewaysSqVolMult = variant?.sideways_sq_volume_mult ?? 2.0;
+
+  // ── Sideways regime: block SQ_SHORT only ─────────────
+  if (btcRegime.toLowerCase() === "sideways" && lowerType.includes("sq_short")) {
+    return {
+      passed: false,
+      reason: "SQ_SHORT in SIDEWAYS regime has negative edge (PF 0.73, WR 37.7%) — blocked by regime filter",
+    };
+  }
 
   // ── Directional trend filter ──────────────────────────
   // Relaxed/data tiers bypass trend filter in data-collection mode
@@ -89,40 +95,6 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
         passed: false,
         reason: `MR_LONG in BEAR regime requires RSI < 25, got ${rsi.toFixed(1)}`,
       };
-    }
-  }
-
-  if (btcRegime === "bull") {
-    // BULL: allow MR_LONG, MR_SHORT freely
-    // SQ_SHORT: restrict to RSI > 75 and ADX < 15
-    if (lowerType.includes("sq_short")) {
-      if (rsi !== undefined && rsi <= 75) {
-        return {
-          passed: false,
-          reason: `SQ_SHORT in BULL regime requires RSI > 75, got ${rsi.toFixed(1)}`,
-        };
-      }
-      if (adx1h !== undefined && adx1h >= 15) {
-        return {
-          passed: false,
-          reason: `SQ_SHORT in BULL regime requires ADX < 15, got ${adx1h.toFixed(1)}`,
-        };
-      }
-    }
-  }
-
-  if (btcRegime === "sideways") {
-    // SIDEWAYS: allow MR_LONG, MR_SHORT freely (mean reversion preferred)
-    // SQ_SHORT: volume confirmation varies by tier/variant
-    if (lowerType.includes("sq_short") && volume !== undefined && sma20Volume !== undefined) {
-      const isRelaxedTier = lowerType.includes("relaxed") || lowerType.includes("data");
-      const volMult = isRelaxedTier ? 1.0 : sidewaysSqVolMult;
-      if (volume <= sma20Volume * volMult) {
-        return {
-          passed: false,
-          reason: `SQ_SHORT in SIDEWAYS regime requires volume > ${volMult}x SMA20 (${Math.round(volume)} <= ${Math.round(sma20Volume * volMult)})`,
-        };
-      }
     }
   }
 

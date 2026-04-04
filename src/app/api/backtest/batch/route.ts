@@ -23,24 +23,20 @@ const FORWARD_BARS = 48;
 
 interface VariantConfig {
   cooldown_hours: number;
-  sideways_sq_volume_mult: number;
   allow_counter_trend: boolean;
 }
 
 const VARIANT_CONFIGS: Record<string, VariantConfig> = {
   baseline: {
     cooldown_hours: 8,
-    sideways_sq_volume_mult: 2.0,
     allow_counter_trend: false,
   },
   relaxed: {
     cooldown_hours: 4,
-    sideways_sq_volume_mult: 1.5,
     allow_counter_trend: false,
   },
   aggressive: {
     cooldown_hours: 2,
-    sideways_sq_volume_mult: 1.2,
     allow_counter_trend: true,
   },
 };
@@ -830,7 +826,6 @@ export async function GET(request: NextRequest) {
           sma20Volume: indicators.sma20_volume,
         }, {
           allow_counter_trend: variantConfig.allow_counter_trend,
-          sideways_sq_volume_mult: variantConfig.sideways_sq_volume_mult,
         });
 
         if (!gateB.passed) {

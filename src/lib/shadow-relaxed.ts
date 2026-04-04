@@ -6,7 +6,6 @@
  *
  * Relaxed variant config (from backtest VARIANT_CONFIGS):
  *   cooldown_hours: 4
- *   sideways_sq_volume_mult: 1.5
  *   allow_counter_trend: false
  *
  * This module maintains its OWN cooldown state in Redis under a
@@ -20,8 +19,6 @@ import { GateBInput, GateBResult, runGateB } from "./gate-b";
 // ── Relaxed variant parameters ──────────────────────────
 // Must match VARIANT_CONFIGS.relaxed in backtest/batch/route.ts
 const RELAXED_COOLDOWN_TTL = 4 * 60 * 60; // 4 hours in seconds
-const RELAXED_SIDEWAYS_SQ_VOLUME_MULT = 1.5;
-
 // ── Shadow cooldown (separate Redis namespace) ──────────
 
 function shadowCooldownKey(symbol: string, alertType: string): string {
@@ -49,8 +46,7 @@ export async function setShadowCooldown(
 
 // ── Relaxed Gate B ──────────────────────────────────────
 // Delegates to the canonical runGateB with relaxed variant config.
-// Only the sideways SQ_SHORT volume multiplier differs from production (1.5x vs 2.0x).
 
 export function runGateBRelaxed(input: GateBInput): GateBResult {
-  return runGateB(input, { sideways_sq_volume_mult: RELAXED_SIDEWAYS_SQ_VOLUME_MULT });
+  return runGateB(input);
 }
