@@ -184,8 +184,17 @@ async function upsertCandles(
 ): Promise<void> {
   const url = `${SUPABASE_URL}/rest/v1/candle_cache?on_conflict=symbol,interval,start_time`;
 
-  for (let i = 0; i < candles.length; i += BATCH_UPSERT) {
-    const batch = candles.slice(i, i + BATCH_UPSERT).map((c) => ({
+  // Deduplicate by (symbol, interval, start_time) — Bybit can return
+  // overlapping candles at pagination boundaries.
+  const seen = new Map<string, Candle>();
+  for (const c of candles) {
+    const key = `${symbol}|${interval}|${c.startTime}`;
+    if (!seen.has(key)) seen.set(key, c);
+  }
+  const unique = Array.from(seen.values());
+
+  for (let i = 0; i < unique.length; i += BATCH_UPSERT) {
+    const batch = unique.slice(i, i + BATCH_UPSERT).map((c) => ({
       symbol,
       interval,
       start_time: new Date(c.startTime).toISOString(),
