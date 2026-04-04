@@ -1,0 +1,99 @@
+# Alchemy Signal System — Simulation Parameters
+## Paste this when requesting any trading simulation, Monte Carlo, or projection
+## Updated: April 3, 2026
+
+---
+
+## SYSTEM IDENTITY
+- **Strategy**: BB squeeze detection on Bybit USDT perpetual futures (SQ_SHORT)
+- **Universe**: 37 eligible symbols, ranging from SOL ($584M daily turnover) to PENGU ($10M)
+- **Signal frequency**: ~1 trade/day average, but signals cluster in bursts (0 for 5 days, then 15-30 in one day)
+- **TP Ladder**: 1.0/2.0/3.5R (tightened April 3 from 1.5/2.5/4.0R)
+
+## OUTCOME DISTRIBUTION (from 363 filtered backtest trades — OLD LADDER 1.5/2.5/4.0R)
+**NOTE**: These probabilities are from the old TP ladder. The new 1.0/2.0/3.5R ladder will shift outcomes:
+- TP1 at 1.0R will hit MORE often (closer target) → fewer losses, more partial wins
+- TP3 at 3.5R will hit LESS often → fewer full winners but they're still profitable
+- Net effect: higher win rate, lower average R per win — needs live data to calibrate
+
+Use these as APPROXIMATE probabilities until new ladder has 100+ resolved signals:
+- **47%** of trades: -1.0R (LOSS — hit stop loss) — likely LOWER with tighter TP1
+- **3%** of trades: 0R (EXPIRED — no TP, no SL within 48h)
+- **20%** of trades: +1.0R (WIN_PARTIAL — hit TP1 only) — likely HIGHER with closer target
+- **17%** of trades: +2.0R (WIN_PARTIAL — hit TP1+TP2)
+- **13%** of trades: +3.5R (WIN_FULL — hit TP1→TP2→TP3) — likely LOWER
+
+## POSITION SIZING
+- **Risk per trade**: 4% of current account equity (compounded)
+- **Burst dampener**: >5 signals/hour → risk drops to 2%
+- **Burst exposure cap**: Max 25% of equity per burst hour (at 4% = max 6 trades)
+- **Portfolio manager burst cap**: Max 3 new positions per burst (correlation-aware)
+- **Max concurrent positions**: 10 (exec engine enforced)
+- **Portfolio heat limit**: 80% of account equity
+
+## SIGNAL CLUSTERING (CRITICAL)
+Signals arrive in correlated bursts, NOT independently:
+- Burst days: 10-30 signals within 1-3 hours (correlated altcoin squeezes)
+- Quiet periods: 0-2 signals per day for 3-7 days
+- Portfolio manager now caps at 3 per burst AND rejects correlated signals
+- Within a burst: ~40% bad (70% loss rate), ~60% good (70% win rate)
+
+**LIVE VALIDATION**: Day 1 burst (7 trades, 8% risk) had 100% loss rate. Day 3 burst (April 2): 7 STRICT signals, ALL hit SL. Burst correlation is severe and real.
+
+## KILL SWITCH
+- 30% drawdown from weekly HWM: system pauses
+- 50% drawdown from peak: system halts, all positions closed
+- Any simulation path hitting 50% DD from peak is TERMINATED
+
+## TP LADDER (updated April 3)
+- **TP1**: 1.0R — Exchange-side reduce-only limit order (instant)
+- **TP2**: 2.0R — Local price monitoring (30s polling)
+- **TP3**: 3.5R — Local price monitoring (30s polling)
+- After TP1: SL moves to breakeven, remaining 67% is free option
+
+### Ladder R-Multiples
+| Resolution | Ladder R |
+|---|---|
+| ENTRY→SL | -1.0 |
+| ENTRY→TP1→SL | 0.33 |
+| ENTRY→TP1→TP2→SL | 0.99 |
+| ENTRY→TP1→TP2→TP3 | 2.52 |
+
+## FUNDING COSTS
+- Standard 8-hour: negligible (~$0.50-1.00)
+- Hourly funding coins: $3-5/hour, can destroy winning trades
+- BARD example: $61 in funding over 22 hours despite full TP run on price
+- Exec engine filters hostile hourly rates
+- Simulation: apply 0.1R average funding drag per trade
+
+## SLIPPAGE & FEES
+- Entry slippage: 0.05% (may be 0.1-0.3% on thin books)
+- Taker fee per side: 0.055%
+
+## SCALING CONSTRAINTS
+- $500-$5,000: 4% risk, full universe (37 symbols)
+- $5,000-$15,000: 5% risk, full universe
+- $15,000-$50,000: 3% risk, top 20 liquid only
+- $50,000+: 2% risk, top 10 liquid only
+
+## EDGE DECAY
+- Assume PF decays 10% per quarter
+- Starting PF: 2.0 (backtest baseline)
+- If PF < 1.3 for 60+ live signals → re-optimize
+
+## WHAT NOT TO SIMULATE
+- Do NOT use old 1.5/2.5/4.0R ladder values
+- Do NOT use the 3-day graded results as baseline
+- Do NOT assume independent trade outcomes — use burst clustering
+- Do NOT compound 4% indefinitely — apply scaling taper
+- Do NOT ignore kill switch — terminated paths stay terminated
+- Do NOT ignore funding costs — apply 0.1R drag
+
+## QUICK REFERENCE NUMBERS
+- Starting account: $1,500 (for projections)
+- Current live: ~$388 (started $980, low $388, 60% DD)
+- Risk per trade: 4% (~$15 at current equity)
+- TP ladder: 1.0/2.0/3.5R (changed April 3)
+- Portfolio manager burst cap: 3 (with correlation filter)
+- Backtest win rate: 47.4%, PF: 2.0, avg R: +0.74 (old ladder)
+- Live executed: ~15 resolved, 11% WR over 4 days (regime mismatch period)

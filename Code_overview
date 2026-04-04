@@ -1,0 +1,190 @@
+# Alchemy Signal System — Code Review Brief
+## Updated: April 3, 2026
+
+---
+
+## SYSTEM OVERVIEW
+BB squeeze detection strategy on Bybit USDT perpetual futures (SQ_SHORT). Detects Bollinger Band compression → expansion to the downside. Stack: Next.js 14, Supabase, Upstash Redis, Bybit V5, Anthropic Claude API (Haiku), Telegram. Deployed on Vercel with execution engine on Vultr VPS (45.77.33.123).
+
+**Signal System Repo**: `~/projects/crypto-signal-system` (GitHub: DomMazzetti1/crypto-signal-system)
+**Exec Engine Repo**: `~/projects/alchemy-exec` on Vultr VPS
+**Tools Repo**: `~/projects/alchemy-tools` (alchemy-change.sh, alchemy-deploy.sh)
+
+---
+
+## FILE STRUCTURE
+
+### Signal System — Critical Path
+```
+src/lib/pipeline.ts              — Main pipeline: gates, review, risk, enrichment, Telegram filters, webhook
+src/lib/signal-context.ts        — Signal enrichment: queries data collector for funding/OI/spread/BTC context
+src/lib/portfolio-manager.ts     — Burst cap 3, no dupes, correlation filter via 1h price moves
+src/app/api/scanner/run/route.ts — Scanner loop, burst ranking by composite_score, portfolio manager gate
+src/lib/regime.ts                — BTC regime detection (EMA200 + ADX)
+src/lib/risk-manager.ts          — Position cap, daily loss, heat, burst dampener
+src/lib/gate-b.ts                — Gate B: regime filter, stop distance, rr_tp1 >= 0.8 check, volume checks
+src/lib/scoring.ts               — Composite score (linear vol_ratio)
+src/lib/levels.ts                — Entry/Stop/TP level calculation (1.0/2.0/3.5R ladder)
+src/lib/scanner-signals.ts       — Squeeze detection (SQ_SHORT + SQ_LONG_DATA)
+src/lib/reviewer.ts              — Claude AI reviewer (Haiku model)
+src/lib/grading.ts               — 48h signal grading with dynamic ladder R from stored prices
+src/lib/exec-webhook.ts          — Fire-and-forget webhook to VPS
+src/lib/kill-switch.ts           — 30%/50% drawdown protection
+```
+
+### Signal System — API Routes
+```
+src/app/api/scanner/run/route.ts              — Hourly scanner cron (portfolio manager integrated)
+src/app/api/cron/grade/route.ts               — 48h grading cron (dynamic R from stored prices)
+src/app/api/research/run/route.ts             — Quant researcher: daily/weekly/on-demand with pre-computed breakdowns
+src/app/api/signals/external/exec-callback/   — Exec engine callbacks (SL/TP/expiry)
+src/app/api/debug/production-health/route.ts  — Health endpoint
+src/app/api/debug/missed-signals/route.ts     — Missed signal tracker
+src/app/api/dashboard/active-signals/route.ts — Primary signal dataset endpoint
+```
+
+### Execution Engine (alchemy-exec)
+```
+src/index.ts              — Express server: /webhook/signal, /health, /positions
+src/bybit.ts              — Bybit V5 API: orders, positions, funding, instruments
+src/order-manager.ts      — Order placement, TP1 limit order, handleSlHit (market-close-first)
+src/position-monitor.ts   — 30s polling, TP1 exchange-order detection, TP2/TP3 local
+src/reconciler.ts         — 5min reconciliation, orphan auto-close after 30min, ORPHAN_SKIP_SYMBOLS
+src/sizing.ts             — Position sizing from live wallet balance
+src/state.ts              — JSON state persistence, burst exposure tracking
+src/callback.ts           — Signal system notifications (SL/TP/expiry/rejected)
+src/telegram.ts           — Trade event notifications
+src/surveillance.ts       — 6 health checks every 5min, daily summary, data collector freshness
+src/data-collector.ts     — 44 symbol websocket, raw snapshots + derived metrics every 15min
+src/types.ts              — Config loaded from env vars
+```
+
+### Tools (alchemy-tools)
+```
+alchemy-change.sh   — 3-agent code change orchestration (planner/generator/evaluator via Claude Code)
+alchemy-deploy.sh   — Deploy to signal (Vercel) or exec (VPS) or both
+```
+
+---
+
+## RECENT CHANGES (April 3, 2026 — Major Build Day)
+
+### Agents Deployed
+- **Surveillance agent**: 6 health checks every 5min, daily summary persisted to file, data collector freshness
+- **Data collector**: Bybit websocket → raw snapshots + derived metrics (OI delta, BTC beta, correlation)
+- **Portfolio manager**: Burst cap 3, no duplicate symbols, correlation filter via 1h price moves
+- **Quant researcher**: Pre-computed breakdowns by OI/funding/correlation, enrichment insights in Telegram
+- **Signal enrichment**: 7 context columns attached to every signal from data collector
+
+### Critical Fixes
+- **handleSlHit race condition**: Market close FIRST, then cancel orders (was creating ghost positions)
+- **Grading R-multiples**: Now computed from stored prices per signal (was hardcoded to old 1.5/2.5/4.0)
+- **Gate B rr_tp1**: Threshold 1.5→0.8 to match tightened TP1 at 1.0R (was blocking ALL signals)
+- **Reconciler auto-close**: Orphan positions auto-closed after 30min, ORPHAN_SKIP_SYMBOLS env var
+- **ESM dotenv hoisting fix**: ORPHAN_SKIP reads env at call time, not import time
+- **Callback auth**: Trailing newline in Vercel env var caused all callbacks to 401
+- **btc_4h_change backfill**: 173/173 signals now have BTC 4h data (was 93% NULL)
+
+### TP Ladder Change
+- **1.0/2.0/3.5R** (from 1.5/2.5/4.0R) — capture profits before reversal
+- Gate B, grading, researcher all updated to match
+
+---
+
+## CURRENT CONFIGURATION
+
+### Vercel Environment Variables
+- MAX_RISK_PER_TRADE_PCT=0.04
+- BURST_RISK_PCT=0.02
+- MAX_STOP_DIST_PCT=0.05
+- MAX_CONCURRENT_POSITIONS=20
+- BEAR_BB_WIDTH_MAX=0.12
+- BEAR_VOL_DEAD_ZONE_LOW=2.0
+- BEAR_VOL_DEAD_ZONE_HIGH=2.5
+
+### VPS Environment Variables
+- BYBIT_BASE_URL=https://api.bybit.com (LIVE)
+- RISK_PER_TRADE_PCT=0.04
+- BURST_RISK_PCT=0.02
+- MAX_CONCURRENT_POSITIONS=10
+- PORTFOLIO_HEAT_LIMIT_PCT=0.80
+- BURST_EXPOSURE_CAP_PCT=0.25
+- ORPHAN_SKIP_SYMBOLS=NEARUSDT (remove after Yuri exits NEAR)
+
+---
+
+## KEY ARCHITECTURAL DECISIONS
+
+1. **TP Ladder: 1.0/2.0/3.5R** — Tightened from 1.5/2.5/4.0 after Yuri observed entries finding direction but TP1 being too far. TP1 at 1.0R banks profit earlier; remaining 67% is a free option.
+
+2. **Grading uses stored prices**: `computeLadderR` computes actual R-multiples from entry/stop/TP prices per signal — NOT hardcoded values. Handles mixed old (1.5R) and new (1.0R) ladder signals correctly.
+
+3. **Portfolio manager in scanner pipeline**: Runs between burst sort and pipeline execution. Accepts max 3 non-correlated signals per burst. Uses data collector's 1h price moves for correlation.
+
+4. **Signal enrichment at fire time**: Every signal gets funding_rate, OI_delta, spread, BTC_correlation, BTC_beta from the data collector's latest derived metrics. Stored with the decision for post-hoc analysis.
+
+5. **Reconciler auto-close orphans**: Bybit positions not tracked by exec engine get warning at 15min, auto-close at 30min. ORPHAN_SKIP_SYMBOLS env var protects manually-managed positions.
+
+6. **3-stage enrichment pipeline**: Data Collector → Derived Metrics → Signal Enrichment → Researcher pre-computed breakdowns. No direct agent-to-agent communication; all via Supabase.
+
+---
+
+## KNOWN ISSUES
+
+1. **Risk monitor not built**: Real-time portfolio correlation monitoring still pending.
+2. **Signal reviewer prompt not enriched**: Context columns collected but not yet fed into Haiku prompt.
+3. **TP2/TP3 still local monitoring**: 30s polling latency. TP1 is exchange-side.
+4. **Near-miss evaluation**: Uses event mode but production uses state mode.
+5. **Single VPS, no failover**: SL and TP1 are exchange-side; TP2/TP3 need VPS running.
+
+---
+
+## DEPLOYMENT
+
+### Signal System
+Auto-deploys on git push to master → Vercel.
+
+### Execution Engine
+```bash
+/Users/ydasilva/projects/alchemy-tools/alchemy-deploy.sh exec "commit message"
+# or manually:
+rsync -avz --exclude node_modules --exclude .git --exclude state --exclude logs \
+  ~/projects/alchemy-exec/ root@45.77.33.123:/root/projects/alchemy-exec/ \
+  && ssh root@45.77.33.123 "pm2 restart alchemy-exec"
+```
+
+### Code Changes (3-agent pattern)
+```bash
+/Users/ydasilva/projects/alchemy-tools/alchemy-change.sh signal "description"
+/Users/ydasilva/projects/alchemy-tools/alchemy-deploy.sh signal "commit message"
+```
+
+---
+
+## SUPABASE TABLES
+
+### Core
+- `decisions` — signals + 7 enrichment columns (signal_funding_rate, signal_oi_delta_1h_pct, etc.)
+- `production_signal_grades` — outcome_r + outcome_r_ladder (dynamic from stored prices)
+- `account_state` — kill switch HWM tracking
+
+### Market Data (from data collector)
+- `market_ticker_history` — raw 15-min snapshots (44 symbols, ~4200 rows/day)
+- `market_derived_metrics` — computed OI deltas, BTC beta, correlation, funding, spread
+
+### Agent Output
+- `research_reports` — researcher findings with enrichment_insights
+- `alchemy_todos` — task tracking with trigger conditions
+
+---
+
+## VPS PM2 PROCESSES
+```
+alchemy-exec    — Execution engine + position monitor + reconciler (auto-close)
+data-collector  — 44 symbols websocket + derived metrics every 15 min
+surveillance    — 5-min health checks + daily 9 AM summary
+```
+
+### VPS Crontab
+- Daily researcher: `0 13 * * *` (9 AM EDT)
+- Weekly researcher: `0 14 * * 0` (Sunday 10 AM EDT)

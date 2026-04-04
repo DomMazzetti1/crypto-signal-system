@@ -427,6 +427,34 @@ export async function runPipeline(
       (finalGateBReason ? ` reason=${finalGateBReason}` : "")
   );
 
+  // ── 8b. Compute scoring inputs + composite score ──────
+  const volRatio =
+    alert.sma20_volume && alert.sma20_volume > 0
+      ? (alert.volume ?? 0) / alert.sma20_volume
+      : null;
+  const entryDeviationPct =
+    markPrice > 0
+      ? Math.abs(levels.entry - markPrice) / markPrice
+      : null;
+
+  const scoreResult = computeCompositeScore({
+    atr14_1h: atr14_1h,
+    mark_price: markPrice,
+    vol_ratio: volRatio,
+    alert_type: alert.type,
+  });
+
+  // ── 8c. Pre-review score/volume gate ──────────────────
+  const preReviewBlocked =
+    (volRatio !== null && volRatio < 1.0) ||
+    scoreResult.composite_score < 20;
+
+  if (preReviewBlocked) {
+    console.log(
+      `[pipeline] ${alert.symbol} skipping Claude review: vol_ratio=${volRatio?.toFixed(2) ?? "null"} composite=${scoreResult.composite_score.toFixed(1)}`
+    );
+  }
+
   // ── 9. Claude review (only if deterministic passed) ───
   // Fetch enrichment context early so it's available for the reviewer
   const signalCtx = await getSignalContext(alert.symbol);
@@ -437,7 +465,7 @@ export async function runPipeline(
   let riskFlags: string[] = [];
   let reasoning: string | null = null;
 
-  if (decision === "LONG" || decision === "SHORT") {
+  if ((decision === "LONG" || decision === "SHORT") && !preReviewBlocked) {
     // Prompt version lookup disabled — migration 004 not applied
     // const { data: promptRow } = await supabase
     //   .from("prompt_versions").select("id")
@@ -531,22 +559,6 @@ export async function runPipeline(
     await setCooldown(alert.symbol, alert.type);
   }
 
-  // ── 9b. Compute scoring inputs + composite score ──────
-  const volRatio =
-    alert.sma20_volume && alert.sma20_volume > 0
-      ? (alert.volume ?? 0) / alert.sma20_volume
-      : null;
-  const entryDeviationPct =
-    markPrice > 0
-      ? Math.abs(levels.entry - markPrice) / markPrice
-      : null;
-
-  const scoreResult = computeCompositeScore({
-    atr14_1h: atr14_1h,
-    mark_price: markPrice,
-    vol_ratio: volRatio,
-    alert_type: alert.type,
-  });
 
   // Deterministic fallback when Claude API is unavailable — avoids "0/10, unknown" in Telegram
   if (!claudeConfidence && scoreResult) {

@@ -1,0 +1,183 @@
+# Alchemy Signal System — Project Knowledge Base
+**Last Updated:** April 3, 2026
+
+---
+
+## SYSTEM OVERVIEW
+
+The Alchemy Signal System (AlchemyPerpBot) is a fully automated crypto perpetual futures trading system that detects Bollinger Band squeeze-to-expansion patterns on Bybit USDT perps, evaluates signals through a multi-gate pipeline with market context enrichment, sends alerts via Telegram, and executes trades via a separate execution engine. 5 of 6 planned agents are deployed and running.
+
+**Owner:** Yuri (DomMazzetti1)
+**Strategy:** SQ_SHORT — BB squeeze detection, short-biased, active in bear/sideways regimes
+**Stack:** Next.js 14, Supabase (Postgres), Upstash Redis, Bybit V5 API, Anthropic Claude API, Telegram Bot API
+**Status:** LIVE on Bybit mainnet since March 31, 2026
+
+---
+
+## ARCHITECTURE
+
+### Signal System (Vercel)
+**Repo:** `~/projects/crypto-signal-system`
+**URL:** https://crypto-signal-system.vercel.app
+Hourly cron → 42 symbols → squeeze detection → multi-gate pipeline → signal enrichment → portfolio manager → Telegram + webhook
+
+### Execution Engine (Vultr VPS)
+**Repo:** `~/projects/alchemy-exec`
+**VPS:** 45.77.33.123, Express on port 3001, PM2
+Webhook → market orders on Bybit → TP ladder (33/33/34) → 30s monitoring → SL exchange-side, TP1 exchange-side limit, TP2/TP3 local
+
+### Agents (5 of 6 deployed)
+| Agent | Location | Status |
+|---|---|---|
+| Surveillance | VPS PM2 | ✅ 6 checks/5min, daily summary |
+| Data Collector | VPS PM2 | ✅ 44 symbols websocket, raw + derived metrics |
+| Signal Reviewer | Vercel pipeline | ✅ Haiku, enrichment context collected |
+| Portfolio Manager | Vercel pipeline | ✅ Burst cap 3, correlation filter |
+| Risk Monitor | — | 🔲 Not built |
+| Quant Researcher | Vercel serverless | ✅ Daily/weekly/on-demand, pre-computed breakdowns |
+
+---
+
+## SIGNAL PIPELINE FLOW (Updated April 3)
+
+```
+Scanner (hourly cron)
+  → Detect BB squeeze on 42 symbols
+  → Tier: STRICT / RELAXED / DATA_ONLY
+  → Burst rank by composite_score DESC
+  → Portfolio Manager: max 3, no dupes, correlation filter
+  → For each accepted candidate:
+    → Gate A: Data quality (advisory)
+    → Gate B: Regime + stop dist + volume + rr_tp1 >= 0.8
+    → Signal Enrichment: attach funding/OI/spread/BTC context from data collector
+    → Claude AI Review (Haiku): confidence + setup type
+    → Risk Manager: position cap, daily loss, heat, burst dampener
+    → Compute entry/stop/TP levels (1.0/2.0/3.5R)
+    → Store decision with 7 enrichment columns
+    → Telegram filter chain
+    → If passes: Telegram → webhook to exec engine
+  → Grade after 48h (dynamic ladder R from stored prices)
+```
+
+---
+
+## CURRENT CONFIGURATION
+
+### Account
+- Exchange: Bybit mainnet
+- Starting balance: $980 (March 31)
+- Current equity: ~$388 (April 3)
+- Risk per trade: 4% = ~$15 at current equity
+- Leverage: 25x cross margin
+
+### TP Ladder: 1.0/2.0/3.5R (tightened April 3)
+| Resolution Path | Ladder R |
+|---|---|
+| ENTRY→SL | -1.0 |
+| ENTRY→TP1→SL | 0.33 |
+| ENTRY→TP1→TP2→SL | 0.99 |
+| ENTRY→TP1→TP2→TP3 | 2.52 |
+
+### Risk Controls
+1. Max concurrent positions: 20 (Vercel) / 10 (VPS)
+2. Portfolio manager burst cap: 3 new per burst
+3. Daily loss circuit breaker: -5R
+4. Portfolio heat limit: 80%
+5. Burst dampener: >5 signals/hour → 2% risk
+6. Burst exposure cap: 25% equity per burst hour
+7. Confidence < 5 blocks RELAXED from Telegram
+8. Composite score < 20 blocks from Telegram
+9. Vol ratio < 1.0 blocks from Telegram
+10. Funding filter: blocks hostile hourly rates
+11. Correlation filter: rejects signals moving identically to open positions
+
+---
+
+## ENRICHMENT LAYER (NEW — April 3)
+
+Three-stage pipeline: Data Collector → Derived Metrics → Signal Enrichment → Researcher
+
+**Data Collector** (VPS, every 15 min): Per symbol — price, funding_rate, OI, spread, volume. Computes derived: OI delta 1h/4h, BTC beta, BTC correlation (Pearson), annualized funding, avg spread.
+
+**Signal Enrichment** (Vercel, per signal): Attaches 7 columns to every decision: signal_funding_rate, signal_funding_interval, signal_oi_delta_1h_pct, signal_oi_delta_4h_pct, signal_spread_pct, signal_btc_correlation, signal_btc_beta.
+
+**Researcher** (Vercel, daily/weekly): Pre-computes win rate breakdowns by OI direction, funding direction, BTC correlation. Sends computed analysis to Sonnet. Includes enrichment_insights in Telegram.
+
+---
+
+## EXEC ENGINE FEATURES
+
+### Reconciler Auto-Close (NEW April 3)
+- Detection #3 (15 min): Telegram WARNING
+- Detection #6 (30 min): AUTO-CLOSE via market order
+- `ORPHAN_SKIP_SYMBOLS` env var protects manually-managed positions
+- ESM fix: reads env at call time, not import time
+
+### handleSlHit Race Condition Fix (April 3)
+Old: cancelAllOrders → position goes naked → ghost
+New: closePositionMarket FIRST → then cancel orders → then record locally
+
+---
+
+## LIVE TRADING RESULTS (March 31 - April 3)
+
+### Day 1 (March 31 evening)
+- 8% risk, 7 consecutive SL hits during bear→sideways regime transition
+- Account: $980 → $543 (44.5% drawdown)
+
+### Day 2 (April 1-2)
+- 4% risk, safety filters deployed
+- First wins: BARD TP3 (full winner), CRV TP1
+- Account recovered: $543 → $896
+
+### Day 3 (April 2-3)
+- More SL hits, strategy struggling in current regime
+- 38 total signals (live + retrograded blocked), 4 wins (11% WR)
+- Account: $896 → ~$388
+
+### Key Finding
+Strategy is not working in this specific market regime. Both STRICT and RELAXED losing. Even score-87 signals hit SL. TP ladder tightened to 1.0R to capture profits before reversal.
+
+---
+
+## BACKTEST BLIND SPOTS (Discovered Live)
+
+1. Burst correlation: all stop out together (portfolio manager now prevents)
+2. Regime transition lag: 20 hours for EMA200 detection
+3. Funding costs: BARD ate $61 in hourly funding
+4. TP too far: Entries found direction but TP1 at 1.5R reversed (now 1.0R)
+5. Ghost positions: handleSlHit race condition (now fixed)
+6. Orphan positions: Reconciler only logged, didn't act (now auto-closes)
+
+---
+
+## MONITORING & OPERATIONS
+
+### VPS PM2 Processes
+- `alchemy-exec` — execution + monitoring + reconciler
+- `data-collector` — 44 symbols websocket + derived metrics
+- `surveillance` — 5-min checks + daily summary
+
+### VPS Crontab
+- Daily researcher: `0 13 * * *` (9 AM EDT)
+- Weekly researcher: `0 14 * * 0` (Sunday 10 AM EDT)
+
+### Code Change Orchestration
+```bash
+# 3-agent pattern (planner/generator/evaluator):
+~/projects/alchemy-tools/alchemy-change.sh signal|exec "description"
+~/projects/alchemy-tools/alchemy-deploy.sh signal|exec|both "commit message"
+```
+
+---
+
+## PENDING
+
+| Item | Status |
+|---|---|
+| Risk monitor agent | Not built — next priority |
+| Signal reviewer prompt enrichment | Context collected, not fed to Haiku yet |
+| TP2/TP3 exchange-side orders | Planned |
+| Loss streak circuit breaker | Needs 100+ live trades for validation |
+| SQ_LONG investigation | After 200+ graded DATA_ONLY signals |
+| Prop firm application | After 3+ month track record |
