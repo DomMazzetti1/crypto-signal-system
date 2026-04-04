@@ -1,5 +1,6 @@
 import { fetchKlines, Kline } from "./bybit";
 import { computeHTFTrend, ema, atr, adx, rollingMedian, TrendDirection } from "./ta";
+import { getSupabase } from "./supabase";
 
 export type BTCRegime = "bull" | "bear" | "sideways";
 export type AltEnvironment = "favorable" | "mixed" | "hostile";
@@ -13,15 +14,87 @@ export interface RegimeResult {
   btc_ema200: number;
   btc_ema200_slope: number;
   btc_close: number;
+  transition_zone: boolean;
+  regime_age_hours: number | null;
+  regime_weakening: boolean;
 }
 
 export async function classifyRegime(): Promise<RegimeResult> {
   const [btc4h, btc1d] = await Promise.all([
-    fetchKlines("BTCUSDT", "240", 50),
+    fetchKlines("BTCUSDT", "240", 60),
     fetchKlines("BTCUSDT", "D", 220),
   ]);
 
-  return classifyRegimeFromCandles(btc4h, btc1d);
+  const base = classifyRegimeFromCandles(btc4h, btc1d);
+
+  // ── transition_zone: BTC within 2% of EMA200 ──
+  let transition_zone = false;
+  let regime_age_hours: number | null = null;
+
+  try {
+    const supabase = getSupabase();
+    const { data: latestRow } = await supabase
+      .from("btc_regime_history")
+      .select("distance_to_ema200_pct, regime, date")
+      .order("date", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestRow) {
+      transition_zone = Math.abs(Number(latestRow.distance_to_ema200_pct)) < 2.0;
+
+      // ── regime_age_hours: find earliest consecutive day with same regime ──
+      const { data: history } = await supabase
+        .from("btc_regime_history")
+        .select("date, regime")
+        .order("date", { ascending: false })
+        .limit(90);
+
+      if (history && history.length > 0) {
+        const currentRegime = latestRow.regime;
+        let earliestDate = latestRow.date;
+        for (const row of history) {
+          if (row.regime === currentRegime) {
+            earliestDate = row.date;
+          } else {
+            break;
+          }
+        }
+        const startMs = new Date(earliestDate + "T00:00:00Z").getTime();
+        regime_age_hours = Math.round((Date.now() - startMs) / (1000 * 60 * 60));
+      }
+    } else {
+      // Fallback: compute inline from candle data
+      if (base.btc_ema200 > 0) {
+        const distPct = Math.abs(base.btc_close - base.btc_ema200) / base.btc_ema200 * 100;
+        transition_zone = distPct < 2.0;
+      }
+    }
+  } catch (err) {
+    console.warn("[regime] btc_regime_history query failed, using inline fallback:", err);
+    if (base.btc_ema200 > 0) {
+      const distPct = Math.abs(base.btc_close - base.btc_ema200) / base.btc_ema200 * 100;
+      transition_zone = distPct < 2.0;
+    }
+  }
+
+  // ── regime_weakening: 4H EMA50 slope vs daily regime ──
+  let regime_weakening = false;
+  try {
+    const closes4h = btc4h.map((c) => c.close);
+    const ema50_4h = ema(closes4h, 50);
+    const latest = ema50_4h[ema50_4h.length - 1];
+    const fiveBarsAgo = ema50_4h[ema50_4h.length - 6];
+    if (latest !== undefined && fiveBarsAgo !== undefined && fiveBarsAgo > 0) {
+      const slopePositive = latest > fiveBarsAgo;
+      if (slopePositive && base.btc_regime === "bear") regime_weakening = true;
+      if (!slopePositive && base.btc_regime === "bull") regime_weakening = true;
+    }
+  } catch {
+    // regime_weakening stays false
+  }
+
+  return { ...base, transition_zone, regime_age_hours, regime_weakening };
 }
 
 export function classifyRegimeFromCandles(
@@ -100,5 +173,8 @@ export function classifyRegimeFromCandles(
     btc_ema200: currentEma200 ?? 0,
     btc_ema200_slope: ema200Slope,
     btc_close: btcClose,
+    transition_zone: false,
+    regime_age_hours: null,
+    regime_weakening: false,
   };
 }

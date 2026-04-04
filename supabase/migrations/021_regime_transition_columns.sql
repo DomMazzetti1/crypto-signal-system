@@ -1,0 +1,3 @@
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS transition_zone BOOLEAN;
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS regime_weakening BOOLEAN;
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS regime_age_hours INTEGER;

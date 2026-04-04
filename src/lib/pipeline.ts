@@ -83,6 +83,9 @@ export interface PipelineResult {
     btc_4h_trend: string;
     btc_1d_trend: string;
     btc_atr_ratio: number;
+    transition_zone: boolean;
+    regime_weakening: boolean;
+    regime_age_hours: number | null;
   };
   htf_trend?: {
     trend_4h: string;
@@ -304,6 +307,11 @@ export async function runPipeline(
     };
   }
 
+  // ── 4a. Transition zone risk halving (effectiveRisk computed after levels) ──
+  if (regime.transition_zone) {
+    console.warn(`[pipeline] ${alert.symbol} TRANSITION_ZONE: BTC near EMA200, halving risk`);
+  }
+
   // ── 4b. BTC 4h price change (data collection) ─────────
   let btc4hChange: number | null = null;
   try {
@@ -327,6 +335,7 @@ export async function runPipeline(
 
   // ── 5. Price levels ───────────────────────────────────
   const levels = calculateLevels(markPrice, atr14_1h, direction);
+  const effectiveRisk = regime.transition_zone ? levels.risk * 0.5 : levels.risk;
 
   // ── 5b. Level validation ───────────────────────────────
   if (!levels.valid) {
@@ -608,7 +617,7 @@ export async function runPipeline(
   let riskCheckResult: RiskCheckResult | null = null;
   if (isTradeBefore) {
     try {
-      riskCheckResult = await runPreTradeRiskChecks(levels.risk);
+      riskCheckResult = await runPreTradeRiskChecks(effectiveRisk);
       if (!riskCheckResult.approved) {
         console.log(`[pipeline] ${alert.symbol} risk check rejected: ${riskCheckResult.reason}`);
         decision = "NO_TRADE";
@@ -650,7 +659,7 @@ export async function runPipeline(
     tp1_price: levels.tp1,
     tp2_price: levels.tp2,
     tp3_price: levels.tp3,
-    risk_amount: levels.risk,
+    risk_amount: effectiveRisk,
     rr_tp1: levels.rr_tp1,
     rr_tp2: levels.rr_tp2,
     rr_tp3: levels.rr_tp3,
@@ -711,6 +720,9 @@ export async function runPipeline(
     selected_for_execution: clusterData.selected_for_execution,
     suppressed_reason: clusterData.suppressed_reason,
     claude_confidence: claudeConfidence,
+    transition_zone: regime.transition_zone,
+    regime_weakening: regime.regime_weakening,
+    regime_age_hours: regime.regime_age_hours,
     hours_since_last_burst,
     last_burst_size,
     signal_funding_rate: signalCtx.funding_rate,
@@ -788,6 +800,13 @@ export async function runPipeline(
       } else {
         console.log(`[pipeline] ${alert.symbol} BEAR regime filter: PASSED (bb_width=${alert.bb_width?.toFixed(3)}, vol_ratio=${telegramVolRatio.toFixed(2)})`);
       }
+    }
+
+    // ── Regime weakening filter: block RELAXED signals when 4H diverges from daily regime ──
+    if (sendTelegram_ && isRelaxed && regime.regime_weakening) {
+      sendTelegram_ = false;
+      telegramBlockReason = "REGIME_WEAKENING";
+      console.log(`[pipeline] ${alert.symbol} RELAXED blocked: REGIME_WEAKENING (4H EMA50 slope diverges from ${regime.btc_regime} regime)`);
     }
 
     // ── RELAXED tier quality filter (additional checks on top of regime filter) ──
@@ -874,7 +893,7 @@ export async function runPipeline(
             tp1_price: levels.tp1,
             tp2_price: levels.tp2,
             tp3_price: levels.tp3,
-            risk_amount: levels.risk,
+            risk_amount: effectiveRisk,
             btc_regime: regime.btc_regime,
             composite_score: scoreResult.composite_score,
             alert_type: alert.type,
@@ -927,6 +946,9 @@ export async function runPipeline(
       btc_4h_trend: regime.btc_4h_trend,
       btc_1d_trend: regime.btc_1d_trend,
       btc_atr_ratio: regime.btc_atr_ratio,
+      transition_zone: regime.transition_zone,
+      regime_weakening: regime.regime_weakening,
+      regime_age_hours: regime.regime_age_hours,
     },
     htf_trend: {
       trend_4h: trend4h.trend,
