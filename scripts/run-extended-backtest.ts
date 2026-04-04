@@ -45,7 +45,7 @@ const SB_HEADERS = {
 const RUN_GROUP_ID = "extended_2yr_v1";
 const BB_PERIOD = 20;
 const BB_STDEV = 2.0;
-const SQUEEZE_LOOKBACK = 4320; // ~180 days of 1H candles
+const SQUEEZE_LOOKBACK = 120; // rolling 120-bar minimum per spec
 const ATR_PERIOD = 14;
 const COOLDOWN_HOURS = 8; // 8 candles at 1H
 const FORWARD_BARS = 48;
@@ -147,6 +147,25 @@ async function fetchRegimeMap(): Promise<Map<string, string>> {
 
   console.log(`${LOG_PREFIX} Loaded ${map.size} regime entries`);
   return map;
+}
+
+async function fetchExistingSignalTimes(symbol: string): Promise<Set<string>> {
+  const set = new Set<string>();
+  let offset = 0;
+  const LIMIT = 1000;
+
+  while (true) {
+    const url = `${SUPABASE_URL}/rest/v1/backtest_signals?backtest_run_id=eq.${RUN_GROUP_ID}&symbol=eq.${symbol}&select=candle_time&limit=${LIMIT}&offset=${offset}`;
+    const res = await fetch(url, { headers: SB_HEADERS });
+    if (!res.ok) break;
+    const rows: { candle_time: string }[] = await res.json();
+    if (rows.length === 0) break;
+    for (const r of rows) set.add(r.candle_time);
+    offset += rows.length;
+    if (rows.length < LIMIT) break;
+  }
+
+  return set;
 }
 
 // ── Indicators ─────────────────────────────────────────────
@@ -270,6 +289,7 @@ function processSymbol(
   const rows: SignalRow[] = [];
   let lastSignalIndex = -COOLDOWN_HOURS; // allow first signal
   let prevBbWidth: number | null = null;
+  let prevSqueezeMin: number | null = null; // tracks the rolling min when squeeze was active
   const bbWidthHistory: number[] = [];
 
   for (let i = BB_PERIOD - 1; i < candles.length; i++) {
@@ -290,14 +310,21 @@ function processSymbol(
 
     // 6-month rolling min of bb_width
     const lookbackSlice = bbWidthHistory.slice(-SQUEEZE_LOOKBACK);
-    const sixMonthMin = lookbackSlice.length > 0 ? Math.min(...lookbackSlice) : bbWidth;
+    const rollingMin = lookbackSlice.length > 0 ? Math.min(...lookbackSlice) : bbWidth;
+    const squeezeActive = bbWidth <= rollingMin;
     bbWidthHistory.push(bbWidth);
 
-    // SQ_SHORT detection: prev was at 6-month low, now expanding, close below lower BB
+    if (squeezeActive) {
+      prevSqueezeMin = rollingMin;
+    }
+
+    // SQ_SHORT detection:
+    // 1. squeeze_active was true on a recent bar (track via prevSqueezeMin)
+    // 2. BB width expands above 1.5x the squeeze minimum
+    // 3. price closes below lower BB
     if (
-      prevBbWidth != null &&
-      prevBbWidth <= sixMonthMin * 1.05 &&
-      bbWidth > prevBbWidth &&
+      prevSqueezeMin != null &&
+      bbWidth > prevSqueezeMin * 1.5 &&
       candles[i].close < lower
     ) {
       // Cooldown check
@@ -314,6 +341,7 @@ function processSymbol(
       }
 
       lastSignalIndex = i;
+      prevSqueezeMin = null; // reset squeeze state after firing
 
       // Entry, stop, TP levels
       const entry = candles[i].close;
@@ -398,6 +426,11 @@ function processSymbol(
       });
     }
 
+    // Reset squeeze state if width has expanded far beyond any recent squeeze
+    if (prevSqueezeMin != null && bbWidth > prevSqueezeMin * 3) {
+      prevSqueezeMin = null;
+    }
+
     prevBbWidth = bbWidth;
   }
 
@@ -469,20 +502,38 @@ async function main() {
     }
 
     const result = processSymbol(symbol, candles, regimeMap);
-    totalSignals += result.signals;
-    totalTp1 += result.tp1Count;
-    totalR += result.totalR;
-    allRows.push(...result.rows);
+    const existingTimes = await fetchExistingSignalTimes(symbol);
+    const newRows = result.rows.filter((r) => !existingTimes.has(r.candle_time));
+    const skipped = result.rows.length - newRows.length;
+    if (skipped > 0) {
+      console.log(`${LOG_PREFIX} ${symbol}: skipped ${skipped} existing signals`);
+    }
+    totalSignals += newRows.length;
+    totalTp1 += newRows.filter((r) => r.hit_tp1).length;
+    totalR += newRows.reduce((sum, r) => {
+      if (r.hit_tp3) return sum + 3.5;
+      if (r.hit_tp2) return sum + 2.0;
+      if (r.hit_tp1) return sum + 1.0;
+      if (r.hit_sl) return sum - 1.0;
+      return sum;
+    }, 0);
+    allRows.push(...newRows);
 
-    if (result.signals > 0) {
-      const wr = ((result.tp1Count / result.signals) * 100).toFixed(1);
-      const avgR = (result.totalR / result.signals).toFixed(2);
+    if (newRows.length > 0) {
+      const wr = ((newRows.filter((r) => r.hit_tp1).length / newRows.length) * 100).toFixed(1);
+      const avgR = (newRows.reduce((sum, r) => {
+        if (r.hit_tp3) return sum + 3.5;
+        if (r.hit_tp2) return sum + 2.0;
+        if (r.hit_tp1) return sum + 1.0;
+        if (r.hit_sl) return sum - 1.0;
+        return sum;
+      }, 0) / newRows.length).toFixed(2);
       console.log(
-        `${LOG_PREFIX} ${symbol}: ${candles.length} candles, ${result.signals} signals, WR=${wr}%, avgR=${avgR}`
+        `${LOG_PREFIX} ${symbol}: ${candles.length} candles, ${newRows.length} new signals (${skipped} skipped), WR=${wr}%, avgR=${avgR}`
       );
     } else {
       console.log(
-        `${LOG_PREFIX} ${symbol}: ${candles.length} candles, 0 signals`
+        `${LOG_PREFIX} ${symbol}: ${candles.length} candles, 0 new signals (${skipped} skipped)`
       );
     }
   }
