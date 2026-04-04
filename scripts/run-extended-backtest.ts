@@ -43,6 +43,7 @@ const SB_HEADERS = {
 // ── Constants ──────────────────────────────────────────────
 
 const RUN_GROUP_ID = "extended_2yr_v1";
+const BACKTEST_RUN_UUID = crypto.randomUUID();
 const BB_PERIOD = 20;
 const BB_STDEV = 2.0;
 const SQUEEZE_LOOKBACK = 120; // rolling 120-bar minimum per spec
@@ -153,7 +154,7 @@ async function fetchExistingSignalTimes(symbol: string): Promise<Set<string>> {
   const LIMIT = 1000;
 
   while (true) {
-    const url = `${SUPABASE_URL}/rest/v1/backtest_signals?backtest_run_id=eq.${RUN_GROUP_ID}&symbol=eq.${symbol}&select=candle_time&limit=${LIMIT}&offset=${offset}`;
+    const url = `${SUPABASE_URL}/rest/v1/backtest_signals?run_group_id=eq.${RUN_GROUP_ID}&symbol=eq.${symbol}&select=candle_time&limit=${LIMIT}&offset=${offset}`;
     const res = await fetch(url, { headers: SB_HEADERS });
     if (!res.ok) break;
     const rows: { candle_time: string }[] = await res.json();
@@ -251,6 +252,7 @@ function computeCompositeScore(
 
 interface SignalRow {
   backtest_run_id: string;
+  run_group_id: string;
   symbol: string;
   setup_type: string;
   candle_time: string;
@@ -400,7 +402,8 @@ function processSymbol(
       const compositeScore = computeCompositeScore(atrVal, entry, volRatio);
 
       rows.push({
-        backtest_run_id: RUN_GROUP_ID,
+        backtest_run_id: BACKTEST_RUN_UUID,
+        run_group_id: RUN_GROUP_ID,
         symbol,
         setup_type: "SQ_SHORT",
         candle_time: candles[i].start_time,
@@ -456,7 +459,7 @@ async function upsertSignals(rows: SignalRow[]): Promise<void> {
       method: "POST",
       headers: {
         ...SB_HEADERS,
-        Prefer: "return=minimal,resolution=merge-duplicates",
+        Prefer: "return=minimal",
       },
       body: JSON.stringify(batch),
     });
