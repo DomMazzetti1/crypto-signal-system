@@ -500,14 +500,28 @@ function processSymbolStrategy(
             : entry * (1 - config.sl_param!);
       }
 
-      // R calculation
-      const R = Math.abs(stop - entry);
+      // BB_SQUEEZE_REVERSAL override: swap the original signal's geometry
+      let R: number;
+      let tpLevels: number[];
+      if (config.entry_logic === "BB_SQUEEZE_REVERSAL") {
+        if (tradeDirection === "LONG") {
+          const shortR = upper - entry;
+          stop = entry - shortR;
+          R = shortR;
+          tpLevels = config.tp_levels.map((level) => entry + level * R);
+        } else {
+          const longR = entry - lower;
+          stop = entry + longR;
+          R = longR;
+          tpLevels = config.tp_levels.map((level) => entry - level * R);
+        }
+      } else {
+        R = Math.abs(stop - entry);
+        tpLevels = config.tp_levels.map((level) =>
+          tradeDirection === "SHORT" ? entry - level * R : entry + level * R
+        );
+      }
       if (R <= 0 || R / entry > config.max_stop_pct) continue;
-
-      // TP computation
-      const tpLevels = config.tp_levels.map((level) =>
-        tradeDirection === "SHORT" ? entry - level * R : entry + level * R
-      );
 
       // Grading
       const tpHits: boolean[] = config.tp_levels.map(() => false);
