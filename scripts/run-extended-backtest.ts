@@ -45,7 +45,7 @@ const SB_HEADERS = {
 const RUN_GROUP_ID = "extended_2yr_v1";
 const BB_PERIOD = 20;
 const BB_STDEV = 2.0;
-const BB_WIDTH_THRESHOLD = 0.04;
+const SQUEEZE_LOOKBACK = 4320; // ~180 days of 1H candles
 const ATR_PERIOD = 14;
 const COOLDOWN_HOURS = 8; // 8 candles at 1H
 const FORWARD_BARS = 48;
@@ -270,6 +270,7 @@ function processSymbol(
   const rows: SignalRow[] = [];
   let lastSignalIndex = -COOLDOWN_HOURS; // allow first signal
   let prevBbWidth: number | null = null;
+  const bbWidthHistory: number[] = [];
 
   for (let i = BB_PERIOD - 1; i < candles.length; i++) {
     // BB computation
@@ -287,11 +288,16 @@ function processSymbol(
     const volRatio =
       smaVol != null && smaVol > 0 ? candles[i].volume / smaVol : 0;
 
-    // SQ_SHORT detection: prev was in squeeze, now expanding downside
+    // 6-month rolling min of bb_width
+    const lookbackSlice = bbWidthHistory.slice(-SQUEEZE_LOOKBACK);
+    const sixMonthMin = lookbackSlice.length > 0 ? Math.min(...lookbackSlice) : bbWidth;
+    bbWidthHistory.push(bbWidth);
+
+    // SQ_SHORT detection: prev was at 6-month low, now expanding, close below lower BB
     if (
       prevBbWidth != null &&
-      prevBbWidth <= BB_WIDTH_THRESHOLD &&
-      bbWidth > BB_WIDTH_THRESHOLD &&
+      prevBbWidth <= sixMonthMin * 1.05 &&
+      bbWidth > prevBbWidth &&
       candles[i].close < lower
     ) {
       // Cooldown check
@@ -311,11 +317,12 @@ function processSymbol(
 
       // Entry, stop, TP levels
       const entry = candles[i].close;
-      const recentHighs = candles
-        .slice(Math.max(0, i - 4), i + 1)
-        .map((c) => c.high);
-      const stop = Math.max(...recentHighs) + atrVal * 0.5;
-      const R = stop - entry; // positive because stop > entry for short
+      const stop = upper;  // upper BB as stop loss
+      const R = stop - entry;
+      if (R <= 0) {
+        prevBbWidth = bbWidth;
+        continue; // skip degenerate case where entry >= upper_bb
+      }
       const tp1 = entry - 1.0 * R;
       const tp2 = entry - 2.0 * R;
       const tp3 = entry - 3.5 * R;
@@ -406,43 +413,32 @@ function processSymbol(
   return { signals: rows.length, tp1Count, totalR, rows };
 }
 
-// ── Delete + Insert ────────────────────────────────────────
+// ── Upsert ────────────────────────────────────────────────
 
-async function deleteOldRun(): Promise<void> {
-  const url = `${SUPABASE_URL}/rest/v1/backtest_signals?backtest_run_id=eq.${RUN_GROUP_ID}`;
-  const res = await fetch(url, {
-    method: "DELETE",
-    headers: { ...SB_HEADERS, Prefer: "return=minimal" },
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    console.error(`${LOG_PREFIX} DELETE old run error: ${text}`);
-  } else {
-    console.log(`${LOG_PREFIX} Deleted old run group '${RUN_GROUP_ID}'`);
-  }
-}
-
-async function insertSignals(rows: SignalRow[]): Promise<void> {
+async function upsertSignals(rows: SignalRow[]): Promise<void> {
   const url = `${SUPABASE_URL}/rest/v1/backtest_signals`;
-  const BATCH = 500;
+  const BATCH = 200;
 
   for (let i = 0; i < rows.length; i += BATCH) {
     const batch = rows.slice(i, i + BATCH);
     const res = await fetch(url, {
       method: "POST",
-      headers: { ...SB_HEADERS, Prefer: "return=minimal" },
+      headers: {
+        ...SB_HEADERS,
+        Prefer: "return=minimal,resolution=merge-duplicates",
+      },
       body: JSON.stringify(batch),
     });
 
     if (!res.ok) {
       const text = await res.text();
       console.error(
-        `${LOG_PREFIX} INSERT batch ${i / BATCH + 1} error: ${text}`
+        `${LOG_PREFIX} UPSERT batch ${Math.floor(i / BATCH) + 1} error: ${text}`
       );
     }
   }
 
-  console.log(`${LOG_PREFIX} Inserted ${rows.length} signals`);
+  console.log(`${LOG_PREFIX} Upserted ${rows.length} signals`);
 }
 
 // ── Main ───────────────────────────────────────────────────
@@ -457,10 +453,7 @@ async function main() {
   const symbols = await fetchSymbols();
   console.log(`${LOG_PREFIX} ${symbols.length} symbols found in candle_cache`);
 
-  // 3. Delete old run group
-  await deleteOldRun();
-
-  // 4. Process each symbol sequentially
+  // 3. Process each symbol sequentially
   let totalSignals = 0;
   let totalTp1 = 0;
   let totalR = 0;
@@ -496,7 +489,7 @@ async function main() {
 
   // 5. Batch insert
   if (allRows.length > 0) {
-    await insertSignals(allRows);
+    await upsertSignals(allRows);
   }
 
   // 6. Summary
