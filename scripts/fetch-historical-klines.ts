@@ -53,8 +53,10 @@ const ALL_SYMBOLS = [
 
 const BYBIT_BASE = "https://api.bybit.com/v5/market";
 const BATCH_UPSERT = 500;
-const RATE_LIMIT_MS = 100;
-const PAUSE_EVERY = 50;
+const RATE_LIMIT_MS = 200;
+const PAUSE_EVERY = 10;
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 5000;
 const PAUSE_MS = 2000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -112,24 +114,40 @@ async function fetchKlinesPage(
   endMs: number
 ): Promise<Candle[]> {
   const url = `${BYBIT_BASE}/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=200&end=${endMs}`;
-  const res = await fetch(url);
-  const json = await res.json();
 
-  if (json.retCode !== 0) {
-    throw new Error(
-      `Bybit kline error for ${symbol}: ${json.retMsg}`
-    );
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const res = await fetch(url);
+
+    if (res.status === 429) {
+      console.warn(`[fetch-klines] HTTP 429 for ${symbol}, retry ${attempt}/${MAX_RETRIES}...`);
+      await sleep(RETRY_DELAY_MS);
+      continue;
+    }
+
+    const json = await res.json();
+
+    if (json.retCode === 10006 || (json.retMsg && /rate limit/i.test(json.retMsg))) {
+      console.warn(`[fetch-klines] Rate limited (retCode=${json.retCode}) for ${symbol}, retry ${attempt}/${MAX_RETRIES}...`);
+      await sleep(RETRY_DELAY_MS);
+      continue;
+    }
+
+    if (json.retCode !== 0) {
+      throw new Error(`Bybit kline error for ${symbol}: ${json.retMsg}`);
+    }
+
+    const list: string[][] = json.result?.list ?? [];
+    return list.map((k: string[]) => ({
+      startTime: Number(k[0]),
+      open: parseFloat(k[1]),
+      high: parseFloat(k[2]),
+      low: parseFloat(k[3]),
+      close: parseFloat(k[4]),
+      volume: parseFloat(k[5]),
+    }));
   }
 
-  const list: string[][] = json.result?.list ?? [];
-  return list.map((k: string[]) => ({
-    startTime: Number(k[0]),
-    open: parseFloat(k[1]),
-    high: parseFloat(k[2]),
-    low: parseFloat(k[3]),
-    close: parseFloat(k[4]),
-    volume: parseFloat(k[5]),
-  }));
+  throw new Error(`[fetch-klines] Rate limit retries exhausted for ${symbol}`);
 }
 
 // ── Paginate backwards to fetch all klines ────────────────
@@ -227,27 +245,42 @@ async function main() {
   );
 
   let totalCandles = 0;
+  const failedSymbols: string[] = [];
 
   for (const symbol of symbols) {
-    const latestMs = await getLatestStoredTime(symbol, interval);
-    const latestStr = latestMs
-      ? new Date(latestMs).toISOString().slice(0, 16)
-      : "none";
-    console.log(`[fetch-klines] Fetching ${symbol} (latest stored: ${latestStr})`);
+    try {
+      const latestMs = await getLatestStoredTime(symbol, interval);
+      const latestStr = latestMs
+        ? new Date(latestMs).toISOString().slice(0, 16)
+        : "none";
+      console.log(`[fetch-klines] Fetching ${symbol} (latest stored: ${latestStr})`);
 
-    const candles = await fetchAllKlines(symbol, interval, years, latestMs);
+      const candles = await fetchAllKlines(symbol, interval, years, latestMs);
 
-    if (candles.length > 0) {
-      await upsertCandles(symbol, interval, candles);
+      if (candles.length > 0) {
+        await upsertCandles(symbol, interval, candles);
+      }
+
+      totalCandles += candles.length;
+      console.log(`[fetch-klines] ${symbol}: ${candles.length} candles upserted`);
+    } catch (err) {
+      console.error(`[fetch-klines] ${symbol} failed:`, err);
+      failedSymbols.push(symbol);
     }
-
-    totalCandles += candles.length;
-    console.log(`[fetch-klines] ${symbol}: ${candles.length} candles upserted`);
   }
 
   console.log(
     `[fetch-klines] Done. ${totalCandles} candles across ${symbols.length} symbols`
   );
+
+  if (failedSymbols.length > 0) {
+    console.error(
+      `[fetch-klines] Failed symbols (${failedSymbols.length}): ${failedSymbols.join(",")}`
+    );
+    console.error(
+      `[fetch-klines] Re-run with: --symbols ${failedSymbols.join(",")}`
+    );
+  }
 }
 
 main().catch((err) => {
