@@ -4,7 +4,6 @@
  * time horizons, and simulates 4 exit strategies.
  *
  * Usage: npx tsx scripts/analyze-mfe.ts
- *        npx tsx scripts/analyze-mfe.ts --run-group extended_2yr_v1
  */
 
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
@@ -43,19 +42,6 @@ const SB_HEADERS = {
 
 const LOG_PREFIX = "[analyze-mfe]";
 
-// ── CLI arg parsing ───────────────────────────────────────
-
-function parseArgs(): { runGroup: string | null } {
-  const args = process.argv.slice(2);
-  let runGroup: string | null = null;
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--run-group" && args[i + 1]) {
-      runGroup = args[++i];
-    }
-  }
-  return { runGroup };
-}
-
 // ── Types ─────────────────────────────────────────────────
 
 interface BacktestSignal {
@@ -93,8 +79,6 @@ const HORIZONS = [
   { label: "1h", bars: 4 },
   { label: "2h", bars: 8 },
   { label: "4h", bars: 16 },
-  { label: "8h", bars: 32 },
-  { label: "24h", bars: 96 },
 ] as const;
 
 interface MfeResult {
@@ -105,17 +89,24 @@ interface MfeResult {
   stop_loss: number;
   risk_per_unit: number;
   regime_production: string;
+  // Prices at intervals
+  price_15m: number | null;
+  price_30m: number | null;
+  price_1h: number | null;
+  price_2h: number | null;
+  price_4h: number | null;
+  // MFE/MAE at intervals (in R)
   mfe_15m: number | null; mae_15m: number | null;
   mfe_30m: number | null; mae_30m: number | null;
   mfe_1h: number | null;  mae_1h: number | null;
   mfe_2h: number | null;  mae_2h: number | null;
   mfe_4h: number | null;  mae_4h: number | null;
-  mfe_8h: number | null;  mae_8h: number | null;
-  mfe_24h: number | null; mae_24h: number | null;
+  // Time to R thresholds
   time_to_03r_min: number | null;
   time_to_05r_min: number | null;
   time_to_07r_min: number | null;
   time_to_1r_min: number | null;
+  // Strategy R outcomes
   strategy_a_r: number;
   strategy_b_r: number;
   strategy_c_r: number;
@@ -124,19 +115,13 @@ interface MfeResult {
 
 // ── Data Fetching ─────────────────────────────────────────
 
-async function fetchSignals(runGroup: string | null): Promise<BacktestSignal[]> {
+async function fetchSignals(): Promise<BacktestSignal[]> {
   const all: BacktestSignal[] = [];
   let offset = 0;
   const LIMIT = 1000;
 
   while (true) {
-    let url = `${SUPABASE_URL}/rest/v1/backtest_signals?select=id,symbol,setup_type,candle_time,entry_price,stop_loss,tp1,tp2,tp3,hit_tp1,hit_tp2,hit_tp3,hit_sl,max_favorable,max_adverse,regime_production,backtest_run_id&order=candle_time.asc&limit=${LIMIT}&offset=${offset}`;
-    if (runGroup) {
-      url += `&backtest_run_id=eq.${runGroup}`;
-    } else {
-      // Default: extended_2yr_v1 + original signals (NULL run_id)
-      url += `&or=(backtest_run_id.eq.extended_2yr_v1,backtest_run_id.is.null)`;
-    }
+    const url = `${SUPABASE_URL}/rest/v1/backtest_signals?select=id,symbol,setup_type,candle_time,entry_price,stop_loss,tp1,tp2,tp3,hit_tp1,hit_tp2,hit_tp3,hit_sl,max_favorable,max_adverse,regime_production,backtest_run_id&order=candle_time.asc&limit=${LIMIT}&offset=${offset}&hit_tp1=not.is.null`;
     const res = await fetch(url, { headers: SB_HEADERS });
     if (!res.ok) {
       const text = await res.text();
@@ -217,14 +202,16 @@ function computeMfeAtHorizons(
   entry: number,
   riskPerUnit: number,
   candles: Candle[]
-): { mfe: (number | null)[]; mae: (number | null)[] } {
+): { mfe: (number | null)[]; mae: (number | null)[]; prices: (number | null)[] } {
   const mfe: (number | null)[] = [];
   const mae: (number | null)[] = [];
+  const prices: (number | null)[] = [];
 
   for (const h of HORIZONS) {
     if (candles.length < h.bars) {
       mfe.push(null);
       mae.push(null);
+      prices.push(null);
       continue;
     }
     let maxFav = 0;
@@ -237,9 +224,10 @@ function computeMfeAtHorizons(
     }
     mfe.push(Math.round(maxFav * 1000) / 1000);
     mae.push(Math.round(maxAdv * 1000) / 1000);
+    prices.push(candles[h.bars - 1].close);
   }
 
-  return { mfe, mae };
+  return { mfe, mae, prices };
 }
 
 const R_THRESHOLDS = [0.3, 0.5, 0.7, 1.0] as const;
@@ -271,6 +259,14 @@ function computeTimeToR(
 }
 
 // ── Exit Strategy Simulation ─────────────────────────────
+
+function strategyAFromFlags(sig: BacktestSignal): number {
+  if (sig.hit_tp1 && sig.hit_tp2 && sig.hit_tp3) return 2.38;
+  if (sig.hit_tp1 && sig.hit_tp2) return 1.17;
+  if (sig.hit_tp1) return 0.5;
+  if (sig.hit_sl && !sig.hit_tp1) return -1.0;
+  return 0;
+}
 
 interface TpLevel {
   pct: number;
@@ -327,18 +323,13 @@ function simLadder(
   return Math.round(realizedR * 1000) / 1000;
 }
 
-function simulateStrategies(
+function simulateStrategiesBCD(
   entry: number,
   stop: number,
   riskPerUnit: number,
   candles: Candle[]
-): { a: number; b: number; c: number; d: number } {
+): { b: number; c: number; d: number } {
   return {
-    a: simLadder(entry, stop, riskPerUnit, candles, [
-      { pct: 0.33, targetR: 1.0 },
-      { pct: 0.33, targetR: 2.0 },
-      { pct: 0.34, targetR: 3.5 },
-    ]),
     b: simLadder(entry, stop, riskPerUnit, candles, [
       { pct: 0.50, targetR: 1.0 },
       { pct: 0.25, targetR: 2.0 },
@@ -445,10 +436,10 @@ function writeCsv(results: MfeResult[]): void {
   const headers = [
     "signal_id", "symbol", "candle_time", "entry_price", "stop_loss",
     "risk_per_unit", "regime_production",
+    "price_15m", "price_30m", "price_1h", "price_2h", "price_4h",
     "mfe_15m", "mae_15m", "mfe_30m", "mae_30m",
     "mfe_1h", "mae_1h", "mfe_2h", "mae_2h",
-    "mfe_4h", "mae_4h", "mfe_8h", "mae_8h",
-    "mfe_24h", "mae_24h",
+    "mfe_4h", "mae_4h",
     "time_to_03r_min", "time_to_05r_min", "time_to_07r_min", "time_to_1r_min",
     "strategy_a_r", "strategy_b_r", "strategy_c_r", "strategy_d_r",
   ];
@@ -458,10 +449,10 @@ function writeCsv(results: MfeResult[]): void {
     lines.push([
       r.signal_id, r.symbol, r.candle_time, r.entry_price, r.stop_loss,
       r.risk_per_unit, r.regime_production,
+      r.price_15m ?? "", r.price_30m ?? "", r.price_1h ?? "", r.price_2h ?? "", r.price_4h ?? "",
       r.mfe_15m ?? "", r.mae_15m ?? "", r.mfe_30m ?? "", r.mae_30m ?? "",
       r.mfe_1h ?? "", r.mae_1h ?? "", r.mfe_2h ?? "", r.mae_2h ?? "",
-      r.mfe_4h ?? "", r.mae_4h ?? "", r.mfe_8h ?? "", r.mae_8h ?? "",
-      r.mfe_24h ?? "", r.mae_24h ?? "",
+      r.mfe_4h ?? "", r.mae_4h ?? "",
       r.time_to_03r_min ?? "", r.time_to_05r_min ?? "", r.time_to_07r_min ?? "", r.time_to_1r_min ?? "",
       r.strategy_a_r, r.strategy_b_r, r.strategy_c_r, r.strategy_d_r,
     ].join(","));
@@ -475,28 +466,41 @@ function writeCsv(results: MfeResult[]): void {
 // ── Upsert to Supabase ──────────────────────────────────
 
 async function upsertMfe(results: MfeResult[]): Promise<void> {
-  const url = `${SUPABASE_URL}/rest/v1/backtest_mfe`;
+  const url = `${SUPABASE_URL}/rest/v1/signal_mfe_analysis`;
   const BATCH = 200;
 
   for (let i = 0; i < results.length; i += BATCH) {
     const batch = results.slice(i, i + BATCH).map((r) => ({
       signal_id: r.signal_id,
+      symbol: r.symbol,
+      candle_time: r.candle_time,
+      entry_price: r.entry_price,
+      stop_loss: r.stop_loss,
+      risk_per_unit: r.risk_per_unit,
+      regime_production: r.regime_production,
+      price_15m: r.price_15m,
+      price_30m: r.price_30m,
+      price_1h: r.price_1h,
+      price_2h: r.price_2h,
+      price_4h: r.price_4h,
       mfe_15m: r.mfe_15m,
-      mfe_30m: r.mfe_30m,
-      mfe_1h: r.mfe_1h,
-      mfe_2h: r.mfe_2h,
-      mfe_4h: r.mfe_4h,
-      mfe_8h: r.mfe_8h,
       mae_15m: r.mae_15m,
+      mfe_30m: r.mfe_30m,
+      mae_30m: r.mae_30m,
+      mfe_1h: r.mfe_1h,
       mae_1h: r.mae_1h,
+      mfe_2h: r.mfe_2h,
+      mae_2h: r.mae_2h,
+      mfe_4h: r.mfe_4h,
+      mae_4h: r.mae_4h,
       time_to_03r_min: r.time_to_03r_min,
       time_to_05r_min: r.time_to_05r_min,
+      time_to_07r_min: r.time_to_07r_min,
       time_to_1r_min: r.time_to_1r_min,
       strategy_a_r: r.strategy_a_r,
       strategy_b_r: r.strategy_b_r,
       strategy_c_r: r.strategy_c_r,
       strategy_d_r: r.strategy_d_r,
-      regime_production: r.regime_production,
     }));
 
     const res = await fetch(url, {
@@ -514,19 +518,18 @@ async function upsertMfe(results: MfeResult[]): Promise<void> {
     }
   }
 
-  console.log(`${LOG_PREFIX} Upserted ${results.length} rows to backtest_mfe`);
+  console.log(`${LOG_PREFIX} Upserted ${results.length} rows to signal_mfe_analysis`);
 }
 
 // ── Main ─────────────────────────────────────────────────
 
 async function main() {
   const t0 = Date.now();
-  const { runGroup } = parseArgs();
 
-  // 1. Fetch all backtest signals
-  const signals = await fetchSignals(runGroup);
+  // 1. Fetch all backtest signals with hit_tp1 IS NOT NULL
+  const signals = await fetchSignals();
   console.log(
-    `${LOG_PREFIX} Loaded ${signals.length} signals${runGroup ? ` (run_group=${runGroup})` : ""}`
+    `${LOG_PREFIX} Loaded ${signals.length} signals (hit_tp1 IS NOT NULL)`
   );
 
   if (signals.length === 0) {
@@ -593,14 +596,17 @@ async function main() {
         continue;
       }
 
-      // MFE/MAE at horizons
-      const { mfe, mae } = computeMfeAtHorizons(sig.entry_price, R, candles);
+      // MFE/MAE at horizons + prices
+      const { mfe, mae, prices } = computeMfeAtHorizons(sig.entry_price, R, candles);
 
       // Time-to-R thresholds
       const timeToR = computeTimeToR(sig.entry_price, R, entryTimeMs, candles);
 
-      // Strategy simulation
-      const strats = simulateStrategies(sig.entry_price, sig.stop_loss, R, candles);
+      // Strategy A from hit flags
+      const stratA = strategyAFromFlags(sig);
+
+      // Strategies B/C/D from 15-min bar simulation
+      const stratBCD = simulateStrategiesBCD(sig.entry_price, sig.stop_loss, R, candles);
 
       results.push({
         signal_id: sig.id,
@@ -610,21 +616,24 @@ async function main() {
         stop_loss: sig.stop_loss,
         risk_per_unit: R,
         regime_production: sig.regime_production ?? "unknown",
+        price_15m: prices[0],
+        price_30m: prices[1],
+        price_1h: prices[2],
+        price_2h: prices[3],
+        price_4h: prices[4],
         mfe_15m: mfe[0], mae_15m: mae[0],
         mfe_30m: mfe[1], mae_30m: mae[1],
         mfe_1h: mfe[2],  mae_1h: mae[2],
         mfe_2h: mfe[3],  mae_2h: mae[3],
         mfe_4h: mfe[4],  mae_4h: mae[4],
-        mfe_8h: mfe[5],  mae_8h: mae[5],
-        mfe_24h: mfe[6], mae_24h: mae[6],
         time_to_03r_min: timeToR[0],
         time_to_05r_min: timeToR[1],
         time_to_07r_min: timeToR[2],
         time_to_1r_min: timeToR[3],
-        strategy_a_r: strats.a,
-        strategy_b_r: strats.b,
-        strategy_c_r: strats.c,
-        strategy_d_r: strats.d,
+        strategy_a_r: stratA,
+        strategy_b_r: stratBCD.b,
+        strategy_c_r: stratBCD.c,
+        strategy_d_r: stratBCD.d,
       });
     }
   }
@@ -638,7 +647,7 @@ async function main() {
     writeCsv(results);
   }
 
-  // 4b. Upsert to backtest_mfe
+  // 4b. Upsert to signal_mfe_analysis
   if (results.length > 0) {
     await upsertMfe(results);
   }
