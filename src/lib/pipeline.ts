@@ -884,25 +884,29 @@ export async function runPipeline(
         });
         telegramSent = await sendTelegram(msg);
         if (telegramSent) {
-          // Send to execution engine (non-blocking, fire-and-forget)
-          sendToExecutionEngine({
-            symbol: alert.symbol,
-            direction: direction.toUpperCase() as 'LONG' | 'SHORT',
-            entry_price: levels.entry,
-            stop_price: levels.stop,
-            tp1_price: levels.tp1,
-            tp2_price: levels.tp2,
-            tp3_price: levels.tp3,
-            risk_amount: effectiveRisk,
-            btc_regime: regime.btc_regime,
-            composite_score: scoreResult.composite_score,
-            alert_type: alert.type,
-            confidence: claudeConfidence ?? 0,
-            decision_id: decisionId ?? '',
-            timestamp: new Date().toISOString(),
-          }).catch(err => {
-            console.error('[pipeline] Exec webhook fire-and-forget error:', err);
-          });
+          if (clusterData.selected_for_execution) {
+            // Send to execution engine (non-blocking, fire-and-forget)
+            sendToExecutionEngine({
+              symbol: alert.symbol,
+              direction: direction.toUpperCase() as 'LONG' | 'SHORT',
+              entry_price: levels.entry,
+              stop_price: levels.stop,
+              tp1_price: levels.tp1,
+              tp2_price: levels.tp2,
+              tp3_price: levels.tp3,
+              risk_amount: effectiveRisk,
+              btc_regime: regime.btc_regime,
+              composite_score: scoreResult.composite_score,
+              alert_type: alert.type,
+              confidence: claudeConfidence ?? 0,
+              decision_id: decisionId ?? '',
+              timestamp: new Date().toISOString(),
+            }).catch(err => {
+              console.error('[pipeline] Exec webhook fire-and-forget error:', err);
+            });
+          } else {
+            console.log(`[pipeline] ${alert.symbol} webhook skipped: selected_for_execution=false`);
+          }
 
           // Set repeat suppression key after successful send
           const redis = getRedis();
