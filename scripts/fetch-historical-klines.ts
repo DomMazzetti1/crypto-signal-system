@@ -54,10 +54,10 @@ const ALL_SYMBOLS = [
 const BYBIT_BASE = "https://api.bybit.com/v5/market";
 const BATCH_UPSERT = 500;
 const RATE_LIMIT_MS = 200;
-const PAUSE_EVERY = 10;
+const PAUSE_EVERY = 20;
 const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 5000;
-const PAUSE_MS = 2000;
+const RETRY_DELAY_MS = 10000;
+const PAUSE_MS = 3000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
