@@ -96,6 +96,7 @@ interface StrategyConfig {
   symbols: string[];
   interval: number;
   sr_filter: "none" | "block" | "grade";
+  ms_filter: "none" | "grade";
 }
 
 interface Trade {
@@ -118,6 +119,7 @@ interface Trade {
   max_adverse_r: number;
   sr_obstacle: boolean;
   sr_distance_pct: number;
+  ms_structure: "DOWNTREND" | "UPTREND" | "RANGE";
 }
 
 interface TestSummary {
@@ -183,6 +185,7 @@ function parseArgs(): StrategyConfig {
   raw.symbols = symStr === "all" ? SCANNER_SYMBOLS : symStr.split(",").map((s: string) => s.trim());
   raw.interval = getArg(args, "interval") ? Number(getArg(args, "interval")) : 60;
   raw.sr_filter = getArg(args, "sr-filter") ?? "none";
+  raw.ms_filter = getArg(args, "ms-filter") ?? "none";
 
   return normalizeConfig(raw);
 }
@@ -213,6 +216,9 @@ function normalizeConfig(raw: Record<string, unknown>): StrategyConfig {
     sr_filter: (["none", "block", "grade"].includes(String(raw.sr_filter ?? "none"))
       ? String(raw.sr_filter)
       : "none") as StrategyConfig["sr_filter"],
+    ms_filter: (["none", "grade"].includes(String(raw.ms_filter ?? "none"))
+      ? String(raw.ms_filter)
+      : "none") as StrategyConfig["ms_filter"],
   };
 
   // Validate tp_levels and tp_split lengths match
@@ -496,6 +502,81 @@ function findNearestSR(
   }
 
   return best;
+}
+
+// ── Market Structure Detection ─────────────────────────────
+
+const MS_PIVOT_LOOKBACK = 5;
+
+interface MarketStructure {
+  structure: "DOWNTREND" | "UPTREND" | "RANGE";
+  last_swing_high: number;
+  last_swing_low: number;
+}
+
+/**
+ * Detect market structure at a given bar index by finding the last 4 swing points
+ * (alternating highs and lows) using 5-bar pivot detection.
+ * Returns DOWNTREND (lower highs + lower lows), UPTREND (higher highs + higher lows), or RANGE.
+ */
+function detectMarketStructure(
+  candles: Candle[],
+  index: number,
+  lookback: number = 50
+): MarketStructure {
+  const start = Math.max(MS_PIVOT_LOOKBACK, index - lookback);
+  // Only consider confirmed pivots (need MS_PIVOT_LOOKBACK bars after the pivot)
+  const end = index - MS_PIVOT_LOOKBACK;
+
+  const swingHighs: { price: number; idx: number }[] = [];
+  const swingLows: { price: number; idx: number }[] = [];
+
+  for (let j = start; j <= end; j++) {
+    // Swing high: high > high of 5 bars on each side
+    let isHigh = true;
+    for (let k = j - MS_PIVOT_LOOKBACK; k <= j + MS_PIVOT_LOOKBACK; k++) {
+      if (k === j || k < 0 || k >= candles.length) continue;
+      if (candles[k].high >= candles[j].high) { isHigh = false; break; }
+    }
+    if (isHigh) swingHighs.push({ price: candles[j].high, idx: j });
+
+    // Swing low: low < low of 5 bars on each side
+    let isLow = true;
+    for (let k = j - MS_PIVOT_LOOKBACK; k <= j + MS_PIVOT_LOOKBACK; k++) {
+      if (k === j || k < 0 || k >= candles.length) continue;
+      if (candles[k].low <= candles[j].low) { isLow = false; break; }
+    }
+    if (isLow) swingLows.push({ price: candles[j].low, idx: j });
+  }
+
+  const lastHigh = swingHighs.length > 0 ? swingHighs[swingHighs.length - 1].price : 0;
+  const lastLow = swingLows.length > 0 ? swingLows[swingLows.length - 1].price : 0;
+
+  // Need at least 2 swing highs and 2 swing lows to classify
+  if (swingHighs.length < 2 || swingLows.length < 2) {
+    return { structure: "RANGE", last_swing_high: lastHigh, last_swing_low: lastLow };
+  }
+
+  const prevHigh = swingHighs[swingHighs.length - 2].price;
+  const currHigh = swingHighs[swingHighs.length - 1].price;
+  const prevLow = swingLows[swingLows.length - 2].price;
+  const currLow = swingLows[swingLows.length - 1].price;
+
+  const lowerHighs = currHigh < prevHigh;
+  const lowerLows = currLow < prevLow;
+  const higherHighs = currHigh > prevHigh;
+  const higherLows = currLow > prevLow;
+
+  let structure: "DOWNTREND" | "UPTREND" | "RANGE";
+  if (lowerHighs && lowerLows) {
+    structure = "DOWNTREND";
+  } else if (higherHighs && higherLows) {
+    structure = "UPTREND";
+  } else {
+    structure = "RANGE";
+  }
+
+  return { structure, last_swing_high: lastHigh, last_swing_low: lastLow };
 }
 
 // ── Core Engine ────────────────────────────────────────────
@@ -802,6 +883,9 @@ function processSymbolStrategy(
         max_adverse_r: Math.round(maxAdverse * 1000) / 1000,
         sr_obstacle: srObstacle,
         sr_distance_pct: srDistancePct,
+        ms_structure: config.ms_filter !== "none"
+          ? detectMarketStructure(candles, i).structure
+          : "RANGE",
       });
     }
 
@@ -987,7 +1071,7 @@ function printSummary(summary: TestSummary, trades: Trade[] = []): void {
     `TP Levels: [${c.tp_levels.join(", ")}] | Split: [${c.tp_split.join(", ")}]`
   );
   console.log(
-    `Regime Filter: [${c.regime_filter.join(", ")}] | Interval: ${c.interval}m | S/R: ${c.sr_filter}`
+    `Regime Filter: [${c.regime_filter.join(", ")}] | Interval: ${c.interval}m | S/R: ${c.sr_filter} | MS: ${c.ms_filter}`
   );
   console.log("═══════════════════════════════════════════");
   console.log("");
@@ -1069,6 +1153,33 @@ function printSummary(summary: TestSummary, trades: Trade[] = []): void {
     );
     console.log(
       `  Without S/R obstacle: ${String(without_.n).padStart(4)} trades  WR ${String(without_.wr).padStart(6)}%  Avg R ${without_.avgR}`
+    );
+    console.log("");
+  }
+
+  // Market structure analysis (only when ms_filter is 'grade')
+  if (summary.config.ms_filter === "grade" && trades.length > 0) {
+    const statsFor = (group: Trade[]) => {
+      if (group.length === 0) return { n: 0, wr: 0, avgR: 0 };
+      const wins = group.filter((t) => t.realized_r > 0).length;
+      const wr = Math.round((wins / group.length) * 10000) / 100;
+      const avgR = Math.round((group.reduce((s, t) => s + t.realized_r, 0) / group.length) * 1000) / 1000;
+      return { n: group.length, wr, avgR };
+    };
+
+    const downtrend = statsFor(trades.filter((t) => t.ms_structure === "DOWNTREND"));
+    const uptrend = statsFor(trades.filter((t) => t.ms_structure === "UPTREND"));
+    const range = statsFor(trades.filter((t) => t.ms_structure === "RANGE"));
+
+    console.log("MARKET STRUCTURE ANALYSIS:");
+    console.log(
+      `  DOWNTREND signals:    ${String(downtrend.n).padStart(4)} trades  WR ${String(downtrend.wr).padStart(6)}%  Avg R ${downtrend.avgR}`
+    );
+    console.log(
+      `  UPTREND signals:      ${String(uptrend.n).padStart(4)} trades  WR ${String(uptrend.wr).padStart(6)}%  Avg R ${uptrend.avgR}`
+    );
+    console.log(
+      `  RANGE signals:        ${String(range.n).padStart(4)} trades  WR ${String(range.wr).padStart(6)}%  Avg R ${range.avgR}`
     );
     console.log("");
   }
