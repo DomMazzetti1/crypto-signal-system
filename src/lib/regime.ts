@@ -41,7 +41,7 @@ export async function classifyRegime(): Promise<RegimeResult> {
       .maybeSingle();
 
     if (latestRow) {
-      transition_zone = Math.abs(Number(latestRow.distance_to_ema200_pct)) < 2.0;
+      transition_zone = Math.abs(Number(latestRow.distance_to_ema200_pct)) < 0.02;
 
       // ── regime_age_hours: find earliest consecutive day with same regime ──
       const { data: history } = await supabase
