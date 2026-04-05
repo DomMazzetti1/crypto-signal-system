@@ -47,7 +47,8 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
     if (lowerType.includes("long") && trend4h === "bearish") {
       return { passed: false, reason: "LONG signal but 4H trend is bearish" };
     }
-    if (lowerType.includes("short") && trend4h === "bullish") {
+    // SQ_SHORT is profitable in bull regime (PF 1.57, WR 49.3%) — only block non-squeeze shorts
+    if (lowerType.includes("short") && !lowerType.includes("sq_short") && trend4h === "bullish") {
       return { passed: false, reason: "SHORT signal but 4H trend is bullish" };
     }
   }
