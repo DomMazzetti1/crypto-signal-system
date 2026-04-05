@@ -30,17 +30,17 @@ export function calculateLevels(
     stop = entry - riskDistance;
     const risk = riskDistance;
     tp0 = entry + risk * 0.5;
-    tp1 = entry + risk * 2.0;
-    tp2 = entry + risk * 3.5;
-    tp3 = entry + risk * 3.5;
+    tp1 = entry + risk * 1.0;
+    tp2 = entry + risk * 2.5;
+    tp3 = entry + risk * 2.5;
   } else {
     entry = markPrice;
     stop = entry + riskDistance;
     const risk = riskDistance;
     tp0 = entry - risk * 0.5;
-    tp1 = entry - risk * 2.0;
-    tp2 = entry - risk * 3.5;
-    tp3 = entry - risk * 3.5;
+    tp1 = entry - risk * 1.0;
+    tp2 = entry - risk * 2.5;
+    tp3 = entry - risk * 2.5;
   }
 
   const risk = Math.abs(entry - stop);
