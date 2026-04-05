@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { getSupabase } from "@/lib/supabase";
 
 let _client: Anthropic | null = null;
 
@@ -191,6 +192,47 @@ const OUTPUT_SCHEMA = {
 export async function reviewWithClaude(
   input: ClaudeReviewInput
 ): Promise<{ request: object; response: ClaudeReviewOutput }> {
+  // ── 1-hour cache: reuse recent review for same symbol + regime ──
+  try {
+    const supabase = getSupabase();
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const { data: cached } = await supabase
+      .from("decisions")
+      .select("claude_confidence, blocked_reason, created_at")
+      .eq("symbol", input.symbol)
+      .eq("btc_regime", input.btc_regime)
+      .not("claude_confidence", "is", null)
+      .gte("created_at", oneHourAgo)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (cached && cached.claude_confidence != null) {
+      const ageMin = Math.round((Date.now() - new Date(cached.created_at).getTime()) / 60000);
+      console.log(`[reviewer] ${input.symbol} cache hit (confidence: ${cached.claude_confidence}, age: ${ageMin}min)`);
+
+      // Reconstruct a minimal review output from cached data
+      const cachedConfidence = Number(cached.claude_confidence);
+      const isBlocked = cachedConfidence <= 4;
+      return {
+        request: { cached: true, symbol: input.symbol, btc_regime: input.btc_regime },
+        response: {
+          decision: isBlocked ? "NO_TRADE" : (input.direction as ClaudeReviewOutput["decision"]),
+          confidence: cachedConfidence,
+          setup_type: "none",
+          level_review: { entry_valid: true, stop_valid: true, targets_valid: true },
+          invalid_if: "",
+          reasoning: `Cached review from ${ageMin}min ago (same symbol + regime)`,
+          risk_flags: [],
+          data_quality: "medium",
+          suggested_adjustments: { entry_note: "", stop_note: "", target_note: "" },
+        },
+      };
+    }
+  } catch (err) {
+    console.warn("[reviewer] Cache lookup failed, proceeding with Haiku:", err);
+  }
+
   const client = getClient();
 
   const userMessage = `Review this signal candidate:
