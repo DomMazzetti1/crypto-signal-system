@@ -4,10 +4,8 @@
  * Tracks weekly equity high-water mark and pauses signal generation
  * when drawdown exceeds safety thresholds.
  *
- * Env vars:
- *   INITIAL_ACCOUNT_VALUE_USD — default 1500
- *   ACCOUNT_VALUE_USD         — default 1500
- *   MAX_RISK_PER_TRADE_PCT    — default 0.02
+ * Real equity is written to account_state by the VPS risk monitor every 2 minutes.
+ * Falls back to ACCOUNT_VALUE_USD env var if no row exists.
  */
 
 import { getSupabase } from "@/lib/supabase";
@@ -45,32 +43,20 @@ function currentWeekStart(): string {
 export async function updateAccountState(): Promise<AccountState> {
   const supabase = getSupabase();
   const weekStart = currentWeekStart();
-  const initialValue = envNum("INITIAL_ACCOUNT_VALUE_USD", 1500);
-  const riskPerTradePct = envNum("MAX_RISK_PER_TRADE_PCT", 0.02);
-  const accountValue = envNum("ACCOUNT_VALUE_USD", 1500);
-  const riskPerTradeUsd = accountValue * riskPerTradePct;
+  const fallbackEquity = envNum("ACCOUNT_VALUE_USD", 1500);
 
-  // Sum all realized R from graded signals
-  const { data: allGrades } = await supabase
-    .from("production_signal_grades")
-    .select("outcome_r")
-    .eq("grade_status", "GRADED");
-
-  const totalR = (allGrades ?? []).reduce((sum, g) => sum + (Number(g.outcome_r) || 0), 0);
-  // NOTE: This uses linear equity approximation (initialValue + totalR * riskPerTradeUsd).
-  // With compounding, actual equity diverges. This makes the kill switch slightly
-  // conservative (triggers earlier than true equity), which is the safer direction.
-  // TODO: Query actual Bybit account balance once execution engine is live.
-  const currentEquity = initialValue + totalR * riskPerTradeUsd;
-
-  // Get or create this week's state
+  // Read real equity written by VPS risk monitor (every 2 minutes)
   const { data: existing } = await supabase
     .from("account_state")
     .select("*")
     .eq("week_start_date", weekStart)
     .maybeSingle();
 
-  const prevHwm = existing?.high_water_mark_usd ?? initialValue;
+  const currentEquity = (existing?.current_equity_usd && existing.current_equity_usd > 0)
+    ? existing.current_equity_usd
+    : fallbackEquity;
+
+  const prevHwm = existing?.high_water_mark_usd ?? fallbackEquity;
   const hwm = Math.max(prevHwm, currentEquity);
   const wasActive = existing?.kill_switch_active ?? false;
 

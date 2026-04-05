@@ -246,7 +246,7 @@ function normalizeConfig(raw: Record<string, unknown>): StrategyConfig {
 async function fetchCandles(symbol: string, interval: number): Promise<Candle[]> {
   const all: Candle[] = [];
   let offset = 0;
-  const LIMIT = 5000;
+  const LIMIT = 1000; // Must match Supabase max_rows (1000) for pagination to work
 
   while (true) {
     const url = `${SUPABASE_URL}/rest/v1/candle_cache?symbol=eq.${symbol}&interval=eq.${interval}&select=start_time,open,high,low,close,volume&order=start_time.asc&limit=${LIMIT}&offset=${offset}`;
@@ -279,7 +279,7 @@ async function fetchCandles(symbol: string, interval: number): Promise<Candle[]>
 async function fetchRegimeMap(): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   let offset = 0;
-  const LIMIT = 5000;
+  const LIMIT = 1000; // Must match Supabase max_rows (1000) for pagination to work
 
   while (true) {
     const url = `${SUPABASE_URL}/rest/v1/btc_regime_history?select=date,regime&order=date.asc&limit=${LIMIT}&offset=${offset}`;
