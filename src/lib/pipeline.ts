@@ -123,7 +123,7 @@ export async function runPipeline(
   const supabase = getSupabase();
 
   const rawType = alert.type.toLowerCase();
-  const direction: "long" | "short" = rawType.includes("short") ? "short" : "long";
+  let direction: "long" | "short" = rawType.includes("short") ? "short" : "long";
   const tier = deriveTier(alert.type);
   const isRelaxed = tier === "RELAXED";
   console.log(`[pipeline] Processing: ${alert.symbol} type=${alert.type} direction=${direction}`);
@@ -401,6 +401,39 @@ export async function runPipeline(
     };
   }
 
+  // ── 5d. Sideways SQ_SHORT → SQ_LONG_REVERSAL ─────────
+  let reversal = false;
+  let originalAlertType: string | null = null;
+  let originalDirection: "long" | "short" | null = null;
+
+  if (
+    regime.btc_regime === "sideways" &&
+    alert.type.toLowerCase().includes("sq_short") &&
+    !alert.type.toLowerCase().includes("data")
+  ) {
+    originalAlertType = alert.type;
+    originalDirection = direction;
+
+    // Flip direction
+    direction = "long";                          // was "short"
+    alert.type = "SQ_LONG_REVERSAL";
+    reversal = true;
+
+    // Reversed geometry: R = original short's risk distance (stop - entry)
+    const R = levels.stop - levels.entry;        // positive: short stop is above entry
+    levels.stop  = levels.entry - R;             // new stop below entry
+    levels.tp0   = levels.entry + R;             // single 1R exit
+    levels.tp1   = levels.entry + R;
+    levels.tp2   = levels.entry + R;
+    levels.tp3   = levels.entry + R;
+    levels.risk  = R;
+    levels.rr_tp1 = 1.0;
+    levels.rr_tp2 = 1.0;
+    levels.rr_tp3 = 1.0;
+
+    console.log(`[pipeline] ${alert.symbol}: sideways regime → reversed to SQ_LONG_REVERSAL`);
+  }
+
   // ── 6. Gate B ─────────────────────────────────────────
   const gateB = runGateB({
     alertType: alert.type,
@@ -637,6 +670,8 @@ export async function runPipeline(
     alert_id: alertId,
     symbol: alert.symbol,
     alert_type: alert.type,
+    original_alert_type: originalAlertType,
+    original_direction: originalDirection,
     alert_tf: alert.tf,
     decision,
     gate_a_passed: gateA.passed,
@@ -877,12 +912,14 @@ export async function runPipeline(
           tp2: levels.tp2,
           tp3: levels.tp3,
           confidence: claudeConfidence ?? 0,
-          setup_type: setupType ?? "unknown",
+          setup_type: reversal ? "SQ_LONG_REVERSAL" : (setupType ?? "unknown"),
           btc_regime: regime.btc_regime,
           alt_environment: regime.alt_environment,
           funding_rate: fundingRate,
-          risk_flags: riskFlags,
-          reasoning: reasoning ?? "",
+          risk_flags: reversal ? [...riskFlags, "REVERSAL"] : riskFlags,
+          reasoning: reversal
+            ? `REVERSAL: SQ_SHORT flipped to LONG in sideways regime (59% WR, +0.16R). ${reasoning ?? ""}`
+            : (reasoning ?? ""),
         });
         telegramSent = await sendTelegram(msg);
         if (telegramSent) {
