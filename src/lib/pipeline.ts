@@ -744,6 +744,13 @@ export async function runPipeline(
 
   // ── Signal context enrichment (already fetched before reviewer) ──
 
+  // LONG signals are alert-only — never auto-execute (manual entry at better levels)
+  const isLongDirection = direction.toUpperCase() === 'LONG' || alert.type.toUpperCase().includes('LONG_REVERSAL');
+  if (isLongDirection && clusterData.selected_for_execution) {
+    clusterData.selected_for_execution = false;
+    console.log(`[pipeline] ${alert.symbol} LONG signal — forcing selected_for_execution=false`);
+  }
+
   const extendedData: Record<string, unknown> = {
     ...baseData,
     tp0_price: levels.tp0,
