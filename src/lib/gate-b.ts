@@ -44,7 +44,7 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
   // Relaxed/data tiers bypass trend filter in data-collection mode
   const isRelaxedOrData = lowerType.includes("relaxed") || lowerType.includes("data");
   if (!isRelaxedOrData && !allowCounterTrend) {
-    if (lowerType.includes("long") && trend4h === "bearish") {
+    if (lowerType.includes("long") && !lowerType.includes("reversal") && trend4h === "bearish") {
       return { passed: false, reason: "LONG signal but 4H trend is bearish" };
     }
     // SQ_SHORT is profitable in bull regime (PF 1.57, WR 49.3%) — only block non-squeeze shorts

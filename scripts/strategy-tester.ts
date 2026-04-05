@@ -51,6 +51,10 @@ const ATR_PERIOD = 14;
 const FORWARD_BARS = 48;
 const LOG_PREFIX = "[strategy-tester]";
 
+// Fee schedule (Bybit)
+const MAKER_FEE = 0.0000;  // 0% for PostOnly limit orders (entry + TP1)
+const TAKER_FEE = 0.00055; // 0.055% for market orders (SL, BE stop, TP2, TP3)
+
 const SCANNER_SYMBOLS: string[] = [
   "1000BONKUSDT","1000PEPEUSDT","ADAUSDT","ALGOUSDT","APTUSDT","ARBUSDT",
   "ARIAUSDT","ASTERUSDT","AVAXUSDT","BANKUSDT","BARDUSDT","BEATUSDT",
@@ -97,6 +101,7 @@ interface StrategyConfig {
   interval: number;
   sr_filter: "none" | "block" | "grade";
   ms_filter: "none" | "grade";
+  apply_fees: boolean;
 }
 
 interface Trade {
@@ -120,6 +125,8 @@ interface Trade {
   sr_obstacle: boolean;
   sr_distance_pct: number;
   ms_structure: "DOWNTREND" | "UPTREND" | "RANGE";
+  resolution_path: "FULL_SL" | "TP1_ONLY_BE" | "TP1_TP2_BE" | "TP1_TP2_TP3" | "EXPIRED";
+  fee_in_r: number;
 }
 
 interface TestSummary {
@@ -171,12 +178,21 @@ function parseArgs(): StrategyConfig {
   raw.regime_filter = regimeStr.split(",").map((s: string) => s.trim());
   raw.sl_method = getArg(args, "sl-method") ?? "UPPER_BB";
   raw.sl_param = getArg(args, "sl-param") ? Number(getArg(args, "sl-param")) : 0.02;
-  const tpStr = getArg(args, "tp") ?? "1.0,2.0,3.5";
+  const tpStr = getArg(args, "tp-levels") ?? getArg(args, "tp") ?? "1.0,2.0,3.5";
   raw.tp_levels = tpStr.split(",").map(Number);
-  const splitStr = getArg(args, "split") ?? "0.33,0.33,0.34";
-  raw.tp_split = splitStr.split(",").map(Number);
+  const splitStr = getArg(args, "tp-split") ?? getArg(args, "split");
+  if (splitStr) {
+    const nums = splitStr.split(",").map(Number);
+    // Accept integer percentages (34,33,33) or fractions (0.34,0.33,0.33)
+    const sum = nums.reduce((a, b) => a + b, 0);
+    raw.tp_split = sum > 2 ? nums.map((n) => n / 100) : nums;
+  } else {
+    raw.tp_split = [0.33, 0.33, 0.34];
+  }
+  // --use-be-stop flag (default false). Also accept legacy --move-sl-be.
+  const useBeStop = args.includes("--use-be-stop");
   const movSlArg = getArg(args, "move-sl-be");
-  raw.move_sl_to_be = movSlArg == null ? true : movSlArg !== "false";
+  raw.move_sl_to_be = useBeStop || (movSlArg != null && movSlArg !== "false");
   raw.min_vol_ratio = getArg(args, "min-vol") ? Number(getArg(args, "min-vol")) : 0;
   raw.min_score = getArg(args, "min-score") ? Number(getArg(args, "min-score")) : 0;
   raw.max_stop_pct = getArg(args, "max-stop") ? Number(getArg(args, "max-stop")) : 0.05;
@@ -186,6 +202,7 @@ function parseArgs(): StrategyConfig {
   raw.interval = getArg(args, "interval") ? Number(getArg(args, "interval")) : 60;
   raw.sr_filter = getArg(args, "sr-filter") ?? "none";
   raw.ms_filter = getArg(args, "ms-filter") ?? "none";
+  raw.apply_fees = !args.includes("--no-fees"); // default true, --no-fees to disable
 
   return normalizeConfig(raw);
 }
@@ -202,7 +219,7 @@ function normalizeConfig(raw: Record<string, unknown>): StrategyConfig {
     sl_param: raw.sl_param != null ? Number(raw.sl_param) : undefined,
     tp_levels: Array.isArray(raw.tp_levels) ? raw.tp_levels.map(Number) : [1.0, 2.0, 3.5],
     tp_split: Array.isArray(raw.tp_split) ? raw.tp_split.map(Number) : [0.33, 0.33, 0.34],
-    move_sl_to_be: raw.move_sl_to_be !== false,
+    move_sl_to_be: raw.move_sl_to_be === true,
     min_vol_ratio: raw.min_vol_ratio != null ? Number(raw.min_vol_ratio) : null,
     min_score: raw.min_score != null ? Number(raw.min_score) : null,
     max_stop_pct: Number(raw.max_stop_pct ?? 0.05),
@@ -219,6 +236,7 @@ function normalizeConfig(raw: Record<string, unknown>): StrategyConfig {
     ms_filter: (["none", "grade"].includes(String(raw.ms_filter ?? "none"))
       ? String(raw.ms_filter)
       : "none") as StrategyConfig["ms_filter"],
+    apply_fees: raw.apply_fees !== false,
   };
 
   // Validate tp_levels and tp_split lengths match
@@ -843,24 +861,49 @@ function processSymbolStrategy(
         }
       }
 
-      // Calculate realized R using ladder
+      // Fee model: taker fee in R-units varies per trade
+      const stopDistPct = R / entry;
+      const feeInR = config.apply_fees ? TAKER_FEE / stopDistPct : 0;
+
+      // Calculate realized R using ladder (with fee adjustments)
+      // Entry: PostOnly limit (0% maker) — no fee
+      // TP1 (k=0): exchange limit (0% maker) — no fee
+      // TP2+ (k>=1): market order — subtract feeInR
+      // SL: market order — subtract feeInR
+      // BE stop: market order — remaining portion loses feeInR
       let realizedR = 0;
       for (let k = 0; k < config.tp_levels.length; k++) {
         if (tpHits[k]) {
-          realizedR += config.tp_split[k] * config.tp_levels[k];
+          const tpFee = k === 0 ? 0 : feeInR; // TP1 is maker (free), TP2+ are taker
+          realizedR += config.tp_split[k] * (config.tp_levels[k] - tpFee);
         } else {
           // This TP was not hit
           if (hitSl) {
             if (slMovedToBe) {
-              // SL hit after move to BE — remaining exits at 0R
-              realizedR += 0;
+              // SL hit after move to BE — remaining exits at 0R minus taker fee
+              realizedR -= config.tp_split[k] * feeInR;
             } else {
-              // SL hit before any TP — full loss on this portion
-              realizedR -= config.tp_split[k] * 1.0;
+              // SL hit before any TP — full loss on this portion plus taker fee
+              realizedR -= config.tp_split[k] * (1.0 + feeInR);
             }
           }
           // If neither TP nor SL hit (ran out of bars), treat as 0R
         }
+      }
+
+      // Determine resolution path
+      const tpHitCount = tpHits.filter(Boolean).length;
+      let resolutionPath: Trade["resolution_path"];
+      if (hitSl && tpHitCount === 0) {
+        resolutionPath = "FULL_SL";
+      } else if (tpHits.every(Boolean)) {
+        resolutionPath = "TP1_TP2_TP3";
+      } else if (tpHitCount >= 2) {
+        resolutionPath = "TP1_TP2_BE";
+      } else if (tpHitCount >= 1) {
+        resolutionPath = "TP1_ONLY_BE";
+      } else {
+        resolutionPath = "EXPIRED";
       }
 
       trades.push({
@@ -886,6 +929,8 @@ function processSymbolStrategy(
         ms_structure: config.ms_filter !== "none"
           ? detectMarketStructure(candles, i).structure
           : "RANGE",
+        resolution_path: resolutionPath,
+        fee_in_r: Math.round(feeInR * 10000) / 10000,
       });
     }
 
@@ -1071,9 +1116,21 @@ function printSummary(summary: TestSummary, trades: Trade[] = []): void {
     `TP Levels: [${c.tp_levels.join(", ")}] | Split: [${c.tp_split.join(", ")}]`
   );
   console.log(
-    `Regime Filter: [${c.regime_filter.join(", ")}] | Interval: ${c.interval}m | S/R: ${c.sr_filter} | MS: ${c.ms_filter}`
+    `Regime Filter: [${c.regime_filter.join(", ")}] | Interval: ${c.interval}m | BE Stop: ${c.move_sl_to_be} | Fees: ${c.apply_fees}`
   );
   console.log("═══════════════════════════════════════════");
+
+  // Fee model summary
+  if (c.apply_fees && trades.length > 0) {
+    const avgFeeInR = trades.reduce((s, t) => s + t.fee_in_r, 0) / trades.length;
+    const avgStopDist = trades.reduce((s, t) => {
+      const sd = Math.abs(t.stop_loss - t.entry_price) / t.entry_price;
+      return s + sd;
+    }, 0) / trades.length;
+    console.log(
+      `Fee model: ON (avg fee_in_r: ${avgFeeInR.toFixed(4)}R per market exit, avg stop distance: ${(avgStopDist * 100).toFixed(2)}%)`
+    );
+  }
   console.log("");
 
   const pf =
@@ -1181,6 +1238,32 @@ function printSummary(summary: TestSummary, trades: Trade[] = []): void {
     console.log(
       `  RANGE signals:        ${String(range.n).padStart(4)} trades  WR ${String(range.wr).padStart(6)}%  Avg R ${range.avgR}`
     );
+    console.log("");
+  }
+
+  // Ladder analysis (always shown when trades exist)
+  if (trades.length > 0) {
+    const pathStats = (path: Trade["resolution_path"]) => {
+      const group = trades.filter((t) => t.resolution_path === path);
+      if (group.length === 0) return { n: 0, avgR: "0.000" };
+      const avgR = (group.reduce((s, t) => s + t.realized_r, 0) / group.length).toFixed(3);
+      return { n: group.length, avgR };
+    };
+
+    const fullSl = pathStats("FULL_SL");
+    const tp1Be = pathStats("TP1_ONLY_BE");
+    const tp1Tp2Be = pathStats("TP1_TP2_BE");
+    const tp1Tp2Tp3 = pathStats("TP1_TP2_TP3");
+    const expired = pathStats("EXPIRED");
+
+    console.log("LADDER ANALYSIS:");
+    console.log(`  FULL_SL (missed TP1):   ${String(fullSl.n).padStart(4)} trades  Avg R ${fullSl.avgR}`);
+    console.log(`  TP1→BE:                 ${String(tp1Be.n).padStart(4)} trades  Avg R ${tp1Be.avgR}`);
+    console.log(`  TP1→TP2→BE:             ${String(tp1Tp2Be.n).padStart(4)} trades  Avg R ${tp1Tp2Be.avgR}`);
+    console.log(`  TP1→TP2→TP3:            ${String(tp1Tp2Tp3.n).padStart(4)} trades  Avg R ${tp1Tp2Tp3.avgR}`);
+    if (expired.n > 0) {
+      console.log(`  EXPIRED:                ${String(expired.n).padStart(4)} trades  Avg R ${expired.avgR}`);
+    }
     console.log("");
   }
 }
