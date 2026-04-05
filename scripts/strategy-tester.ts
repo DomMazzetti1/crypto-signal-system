@@ -95,6 +95,7 @@ interface StrategyConfig {
   cooldown_bars: number;
   symbols: string[];
   interval: number;
+  sr_filter: "none" | "block" | "grade";
 }
 
 interface Trade {
@@ -115,6 +116,8 @@ interface Trade {
   bars_to_resolution: number;
   max_favorable_r: number;
   max_adverse_r: number;
+  sr_obstacle: boolean;
+  sr_distance_pct: number;
 }
 
 interface TestSummary {
@@ -179,6 +182,7 @@ function parseArgs(): StrategyConfig {
   const symStr = getArg(args, "symbols") ?? "all";
   raw.symbols = symStr === "all" ? SCANNER_SYMBOLS : symStr.split(",").map((s: string) => s.trim());
   raw.interval = getArg(args, "interval") ? Number(getArg(args, "interval")) : 60;
+  raw.sr_filter = getArg(args, "sr-filter") ?? "none";
 
   return normalizeConfig(raw);
 }
@@ -206,6 +210,9 @@ function normalizeConfig(raw: Record<string, unknown>): StrategyConfig {
           : raw.symbols.map(String))
       : SCANNER_SYMBOLS,
     interval: Number(raw.interval ?? 60),
+    sr_filter: (["none", "block", "grade"].includes(String(raw.sr_filter ?? "none"))
+      ? String(raw.sr_filter)
+      : "none") as StrategyConfig["sr_filter"],
   };
 
   // Validate tp_levels and tp_split lengths match
@@ -368,6 +375,129 @@ function computeCompositeScore(
   return Math.round(finalScore * 100) / 100;
 }
 
+// ── Support / Resistance Detection ────────────────────────
+
+const SR_LOOKBACK = 10;
+const SR_WINDOW = 500;
+const SR_TOUCH_TOLERANCE = 0.003; // 0.3%
+const SR_TOUCH_LOOKBACK = 200;
+
+interface SRLevel {
+  price: number;
+  type: "support" | "resistance";
+  strength: number;
+  bar_index: number;
+}
+
+/**
+ * Identify swing highs and swing lows across the full candle array.
+ * A swing high at bar j means candles[j].high > high of all bars within lookback on each side.
+ * A swing low at bar j means candles[j].low < low of all bars within lookback on each side.
+ * Returns raw swing points (strength computed per-query via getRelevantSRLevels).
+ */
+function detectSwingLevels(
+  candles: Candle[],
+  lookback: number = SR_LOOKBACK
+): { price: number; type: "support" | "resistance"; bar_index: number }[] {
+  const swings: { price: number; type: "support" | "resistance"; bar_index: number }[] = [];
+
+  for (let j = lookback; j < candles.length - lookback; j++) {
+    // Check swing high
+    let isSwingHigh = true;
+    for (let k = j - lookback; k <= j + lookback; k++) {
+      if (k === j) continue;
+      if (candles[k].high >= candles[j].high) {
+        isSwingHigh = false;
+        break;
+      }
+    }
+    if (isSwingHigh) {
+      swings.push({ price: candles[j].high, type: "resistance", bar_index: j });
+    }
+
+    // Check swing low
+    let isSwingLow = true;
+    for (let k = j - lookback; k <= j + lookback; k++) {
+      if (k === j) continue;
+      if (candles[k].low <= candles[j].low) {
+        isSwingLow = false;
+        break;
+      }
+    }
+    if (isSwingLow) {
+      swings.push({ price: candles[j].low, type: "support", bar_index: j });
+    }
+  }
+
+  return swings;
+}
+
+/**
+ * Get S/R levels relevant for a signal at bar_index, using a sliding window.
+ * Only includes confirmed swings (bar_index + lookback <= current bar) within the last SR_WINDOW bars.
+ * Strength = how many times price touched this level (within tolerance) in the last SR_TOUCH_LOOKBACK bars.
+ */
+function getRelevantSRLevels(
+  allSwings: { price: number; type: "support" | "resistance"; bar_index: number }[],
+  candles: Candle[],
+  currentBar: number,
+  lookback: number = SR_LOOKBACK
+): SRLevel[] {
+  const windowStart = Math.max(0, currentBar - SR_WINDOW);
+  const confirmedEnd = currentBar - lookback; // swing must be confirmed
+
+  const windowSwings = allSwings.filter(
+    (s) => s.bar_index >= windowStart && s.bar_index <= confirmedEnd
+  );
+
+  // Count touches for each swing level
+  const touchStart = Math.max(0, currentBar - SR_TOUCH_LOOKBACK);
+  return windowSwings.map((s) => {
+    let touches = 0;
+    for (let k = touchStart; k <= currentBar; k++) {
+      const high = candles[k].high;
+      const low = candles[k].low;
+      // Price "touched" the level if the bar's range came within tolerance
+      if (
+        Math.abs(high - s.price) / s.price <= SR_TOUCH_TOLERANCE ||
+        Math.abs(low - s.price) / s.price <= SR_TOUCH_TOLERANCE
+      ) {
+        touches++;
+      }
+    }
+    return { ...s, strength: touches };
+  });
+}
+
+/**
+ * Find the nearest S/R obstacle between entry and TP1.
+ * For LONG: find resistance levels above entry (obstacles to upside).
+ * For SHORT: find support levels below entry (obstacles to downside).
+ */
+function findNearestSR(
+  levels: SRLevel[],
+  price: number,
+  direction: "LONG" | "SHORT"
+): { level: number; strength: number; distance_pct: number } | null {
+  let best: { level: number; strength: number; distance_pct: number } | null = null;
+
+  for (const lvl of levels) {
+    if (direction === "LONG" && lvl.type === "resistance" && lvl.price > price) {
+      const dist = (lvl.price - price) / price;
+      if (!best || dist < best.distance_pct) {
+        best = { level: lvl.price, strength: lvl.strength, distance_pct: Math.round(dist * 10000) / 10000 };
+      }
+    } else if (direction === "SHORT" && lvl.type === "support" && lvl.price < price) {
+      const dist = (price - lvl.price) / price;
+      if (!best || dist < best.distance_pct) {
+        best = { level: lvl.price, strength: lvl.strength, distance_pct: Math.round(dist * 10000) / 10000 };
+      }
+    }
+  }
+
+  return best;
+}
+
 // ── Core Engine ────────────────────────────────────────────
 
 function processSymbolStrategy(
@@ -381,6 +511,11 @@ function processSymbolStrategy(
     candles.map((c) => c.volume),
     BB_PERIOD
   );
+
+  // Pre-compute all swing points once per symbol (only if S/R filtering is active)
+  const allSwings = config.sr_filter !== "none"
+    ? detectSwingLevels(candles, SR_LOOKBACK)
+    : [];
 
   const trades: Trade[] = [];
   let lastSignalIndex = -config.cooldown_bars;
@@ -523,6 +658,36 @@ function processSymbolStrategy(
       }
       if (R <= 0 || R / entry > config.max_stop_pct) continue;
 
+      // S/R obstacle check
+      let srObstacle = false;
+      let srDistancePct = 0;
+
+      if (config.sr_filter !== "none") {
+        const srLevels = getRelevantSRLevels(allSwings, candles, i, SR_LOOKBACK);
+        const nearest = findNearestSR(srLevels, entry, tradeDirection);
+
+        if (nearest && nearest.strength >= 3) {
+          // Check if the S/R level sits between entry and TP1
+          const tp1Price = tpLevels[0];
+          const levelBetween = tradeDirection === "LONG"
+            ? nearest.level > entry && nearest.level < tp1Price
+            : nearest.level < entry && nearest.level > tp1Price;
+
+          if (levelBetween) {
+            // Check if it's within 50% of the R distance from entry
+            const distFromEntry = Math.abs(nearest.level - entry);
+            if (distFromEntry <= R * 0.5) {
+              srObstacle = true;
+              srDistancePct = nearest.distance_pct;
+            }
+          }
+        }
+
+        if (config.sr_filter === "block" && srObstacle) {
+          continue; // Skip this signal
+        }
+      }
+
       // Grading
       const tpHits: boolean[] = config.tp_levels.map(() => false);
       let hitSl = false;
@@ -635,6 +800,8 @@ function processSymbolStrategy(
         bars_to_resolution: barsToResolution,
         max_favorable_r: Math.round(maxFavorable * 1000) / 1000,
         max_adverse_r: Math.round(maxAdverse * 1000) / 1000,
+        sr_obstacle: srObstacle,
+        sr_distance_pct: srDistancePct,
       });
     }
 
@@ -808,7 +975,7 @@ function computeSummary(trades: Trade[], config: StrategyConfig): TestSummary {
 
 // ── Output Formatting ──────────────────────────────────────
 
-function printSummary(summary: TestSummary): void {
+function printSummary(summary: TestSummary, trades: Trade[] = []): void {
   const c = summary.config;
   console.log("");
   console.log("═══════════════════════════════════════════");
@@ -820,7 +987,7 @@ function printSummary(summary: TestSummary): void {
     `TP Levels: [${c.tp_levels.join(", ")}] | Split: [${c.tp_split.join(", ")}]`
   );
   console.log(
-    `Regime Filter: [${c.regime_filter.join(", ")}] | Interval: ${c.interval}m`
+    `Regime Filter: [${c.regime_filter.join(", ")}] | Interval: ${c.interval}m | S/R: ${c.sr_filter}`
   );
   console.log("═══════════════════════════════════════════");
   console.log("");
@@ -877,6 +1044,32 @@ function printSummary(summary: TestSummary): void {
         : "";
       console.log(`${topStr.padEnd(34)}${botStr}`);
     }
+    console.log("");
+  }
+
+  // S/R analysis (only when sr_filter is 'grade')
+  if (summary.config.sr_filter === "grade" && trades.length > 0) {
+    const withObstacle = trades.filter((t) => t.sr_obstacle);
+    const withoutObstacle = trades.filter((t) => !t.sr_obstacle);
+
+    const statsFor = (group: Trade[]) => {
+      if (group.length === 0) return { n: 0, wr: 0, avgR: 0 };
+      const wins = group.filter((t) => t.realized_r > 0).length;
+      const wr = Math.round((wins / group.length) * 10000) / 100;
+      const avgR = Math.round((group.reduce((s, t) => s + t.realized_r, 0) / group.length) * 1000) / 1000;
+      return { n: group.length, wr, avgR };
+    };
+
+    const with_ = statsFor(withObstacle);
+    const without_ = statsFor(withoutObstacle);
+
+    console.log("S/R ANALYSIS:");
+    console.log(
+      `  With S/R obstacle:    ${String(with_.n).padStart(4)} trades  WR ${String(with_.wr).padStart(6)}%  Avg R ${with_.avgR}`
+    );
+    console.log(
+      `  Without S/R obstacle: ${String(without_.n).padStart(4)} trades  WR ${String(without_.wr).padStart(6)}%  Avg R ${without_.avgR}`
+    );
     console.log("");
   }
 }
@@ -974,7 +1167,7 @@ async function main() {
   allTrades.sort((a, b) => a.candle_time.localeCompare(b.candle_time));
 
   const summary = computeSummary(allTrades, config);
-  printSummary(summary);
+  printSummary(summary, allTrades);
   await storeResults(summary);
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
