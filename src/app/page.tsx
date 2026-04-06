@@ -45,6 +45,10 @@ interface LiveAccountSnapshot {
     equity_usd: number;
     available_balance: number;
     used_balance: number;
+    total_initial_margin?: number | null;
+    available_balance_source?: string;
+    balance_coin?: string | null;
+    margin_mode?: string | null;
     bybit_open_positions: number;
     engine_open_positions: number;
   };
@@ -151,6 +155,11 @@ function fmtUptime(sec: number | null | undefined): string {
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function fmtEnumLabel(value: string | null | undefined): string {
+  if (!value) return "--";
+  return value.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function deriveTier(alertType: string): string {
@@ -302,15 +311,32 @@ function HeroMetric({
   );
 }
 
-function AccountHero({ account }: { account: LiveAccountSnapshot | null }) {
+function AccountHero({
+  account,
+  loading,
+}: {
+  account: LiveAccountSnapshot | null;
+  loading: boolean;
+}) {
   const accountState = account?.account;
   const sync = account?.sync;
   const syncIssues = (sync?.exchange_only_positions ?? 0) + (sync?.engine_only_positions ?? 0);
   const stale = account?.bybit_stale === true;
-  const down = !account || account.status === "down" || account.status === "error";
+  const down = !loading && (!account || account.status === "down" || account.status === "error");
+  const pending = loading && !account;
+  const availableHint =
+    accountState?.available_balance_source === "coin_derived"
+      ? `derived from ${accountState.balance_coin ?? "margin"} isolated balance`
+      : accountState?.available_balance_source === "fallback_zero"
+        ? "Bybit did not return a usable free balance"
+        : "Bybit available balance";
+  const marginHint =
+    accountState?.total_initial_margin != null && Number.isFinite(accountState.total_initial_margin)
+      ? `initial margin ${fmtUsd(accountState.total_initial_margin)}`
+      : "equity minus available";
 
   return (
-    <SectionShell accent={down ? "rose" : stale ? "amber" : "emerald"}>
+    <SectionShell accent={down ? "rose" : stale ? "amber" : pending ? "slate" : "emerald"}>
       <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
@@ -325,8 +351,12 @@ function AccountHero({ account }: { account: LiveAccountSnapshot | null }) {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Badge text={down ? "Engine Down" : stale ? "Bybit Stale" : "Bybit Synced"} tone={down ? "rose" : stale ? "amber" : "emerald"} />
+          <Badge
+            text={pending ? "Connecting" : down ? "Engine Down" : stale ? "Bybit Stale" : "Bybit Synced"}
+            tone={pending ? "slate" : down ? "rose" : stale ? "amber" : "emerald"}
+          />
           <Badge text={account?.mode ?? "Unknown Mode"} tone={account?.mode === "TESTNET" ? "amber" : "cyan"} />
+          {accountState?.margin_mode ? <Badge text={fmtEnumLabel(accountState.margin_mode)} tone="amber" /> : null}
           {account?.source ? <Badge text={account.source} tone="slate" /> : null}
         </div>
       </div>
@@ -341,12 +371,12 @@ function AccountHero({ account }: { account: LiveAccountSnapshot | null }) {
         <HeroMetric
           label="Available"
           value={fmtUsd(accountState?.available_balance)}
-          hint="Bybit available balance"
+          hint={availableHint}
         />
         <HeroMetric
           label="Margin In Use"
           value={fmtUsd(accountState?.used_balance)}
-          hint="Equity minus available"
+          hint={marginHint}
           tone="amber"
         />
         <HeroMetric
@@ -365,8 +395,14 @@ function AccountHero({ account }: { account: LiveAccountSnapshot | null }) {
   );
 }
 
-function AccountStatusSection({ account }: { account: LiveAccountSnapshot | null }) {
-  const down = !account || account.status === "down" || account.status === "error";
+function AccountStatusSection({
+  account,
+  loading,
+}: {
+  account: LiveAccountSnapshot | null;
+  loading: boolean;
+}) {
+  const down = !loading && (!account || account.status === "down" || account.status === "error");
   const stale = account?.bybit_stale === true;
   const sync = account?.sync;
 
@@ -378,7 +414,11 @@ function AccountStatusSection({ account }: { account: LiveAccountSnapshot | null
         meta={account?.last_bybit_success ? `last success ${timeAgo(account.last_bybit_success)}` : undefined}
       />
 
-      {down ? (
+      {loading && !account ? (
+        <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-white/70">
+          Loading the authenticated Bybit snapshot from the execution engine.
+        </div>
+      ) : down ? (
         <div className="rounded-2xl border border-rose-400/20 bg-rose-400/10 p-4 text-sm text-rose-100">
           Unable to reach the authenticated Bybit snapshot route.
           <div className="mt-2 text-rose-100/70">{account?.error ?? "No response from execution engine"}</div>
@@ -413,12 +453,28 @@ function AccountStatusSection({ account }: { account: LiveAccountSnapshot | null
               <div className="mt-1 font-medium text-white">{account?.mode ?? "--"}</div>
             </div>
             <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-white/40">Margin Mode</div>
+              <div className="mt-1 font-medium text-white">{fmtEnumLabel(account?.account?.margin_mode)}</div>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
               <div className="text-[10px] uppercase tracking-[0.18em] text-white/40">Uptime</div>
               <div className="mt-1 font-medium text-white">{fmtUptime(account?.uptime)}</div>
             </div>
             <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
               <div className="text-[10px] uppercase tracking-[0.18em] text-white/40">Signals This Hour</div>
               <div className="mt-1 font-medium text-white">{account?.signals_this_hour ?? 0}</div>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-white/40">Balance Source</div>
+              <div className="mt-1 font-medium text-white">
+                {account?.account?.available_balance_source === "coin_derived"
+                  ? `${account.account.balance_coin ?? "Margin"} Derived`
+                  : account?.account?.available_balance_source === "account_total"
+                    ? "Account Total"
+                    : account?.account?.available_balance_source === "fallback_zero"
+                      ? "Unavailable"
+                      : "--"}
+              </div>
             </div>
             <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
               <div className="text-[10px] uppercase tracking-[0.18em] text-white/40">Started</div>
@@ -845,11 +901,11 @@ export default function Home() {
         </div>
 
         <div className="space-y-6">
-          <AccountHero account={data?.account ?? null} />
+          <AccountHero account={data?.account ?? null} loading={loading} />
 
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.05fr_1.95fr]">
             <div className="space-y-6">
-              <AccountStatusSection account={data?.account ?? null} />
+              <AccountStatusSection account={data?.account ?? null} loading={loading} />
               <ScannerSection health={data?.prodHealth ?? null} />
             </div>
             <LivePositionsSection account={data?.account ?? null} />
