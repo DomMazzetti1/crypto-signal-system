@@ -21,6 +21,7 @@ import { computeCompositeScore } from "@/lib/scoring";
 import { assignCluster, finalizeClusterSelection, deriveTier } from "@/lib/cluster";
 import { runPreTradeRiskChecks, RiskCheckResult } from "@/lib/risk-manager";
 import { getSignalContext } from "@/lib/signal-context";
+import { warnSignalRuntimeConfigOnce } from "@/lib/runtime-checks";
 
 export interface AlertPayload {
   type: string;
@@ -120,6 +121,7 @@ export async function runPipeline(
   alert: AlertPayload,
   alertId: string | null
 ): Promise<PipelineResult> {
+  warnSignalRuntimeConfigOnce();
   const supabase = getSupabase();
 
   const rawType = alert.type.toLowerCase();

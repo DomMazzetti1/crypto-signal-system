@@ -130,7 +130,7 @@ async function fetchDashboard(): Promise<DashboardData> {
   const [execRes, signalsRes, healthRes] = await Promise.allSettled([
     fetch("/api/proxy/exec-health").then(r => r.json()),
     fetch("/api/dashboard/active-signals?hours=720").then(r => r.json()),
-    fetch("/api/debug/production-health").then(r => r.json()),
+    fetch("/api/dashboard/production-health").then(r => r.json()),
   ]);
 
   return {

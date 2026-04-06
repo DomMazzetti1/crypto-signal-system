@@ -1,4 +1,5 @@
 import { getSupabase } from "@/lib/supabase";
+import { warnExecPayloadConsistency } from "@/lib/runtime-checks";
 
 export interface ExecSignalPayload {
   symbol: string;
@@ -23,6 +24,8 @@ export async function sendToExecutionEngine(payload: ExecSignalPayload): Promise
   if (!url) return false;
 
   try {
+    warnExecPayloadConsistency(payload);
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
 
