@@ -198,7 +198,7 @@ function parseArgs(): StrategyConfig {
   } else {
     raw.tp_split = [0.34, 0.33, 0.33];
   }
-  // Default to the live behavior: move SL to breakeven after TP2.
+  // Default to the live behavior: move SL to breakeven after TP1.
   // Also accept legacy --move-sl-be as "after TP1".
   const useBeStop = args.includes("--use-be-stop");
   const movSlArg = getArg(args, "move-sl-be");
@@ -237,7 +237,7 @@ function normalizeConfig(raw: Record<string, unknown>): StrategyConfig {
   } else if (raw.move_sl_to_be === false) {
     moveSlToBeAfterTp = null;
   } else {
-    moveSlToBeAfterTp = 2;
+    moveSlToBeAfterTp = 1;
   }
 
   const config: StrategyConfig = {

@@ -45,9 +45,12 @@ type Signal = {
   resolved_at: string | null;
   telegram_sent: boolean;
   telegram_attempted: boolean;
+  telegram_error?: string | null;
   blocked_reason: string | null;
+  btc_regime?: string | null;
   gate_a_quality: string | null;
   gate_b_passed: boolean;
+  gate_b_reason?: string | null;
 };
 
 type Filters = {
@@ -99,6 +102,14 @@ function formatPrice(val: number | null): string {
   if (val >= 1000) return val.toFixed(2);
   if (val >= 1) return val.toFixed(4);
   return val.toPrecision(4);
+}
+
+function fmtEnumLabel(value: string | null | undefined): string {
+  if (!value) return "--";
+  return value
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function gradedColor(outcome: string | null): string {
@@ -164,6 +175,97 @@ function scoreColor(score: number): string {
   return "text-red-400";
 }
 
+function prettifyReason(reason: string | null | undefined): string {
+  if (!reason) return "-";
+  return reason.replace(/_/g, " ");
+}
+
+function operatorReason(signal: Signal): string {
+  if (signal.selection_pending) return "Cluster window still open";
+  if (signal.blocked_reason) return prettifyReason(signal.blocked_reason);
+  if (signal.telegram_sent) {
+    return signal.selected_for_execution
+      ? "Telegram sent, auto-exec eligible"
+      : "Telegram sent, manual-only";
+  }
+  if (signal.telegram_attempted) {
+    return signal.telegram_error
+      ? `Telegram failed: ${signal.telegram_error}`
+      : "Telegram attempted but not sent";
+  }
+  if (signal.suppressed_reason) {
+    return `Cluster suppressed: ${prettifyReason(signal.suppressed_reason)}`;
+  }
+  if (!signal.gate_b_passed) {
+    return signal.gate_b_reason
+      ? `Gate B failed: ${prettifyReason(signal.gate_b_reason)}`
+      : "Gate B failed";
+  }
+  if (signal.selected_for_execution) return "Selected for execution";
+  return "Waiting on downstream delivery";
+}
+
+function operatorBadge(signal: Signal): {
+  label: string;
+  className: string;
+  title: string;
+} {
+  if (signal.selection_pending) {
+    return {
+      label: "Pending",
+      className: "text-yellow-400 bg-yellow-500/10 border border-yellow-500/20",
+      title: "Cluster window still open",
+    };
+  }
+  if (signal.blocked_reason) {
+    return {
+      label: "Blocked",
+      className: "text-red-300 bg-red-500/10 border border-red-500/20",
+      title: operatorReason(signal),
+    };
+  }
+  if (signal.telegram_sent && signal.selected_for_execution) {
+    return {
+      label: "Auto",
+      className: "text-cyan-300 bg-cyan-500/10 border border-cyan-500/20",
+      title: operatorReason(signal),
+    };
+  }
+  if (signal.telegram_sent) {
+    return {
+      label: "Manual",
+      className: "text-emerald-300 bg-emerald-500/10 border border-emerald-500/20",
+      title: operatorReason(signal),
+    };
+  }
+  if (signal.telegram_attempted) {
+    return {
+      label: "Error",
+      className: "text-red-300 bg-red-500/10 border border-red-500/20",
+      title: operatorReason(signal),
+    };
+  }
+  if (signal.suppressed_reason) {
+    return {
+      label: "Suppressed",
+      className: "text-neutral-300 bg-white/5 border border-white/10",
+      title: operatorReason(signal),
+    };
+  }
+  if (!signal.gate_b_passed) {
+    return {
+      label: "Gate B",
+      className: "text-red-300 bg-red-500/10 border border-red-500/20",
+      title: operatorReason(signal),
+    };
+  }
+  return {
+    label: "Queued",
+    className: "text-neutral-300 bg-white/5 border border-white/10",
+    title: operatorReason(signal),
+  };
+}
+
 // ── Constants ──────────────────────────────────────────
 
 const HOUR_OPTIONS = [4, 12, 24] as const;
@@ -191,6 +293,32 @@ type SelectionStats = {
   };
 };
 
+type StrategyAuditBucket = {
+  key: string;
+  label: string;
+  total_signals: number;
+  resolved_signals: number;
+  open_signals: number;
+  wins: number;
+  losses: number;
+  neutral: number;
+  win_rate: number | null;
+  avg_r: number | null;
+  total_r: number;
+  profit_factor: number | null;
+};
+
+type StrategyAudit = {
+  schema_available: boolean;
+  generated_at?: string;
+  days?: number;
+  totals?: StrategyAuditBucket;
+  priority_slices?: StrategyAuditBucket[];
+  delivery_modes?: StrategyAuditBucket[];
+  strategy_regime_matrix?: StrategyAuditBucket[];
+  message?: string;
+};
+
 // ── Component ──────────────────────────────────────────
 
 export default function SignalsDashboard() {
@@ -201,6 +329,7 @@ export default function SignalsDashboard() {
   const [priceSource, setPriceSource] = useState<string>("none");
   const [schemaVersion, setSchemaVersion] = useState<string>("unknown");
   const [selectionStats, setSelectionStats] = useState<SelectionStats | null>(null);
+  const [strategyAudit, setStrategyAudit] = useState<StrategyAudit | null>(null);
   const [filters, setFilters] = useState<Filters>({
     hours: 4,
     tier: "all",
@@ -247,6 +376,13 @@ export default function SignalsDashboard() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (d) setSelectionStats(d);
+      })
+      .catch(() => {});
+
+    fetch("/api/dashboard/strategy-audit?days=90")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d) setStrategyAudit(d);
       })
       .catch(() => {});
   }, []);
@@ -419,6 +555,80 @@ export default function SignalsDashboard() {
           </div>
         )}
 
+        {strategyAudit?.schema_available && strategyAudit.totals && (
+          <div className="mb-4 rounded-lg border border-white/10 bg-white/[0.03] p-4">
+            <div className="mb-3 flex items-end justify-between gap-4">
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.24em] text-neutral-500">
+                  Strategy Audit
+                </div>
+                <h2 className="mt-1 text-sm font-semibold text-white">
+                  Last {strategyAudit.days ?? 90}d by strategy and delivery mode
+                </h2>
+              </div>
+              {strategyAudit.generated_at && (
+                <div className="text-[11px] text-neutral-500">
+                  Updated {formatTime(strategyAudit.generated_at)}
+                </div>
+              )}
+            </div>
+
+            <div className="mb-4 grid gap-3 md:grid-cols-4">
+              <AuditStatCard
+                label="Resolved"
+                value={String(strategyAudit.totals.resolved_signals)}
+                sublabel={`${strategyAudit.totals.total_signals} total`}
+              />
+              <AuditStatCard
+                label="Win Rate"
+                value={
+                  strategyAudit.totals.win_rate != null
+                    ? `${strategyAudit.totals.win_rate}%`
+                    : "No data"
+                }
+                sublabel={`${strategyAudit.totals.wins}W / ${strategyAudit.totals.losses}L / ${strategyAudit.totals.neutral}N`}
+              />
+              <AuditStatCard
+                label="Avg R"
+                value={
+                  strategyAudit.totals.avg_r != null
+                    ? `${strategyAudit.totals.avg_r.toFixed(2)}R`
+                    : "No data"
+                }
+                sublabel={`Total ${strategyAudit.totals.total_r.toFixed(2)}R`}
+              />
+              <AuditStatCard
+                label="Profit Factor"
+                value={
+                  strategyAudit.totals.profit_factor == null
+                    ? "No data"
+                    : Number.isFinite(strategyAudit.totals.profit_factor)
+                      ? strategyAudit.totals.profit_factor.toFixed(2)
+                      : "Infinite"
+                }
+                sublabel={`${strategyAudit.totals.open_signals} still open`}
+              />
+            </div>
+
+            <div className="grid gap-4 xl:grid-cols-2">
+              <AuditBucketGrid
+                title="Priority Slices"
+                buckets={strategyAudit.priority_slices ?? []}
+              />
+              <AuditBucketGrid
+                title="Delivery Modes"
+                buckets={strategyAudit.delivery_modes ?? []}
+              />
+            </div>
+          </div>
+        )}
+
+        {strategyAudit && !strategyAudit.schema_available && (
+          <div className="mb-4 rounded-lg border border-yellow-500/30 bg-yellow-900/20 p-3 text-xs text-yellow-300">
+            {strategyAudit.message ?? "Strategy audit unavailable until the extended schema is applied."}
+          </div>
+        )}
+
         {/* Table — overflow-x:clip avoids creating a scroll container so sticky works vertically */}
         <div className="border border-white/10 rounded-lg" style={{ overflowX: "clip" }}>
           <table className="w-full text-sm whitespace-nowrap">
@@ -436,7 +646,7 @@ export default function SignalsDashboard() {
                       Score{isDegraded && <span className="text-neutral-600 text-[10px] ml-0.5">*</span>}
                     </th>
                     {!isDegraded && <th className={`${thCls} text-center`} style={thStyle}>Rank</th>}
-                    {!isDegraded && <th className={`${thCls} text-center`} style={thStyle}>Sel</th>}
+                    {!isDegraded && <th className={`${thCls} text-center`} style={thStyle}>Ops</th>}
                     <th className={thCls} style={thStyle}>Time</th>
                     <th className={`${thCls} text-right`} style={thStyle}>Entry</th>
                     <th className={`${thCls} text-right`} style={thStyle}>Current</th>
@@ -527,6 +737,69 @@ function FilterGroup({
   );
 }
 
+function AuditStatCard({
+  label,
+  value,
+  sublabel,
+}: {
+  label: string;
+  value: string;
+  sublabel: string;
+}) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/30 p-3">
+      <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-500">
+        {label}
+      </div>
+      <div className="mt-2 text-lg font-semibold text-white">{value}</div>
+      <div className="mt-1 text-[11px] text-neutral-500">{sublabel}</div>
+    </div>
+  );
+}
+
+function AuditBucketGrid({
+  title,
+  buckets,
+}: {
+  title: string;
+  buckets: StrategyAuditBucket[];
+}) {
+  return (
+    <div>
+      <div className="mb-2 text-[10px] uppercase tracking-[0.22em] text-neutral-500">
+        {title}
+      </div>
+      <div className="grid gap-2 md:grid-cols-2">
+        {buckets.map((bucket) => (
+          <div key={bucket.key} className="rounded-lg border border-white/10 bg-black/20 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium text-white">{bucket.label}</div>
+                <div className="mt-1 text-[11px] text-neutral-500">
+                  {bucket.total_signals} total · {bucket.resolved_signals} resolved · {bucket.open_signals} open
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-sm font-semibold text-emerald-400">
+                  {bucket.win_rate != null ? `${bucket.win_rate}%` : "No data"}
+                </div>
+                <div className="text-[11px] text-neutral-500">WR</div>
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-3 text-[11px] text-neutral-400">
+              <span>{bucket.wins}W</span>
+              <span>{bucket.losses}L</span>
+              <span>{bucket.neutral}N</span>
+              <span>{bucket.avg_r != null ? `${bucket.avg_r.toFixed(2)}R avg` : "No avg R"}</span>
+              <span>{bucket.total_r.toFixed(2)}R total</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Cluster group ──────────────────────────────────────
 
 function ClusterGroup({
@@ -599,6 +872,7 @@ function SignalRow({
   const suppressTitle = s.suppressed_reason
     ? `Suppressed: ${s.suppressed_reason}`
     : undefined;
+  const ops = operatorBadge(s);
 
   return (
     <tr
@@ -609,7 +883,10 @@ function SignalRow({
       }`}
     >
       <td className="px-2 py-2 font-medium">
-        {s.symbol.replace(/USDT$/i, "")}
+        <div>{s.symbol.replace(/USDT$/i, "")}</div>
+        <div className="mt-0.5 text-[11px] font-normal text-neutral-500">
+          {fmtEnumLabel(s.btc_regime ?? "unknown")} · {operatorReason(s)}
+        </div>
       </td>
       <td className="px-2 py-2">
         <span
@@ -643,18 +920,12 @@ function SignalRow({
         </td>
       )}
       {!isDegraded && (
-        <td className="px-2 py-2 text-center" title={suppressTitle}>
-          {s.selection_pending ? (
-            <span className="text-yellow-500" title="Selection pending — cluster window open">...</span>
-          ) : s.telegram_sent ? (
-            <span className="text-blue-400">Y</span>
-          ) : s.blocked_reason ? (
-            <span className="text-neutral-500 cursor-help" title={s.blocked_reason}>N</span>
-          ) : s.suppressed_reason ? (
-            <span className="text-neutral-500 cursor-help">N</span>
-          ) : (
-            <span className="text-neutral-600">-</span>
-          )}
+        <td className="px-2 py-2 text-center" title={suppressTitle ?? ops.title}>
+          <span
+            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${ops.className}`}
+          >
+            {ops.label}
+          </span>
         </td>
       )}
       <td className="px-2 py-2 text-neutral-400">

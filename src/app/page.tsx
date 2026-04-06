@@ -100,6 +100,9 @@ interface ProdHealth {
     gate_b: boolean;
     gate_b_reason: string | null;
     telegram_sent: boolean;
+    telegram_attempted?: boolean;
+    blocked_reason?: string | null;
+    selected_for_execution?: boolean;
     created_at: string;
   }[];
   scanner_recent: ScannerRun[];
@@ -796,6 +799,13 @@ function RecentSignalsSection({ health }: { health: ProdHealth | null }) {
           {decisions.map((decision, index) => {
             const isTrade = decision.decision === "LONG" || decision.decision === "SHORT";
             const tier = deriveTier(decision.alert_type);
+            const operatorReason = !isTrade
+              ? decision.gate_b_reason ?? "filtered"
+              : decision.telegram_sent
+                ? decision.selected_for_execution
+                  ? "telegram sent and eligible for auto execution"
+                  : "telegram sent as manual-only signal"
+                : decision.blocked_reason ?? "trade selected but Telegram not sent";
             return (
               <div
                 key={`${decision.symbol}-${index}`}
@@ -806,9 +816,10 @@ function RecentSignalsSection({ health }: { health: ProdHealth | null }) {
                   <Badge text={tier} tone={tier === "STRICT" ? "cyan" : "amber"} />
                   <Badge text={decision.decision} tone={isTrade ? "emerald" : "slate"} />
                   {decision.telegram_sent ? <Badge text="Telegram" tone="emerald" /> : null}
+                  {!decision.telegram_sent && isTrade ? <Badge text="Blocked" tone="rose" /> : null}
                 </div>
                 <div className="text-sm text-white/50 md:ml-2 md:flex-1">
-                  {!isTrade && decision.gate_b_reason ? decision.gate_b_reason : "passed through pipeline"}
+                  {operatorReason}
                 </div>
                 <div className="text-xs text-white/40">{timeAgo(decision.created_at)}</div>
               </div>

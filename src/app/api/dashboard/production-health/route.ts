@@ -11,6 +11,9 @@ interface DecisionRow {
   gate_b_passed: boolean | null;
   gate_b_reason: string | null;
   telegram_sent?: boolean | null;
+  telegram_attempted?: boolean | null;
+  blocked_reason?: string | null;
+  selected_for_execution?: boolean | null;
   created_at: string;
 }
 
@@ -36,7 +39,7 @@ export async function GET() {
   const { data: withDelivery, error: deliveryError } = await supabase
     .from("decisions")
     .select(
-      "symbol, alert_type, decision, gate_b_passed, gate_b_reason, telegram_sent, created_at"
+      "symbol, alert_type, decision, gate_b_passed, gate_b_reason, telegram_sent, telegram_attempted, blocked_reason, selected_for_execution, created_at"
     )
     .gte("created_at", sevenDaysAgo)
     .order("created_at", { ascending: false })
@@ -70,6 +73,9 @@ export async function GET() {
       gate_b: decision.gate_b_passed,
       gate_b_reason: decision.gate_b_reason,
       telegram_sent: hasTelegramColumn ? Boolean(decision.telegram_sent) : false,
+      telegram_attempted: hasTelegramColumn ? Boolean(decision.telegram_attempted) : false,
+      blocked_reason: hasTelegramColumn ? decision.blocked_reason ?? null : null,
+      selected_for_execution: hasTelegramColumn ? Boolean(decision.selected_for_execution) : false,
       created_at: decision.created_at,
     })),
     scanner_recent: recentRuns ?? [],

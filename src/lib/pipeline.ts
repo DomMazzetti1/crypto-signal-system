@@ -22,6 +22,7 @@ import { assignCluster, finalizeClusterSelection, deriveTier } from "@/lib/clust
 import { runPreTradeRiskChecks, RiskCheckResult } from "@/lib/risk-manager";
 import { getSignalContext } from "@/lib/signal-context";
 import { warnSignalRuntimeConfigOnce } from "@/lib/runtime-checks";
+import { getTelegramFilterBlockReason } from "@/lib/telegram-filters";
 
 export interface AlertPayload {
   type: string;
@@ -823,75 +824,37 @@ export async function runPipeline(
     let sendTelegram_ = true;
     const telegramVolRatio = (alert.sma20_volume && alert.sma20_volume > 0)
       ? (alert.volume ?? 0) / alert.sma20_volume : 0;
+    const bearBbMax = parseFloat(process.env.BEAR_BB_WIDTH_MAX ?? "0.12");
+    const bearVolDeadLow = parseFloat(process.env.BEAR_VOL_DEAD_ZONE_LOW ?? "2.0");
+    const bearVolDeadHigh = parseFloat(process.env.BEAR_VOL_DEAD_ZONE_HIGH ?? "2.5");
 
-    // ── Regime-specific Telegram quality filter (all tiers) ──────
-    // Based on 11,208-signal backtest (run_20260330115254):
-    // - Sideways: PF 3.28 with bb>=0.08, vol>=1.5 (keep as-is)
-    // - Bear: PF 2.01 only with bb 0.08-0.12 AND excluding vol 2.0-2.5
-    // - Bull: Already blocked by Gate B (no change needed)
-    if (sendTelegram_ && regime.btc_regime === "bear") {
-      const bearBbMax = parseFloat(process.env.BEAR_BB_WIDTH_MAX ?? "0.12");
-      const bearVolDeadLow = parseFloat(process.env.BEAR_VOL_DEAD_ZONE_LOW ?? "2.0");
-      const bearVolDeadHigh = parseFloat(process.env.BEAR_VOL_DEAD_ZONE_HIGH ?? "2.5");
-
-      const bearChecks = [
-        // bb_width>=0.08 removed 2026-03-31: ALL bb_width buckets profitable (PF 1.81-2.54 across 9488 trades)
-        { name: `bear_bb_width<${bearBbMax}`, pass: alert.bb_width < bearBbMax },
-        { name: "bear_vol_not_dead_zone", pass: !(telegramVolRatio >= bearVolDeadLow && telegramVolRatio < bearVolDeadHigh) },
-      ];
-      const bearFailed = bearChecks.filter(c => !c.pass);
-      if (bearFailed.length > 0) {
+    if (sendTelegram_) {
+      telegramBlockReason = getTelegramFilterBlockReason({
+        regime: regime.btc_regime,
+        isRelaxed,
+        regimeWeakening: regime.regime_weakening,
+        bbWidth: alert.bb_width,
+        telegramVolRatio,
+        volRatio,
+        compositeScore: scoreResult.composite_score,
+        rrTp2: levels.rr_tp2,
+        direction,
+        tp1: levels.tp1,
+        entry: levels.entry,
+        markPrice,
+        claudeConfidence,
+        bearBbMax,
+        bearVolDeadLow,
+        bearVolDeadHigh,
+      });
+      if (telegramBlockReason) {
         sendTelegram_ = false;
-        telegramBlockReason = `BEAR regime filtered: ${bearFailed.map(f => f.name).join(", ")}`;
-        console.log(`[pipeline] ${alert.symbol} BEAR regime filter: BLOCKED ${bearFailed.map(f => f.name).join(", ")} (bb_width=${alert.bb_width?.toFixed(3)}, vol_ratio=${telegramVolRatio.toFixed(2)})`);
-      } else {
-        console.log(`[pipeline] ${alert.symbol} BEAR regime filter: PASSED (bb_width=${alert.bb_width?.toFixed(3)}, vol_ratio=${telegramVolRatio.toFixed(2)})`);
+        console.log(
+          `[pipeline] ${alert.symbol} Telegram blocked: ${telegramBlockReason} (bb_width=${alert.bb_width?.toFixed(
+            3
+          )}, vol_ratio=${telegramVolRatio.toFixed(2)}, score=${scoreResult.composite_score.toFixed(1)})`
+        );
       }
-    }
-
-    // ── Regime weakening filter: block RELAXED signals when 4H diverges from daily regime ──
-    if (sendTelegram_ && isRelaxed && regime.regime_weakening) {
-      sendTelegram_ = false;
-      telegramBlockReason = "REGIME_WEAKENING";
-      console.log(`[pipeline] ${alert.symbol} RELAXED blocked: REGIME_WEAKENING (4H EMA50 slope diverges from ${regime.btc_regime} regime)`);
-    }
-
-    // ── RELAXED tier quality filter (additional checks on top of regime filter) ──
-    if (sendTelegram_ && isRelaxed) {
-      // RELAXED Telegram quality filter
-      // bb_width>=0.08 removed 2026-03-31: all bb_width buckets profitable in backtest
-      // vol_ratio>=1.5 removed 2026-03-31: vol<1.5 outperforms (PF 2.46 vs 2.24)
-      const checks: { name: string; pass: boolean }[] = [
-        { name: "pass_count", pass: true }, // pass_count not available in pipeline; checked at scanner level
-        { name: "rr_tp2>=0.8", pass: levels.rr_tp2 >= 0.8 },
-        { name: "tp1_positive", pass: direction === "long" ? levels.tp1 > levels.entry : levels.tp1 < levels.entry },
-        { name: "entry_mark_dev<=1%", pass: markPrice > 0 && Math.abs(levels.entry - markPrice) / markPrice <= 0.01 },
-      ];
-      const failed = checks.filter(c => !c.pass);
-      if (failed.length > 0) {
-        sendTelegram_ = false;
-        telegramBlockReason = `RELAXED filtered: ${failed.map(f => f.name).join(", ")}`;
-        console.log(`[pipeline] ${alert.symbol} RELAXED Telegram blocked: ${telegramBlockReason}`);
-      }
-    }
-
-    // Score filter: block signals with composite_score < 20 (0% win rate, PF 0.00 across 6 signals 2026-04-01)
-    if (sendTelegram_ && scoreResult.composite_score < 20) {
-      sendTelegram_ = false;
-      telegramBlockReason = `score_too_low: ${scoreResult.composite_score.toFixed(1)}`;
-      console.log(`[pipeline] ${alert.symbol} blocked: composite_score ${scoreResult.composite_score.toFixed(1)} < 20`);
-    }
-    // Vol ratio filter: block signals with vol_ratio < 0.5
-    if (sendTelegram_ && volRatio !== null && volRatio < 0.5) {
-      sendTelegram_ = false;
-      telegramBlockReason = `vol_ratio_too_low: ${volRatio.toFixed(2)}`;
-      console.log(`[pipeline] ${alert.symbol} blocked: vol_ratio ${volRatio.toFixed(2)} < 0.5`);
-    }
-    // Low-confidence filter: block RELAXED signals where Claude confidence is available but low
-    if (sendTelegram_ && isRelaxed && claudeConfidence !== null && claudeConfidence > 0 && claudeConfidence < 5) {
-      sendTelegram_ = false;
-      telegramBlockReason = `LOW_CONFIDENCE: ${claudeConfidence}/10 — below minimum threshold of 5`;
-      console.log(`[pipeline] ${alert.symbol} blocked: Claude confidence ${claudeConfidence}/10 < 5 minimum`);
     }
 
     // Repeat suppression: prevent same symbol+direction from flooding Telegram

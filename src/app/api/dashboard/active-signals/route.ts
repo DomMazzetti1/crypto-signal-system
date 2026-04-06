@@ -13,7 +13,7 @@ const BYBIT_BASE = "https://api.bybit.com/v5/market";
 const BASE_COLUMNS = `id, symbol, decision, alert_type, alert_tf, created_at,
        entry_price, stop_price, tp1_price, tp2_price, tp3_price,
        rr_tp1, rr_tp2,
-       telegram_sent, telegram_attempted, blocked_reason,
+       telegram_sent, telegram_attempted, telegram_error, blocked_reason,
        gate_a_quality, gate_b_passed, gate_b_reason, btc_regime,
        alert_id`;
 
@@ -333,10 +333,12 @@ export async function GET(req: NextRequest) {
       // Existing fields
       telegram_sent: d.telegram_sent ?? false,
       telegram_attempted: d.telegram_attempted ?? false,
+      telegram_error: d.telegram_error ?? null,
       blocked_reason: d.blocked_reason ?? null,
       btc_regime: d.btc_regime ?? null,
       gate_a_quality: d.gate_a_quality ?? null,
       gate_b_passed: d.gate_b_passed ?? false,
+      gate_b_reason: d.gate_b_reason ?? null,
     };
   });
 
