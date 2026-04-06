@@ -1,9 +1,10 @@
-"use client";
-
-import { useCallback, useEffect, useState } from "react";
+import { headers } from "next/headers";
 import { estimateLadderR, isPositiveOutcome } from "@/lib/outcome-estimates";
+import DashboardAutoRefresh from "@/app/dashboard-auto-refresh";
 
 const REFRESH_INTERVAL = 30_000;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 interface LiveAccountPosition {
   symbol: string;
@@ -91,6 +92,7 @@ interface ScannerRun {
 }
 
 interface ProdHealth {
+  generated_at?: string;
   recent_decisions: {
     symbol: string;
     alert_type: string;
@@ -108,6 +110,11 @@ interface DashboardData {
   signals: Signal[];
   prodHealth: ProdHealth | null;
   priceSource: string;
+}
+
+interface ActiveSignalsResponse {
+  signals?: Signal[];
+  price_source?: string;
 }
 
 function timeAgo(iso: string): string {
@@ -204,18 +211,43 @@ function progressToTarget(
   return Math.max(0, Math.min(100, (covered / total) * 100));
 }
 
+function requestBaseUrl(): string {
+  const headerStore = headers();
+  const host =
+    headerStore.get("x-forwarded-host") ??
+    headerStore.get("host") ??
+    "crypto-signal-system.vercel.app";
+  const proto =
+    headerStore.get("x-forwarded-proto") ??
+    (host.includes("localhost") ? "http" : "https");
+
+  return `${proto}://${host}`;
+}
+
+async function fetchRouteJson<T>(baseUrl: string, path: string): Promise<T | null> {
+  try {
+    const res = await fetch(`${baseUrl}${path}`, { cache: "no-store" });
+    const text = await res.text();
+    if (!text) return null;
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchDashboard(): Promise<DashboardData> {
-  const [accountRes, signalsRes, healthRes] = await Promise.allSettled([
-    fetch("/api/dashboard/live-account").then((r) => r.json()),
-    fetch("/api/dashboard/active-signals?hours=720").then((r) => r.json()),
-    fetch("/api/dashboard/production-health").then((r) => r.json()),
+  const baseUrl = requestBaseUrl();
+  const [account, signalsRes, prodHealth] = await Promise.all([
+    fetchRouteJson<LiveAccountSnapshot>(baseUrl, "/api/dashboard/live-account"),
+    fetchRouteJson<ActiveSignalsResponse>(baseUrl, "/api/dashboard/active-signals?hours=720"),
+    fetchRouteJson<ProdHealth>(baseUrl, "/api/dashboard/production-health"),
   ]);
 
   return {
-    account: accountRes.status === "fulfilled" ? accountRes.value : null,
-    signals: signalsRes.status === "fulfilled" ? (signalsRes.value.signals ?? []) : [],
-    prodHealth: healthRes.status === "fulfilled" ? healthRes.value : null,
-    priceSource: signalsRes.status === "fulfilled" ? (signalsRes.value.price_source ?? "none") : "none",
+    account,
+    signals: signalsRes?.signals ?? [],
+    prodHealth,
+    priceSource: signalsRes?.price_source ?? "none",
   };
 }
 
@@ -846,51 +878,27 @@ function ScannerSection({ health }: { health: ProdHealth | null }) {
   );
 }
 
-export default function Home() {
-  const [data, setData] = useState<DashboardData | null>(null);
-  const [lastFetch, setLastFetch] = useState<number>(Date.now());
-  const [secondsAgo, setSecondsAgo] = useState(0);
-  const [loading, setLoading] = useState(true);
-
-  const refresh = useCallback(async () => {
-    try {
-      const result = await fetchDashboard();
-      setData(result);
-      setLastFetch(Date.now());
-    } catch (err) {
-      console.error("[dashboard] fetch error:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    refresh();
-    const interval = setInterval(refresh, REFRESH_INTERVAL);
-    return () => clearInterval(interval);
-  }, [refresh]);
-
-  useEffect(() => {
-    const tick = setInterval(() => {
-      setSecondsAgo(Math.floor((Date.now() - lastFetch) / 1000));
-    }, 1000);
-    return () => clearInterval(tick);
-  }, [lastFetch]);
+export default async function Home() {
+  const data = await fetchDashboard();
+  const lastFetchMs = data.account?.fetched_at
+    ? new Date(data.account.fetched_at).getTime()
+    : data.prodHealth?.generated_at
+      ? new Date(data.prodHealth.generated_at).getTime()
+      : Date.now();
+  const secondsAgo = Math.max(0, Math.floor((Date.now() - lastFetchMs) / 1000));
+  const loading = false;
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.16),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(245,158,11,0.16),_transparent_24%),linear-gradient(180deg,_#071116_0%,_#0b0f19_36%,_#05070d_100%)] px-4 py-6 text-white md:px-8 md:py-10">
+      <DashboardAutoRefresh intervalMs={REFRESH_INTERVAL} />
       <div className="mx-auto max-w-7xl">
         <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div className="text-sm text-white/45">
             Updated {secondsAgo}s ago
             <span className="mx-2 text-white/20">•</span>
             refresh every 30s
-            {loading ? (
-              <>
-                <span className="mx-2 text-white/20">•</span>
-                <span className="text-amber-200">loading…</span>
-              </>
-            ) : null}
+            <span className="mx-2 text-white/20">•</span>
+            <span className="text-white/55">server-rendered snapshot</span>
           </div>
           <a
             href="/dashboard/signals"
