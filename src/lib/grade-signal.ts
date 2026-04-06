@@ -1,10 +1,13 @@
 /**
- * Shared signal grading logic.
- * Extracted from src/app/api/backtest/batch/route.ts gradeSignal()
- * for reuse by both backtest and shadow outcome grading.
+ * Shared signal grading logic for backtest/shadow research paths.
  *
- * Constants match backtest exactly:
- *   ATR_MULT = 1.5, SLIPPAGE = 0.0005, TAKER_FEE = 0.00055
+ * This tracks the current live 3-target ladder:
+ *   TP1 = 0.5R
+ *   TP2 = 1.0R
+ *   TP3 = 2.5R
+ *
+ * Entry slippage is applied to the fill estimate. TP2/TP3 are fee-adjusted to
+ * stay conservative, while TP1 remains the raw maker target.
  */
 
 import { Kline } from "./bybit";
@@ -12,6 +15,12 @@ import { Kline } from "./bybit";
 const ATR_MULT = 1.5;
 const TAKER_FEE = 0.00055;
 const SLIPPAGE = 0.0005;
+const FIRST_TRANCHE_PCT = 0.34;
+const SECOND_TRANCHE_PCT = 0.33;
+const THIRD_TRANCHE_PCT = 0.33;
+const TP1_R = 0.5;
+const TP2_R = 1.0;
+const TP3_R = 2.5;
 
 export interface GradeResult {
   hit_tp1: boolean;
@@ -43,14 +52,14 @@ export function gradeSignal(
 
   if (isLong) {
     sl = entry - risk;
-    tp1 = (entry + risk * 1.5) * (1 - TAKER_FEE);
-    tp2 = (entry + risk * 2.5) * (1 - TAKER_FEE);
-    tp3 = (entry + risk * 4.0) * (1 - TAKER_FEE);
+    tp1 = entry + risk * TP1_R;
+    tp2 = (entry + risk * TP2_R) * (1 - TAKER_FEE);
+    tp3 = (entry + risk * TP3_R) * (1 - TAKER_FEE);
   } else {
     sl = entry + risk;
-    tp1 = (entry - risk * 1.5) * (1 + TAKER_FEE);
-    tp2 = (entry - risk * 2.5) * (1 + TAKER_FEE);
-    tp3 = (entry - risk * 4.0) * (1 + TAKER_FEE);
+    tp1 = entry - risk * TP1_R;
+    tp2 = (entry - risk * TP2_R) * (1 + TAKER_FEE);
+    tp3 = (entry - risk * TP3_R) * (1 + TAKER_FEE);
   }
 
   let hit_tp1 = false, hit_tp2 = false, hit_tp3 = false, hit_sl = false;
@@ -114,4 +123,29 @@ export function computeR(grade: GradeResult): number {
   if (grade.hit_tp1) return Math.abs(grade.tp1 - grade.entry_price) / risk;
   if (grade.hit_sl) return -1;
   return 0;
+}
+
+export function computeLadderR(grade: GradeResult): number {
+  const risk = Math.abs(grade.entry_price - grade.stop_loss);
+  if (!Number.isFinite(risk) || risk === 0) return 0;
+
+  const tp1R = Math.abs(grade.tp1 - grade.entry_price) / risk;
+  const tp2R = Math.abs(grade.tp2 - grade.entry_price) / risk;
+  const tp3R = Math.abs(grade.tp3 - grade.entry_price) / risk;
+
+  if (!grade.hit_tp1 && grade.hit_sl) return -1;
+  if (!grade.hit_tp1) return 0;
+
+  let realizedR = FIRST_TRANCHE_PCT * tp1R;
+
+  if (grade.hit_tp2) {
+    realizedR += SECOND_TRANCHE_PCT * tp2R;
+    if (grade.hit_tp3) {
+      realizedR += THIRD_TRANCHE_PCT * tp3R;
+    }
+  } else if (grade.hit_sl) {
+    realizedR -= SECOND_TRANCHE_PCT + THIRD_TRANCHE_PCT;
+  }
+
+  return Math.round(realizedR * 1000) / 1000;
 }

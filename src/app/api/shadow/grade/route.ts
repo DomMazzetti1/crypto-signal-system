@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { Kline } from "@/lib/bybit";
-import { gradeSignal, computeR } from "@/lib/grade-signal";
+import { gradeSignal, computeLadderR } from "@/lib/grade-signal";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -111,7 +111,7 @@ export async function GET(request: NextRequest) {
 
     // Grade using shared gradeSignal function (same as backtest)
     const grade = gradeSignal(rawEntry, atrVal, isLong, futureBars);
-    const outcomeR = computeR(grade);
+    const outcomeR = computeLadderR(grade);
 
     // Update shadow_signals with graded outcome
     const { error: gradeUpdateError } = await supabase.from("shadow_signals")

@@ -11,7 +11,7 @@ import { runGateB, GateBInput } from "@/lib/gate-b";
 import { calculateLevels } from "@/lib/levels";
 import { computeHTFTrend } from "@/lib/ta";
 import { classifyRegimeFromCandles } from "@/lib/regime";
-import { gradeSignal, computeR, GradeResult } from "@/lib/grade-signal";
+import { gradeSignal, computeLadderR, GradeResult } from "@/lib/grade-signal";
 import { runWithConcurrency, readCache, enforceProductionLimits, round } from "@/lib/backtest-utils";
 
 export const dynamic = "force-dynamic";
@@ -39,6 +39,7 @@ interface StageSignal {
   trend_4h: string;
   // Levels
   rr_tp1: number;
+  rr_tp2: number;
   // Grading
   grade: GradeResult;
   r_multiple: number;
@@ -46,33 +47,43 @@ interface StageSignal {
 
 interface StageStats {
   count: number;
-  win_rate_tp1: number;
+  tp1_hit_rate: number;
+  positive_rate: number;
   avg_r: number;
-  by_setup: Record<string, { count: number; win_rate_tp1: number; avg_r: number }>;
+  by_setup: Record<string, { count: number; tp1_hit_rate: number; positive_rate: number; avg_r: number }>;
 }
 
 function computeStageStats(signals: StageSignal[]): StageStats {
   const n = signals.length;
-  if (n === 0) return { count: 0, win_rate_tp1: 0, avg_r: 0, by_setup: {} };
-  const wins = signals.filter(s => s.grade.hit_tp1).length;
+  if (n === 0) return { count: 0, tp1_hit_rate: 0, positive_rate: 0, avg_r: 0, by_setup: {} };
+  const tp1Hits = signals.filter((s) => s.grade.hit_tp1).length;
+  const positive = signals.filter((s) => s.r_multiple > 0).length;
   const rs = signals.map(s => s.r_multiple);
   const avgR = round(rs.reduce((a, b) => a + b, 0) / n, 2);
 
-  const bySetup: Record<string, { count: number; win_rate_tp1: number; avg_r: number }> = {};
-  for (const st of ["MR_LONG", "MR_SHORT", "SQ_SHORT"]) {
+  const bySetup: Record<string, { count: number; tp1_hit_rate: number; positive_rate: number; avg_r: number }> = {};
+  for (const st of ["MR_LONG", "MR_SHORT", "SQ_SHORT", "SQ_LONG_REVERSAL"]) {
     const sub = signals.filter(s => s.setup_type === st);
     if (sub.length > 0) {
-      const subWins = sub.filter(s => s.grade.hit_tp1).length;
+      const subTp1Hits = sub.filter((s) => s.grade.hit_tp1).length;
+      const subPositive = sub.filter((s) => s.r_multiple > 0).length;
       const subRs = sub.map(s => s.r_multiple);
       bySetup[st] = {
         count: sub.length,
-        win_rate_tp1: round(subWins / sub.length, 4),
+        tp1_hit_rate: round(subTp1Hits / sub.length, 4),
+        positive_rate: round(subPositive / sub.length, 4),
         avg_r: round(subRs.reduce((a, b) => a + b, 0) / sub.length, 2),
       };
     }
   }
 
-  return { count: n, win_rate_tp1: round(wins / n, 4), avg_r: avgR, by_setup: bySetup };
+  return {
+    count: n,
+    tp1_hit_rate: round(tp1Hits / n, 4),
+    positive_rate: round(positive / n, 4),
+    avg_r: avgR,
+    by_setup: bySetup,
+  };
 }
 
 function candlesUpTo(candles: Kline[], beforeMs: number): Kline[] {
@@ -179,11 +190,31 @@ export async function POST(request: NextRequest) {
         const futureBars = c1h.slice(i + 1, i + 1 + FORWARD_BARS);
 
         for (const sig of detected) {
-          const direction: "long" | "short" = sig.type.toLowerCase().includes("short") ? "short" : "long";
+          let setupType = sig.type;
+          let direction: "long" | "short" = sig.type.toLowerCase().includes("short") ? "short" : "long";
           const markPrice = ind.close;
 
           // Calculate levels (exact — same function as live)
           const levels = calculateLevels(markPrice, atr1h, direction);
+
+          if (
+            regime === "sideways" &&
+            setupType.toLowerCase().includes("sq_short") &&
+            !setupType.toLowerCase().includes("data")
+          ) {
+            const shortRisk = levels.stop - levels.entry;
+            direction = "long";
+            setupType = "SQ_LONG_REVERSAL";
+            levels.stop = levels.entry - shortRisk;
+            levels.tp0 = undefined;
+            levels.tp1 = levels.entry + shortRisk * 0.5;
+            levels.tp2 = levels.entry + shortRisk * 1.0;
+            levels.tp3 = levels.entry + shortRisk * 2.5;
+            levels.risk = shortRisk;
+            levels.rr_tp1 = 0.5;
+            levels.rr_tp2 = 1.0;
+            levels.rr_tp3 = 2.5;
+          }
 
           // Gate A: approximated — we assume pass for all universe symbols
           // (Gate A checks live orderbook freshness and spread, not available historically)
@@ -192,12 +223,13 @@ export async function POST(request: NextRequest) {
 
           // Gate B: exact — uses trend, regime, ATR, R:R (all computed from candles)
           const gateBInput: GateBInput = {
-            alertType: sig.type,
+            alertType: setupType,
             trend4h: htfTrend.trend,
             btcRegime: regime as "bull" | "bear" | "sideways",
             atr1h,
             markPrice,
             rrTp1: levels.rr_tp1,
+            rrTp2: levels.rr_tp2,
             rsi: ind.rsi,
             adx1h: ind.adx_1h,
             volume: ind.volume,
@@ -208,11 +240,11 @@ export async function POST(request: NextRequest) {
           // Grade against future bars (exact)
           const isLong = direction === "long";
           const grade = gradeSignal(markPrice, atr1h, isLong, futureBars);
-          const rMultiple = computeR(grade);
+          const rMultiple = computeLadderR(grade);
 
           allSignals.push({
             symbol,
-            setup_type: sig.type,
+            setup_type: setupType,
             candle_time: barTime,
             direction,
             mark_price: markPrice,
@@ -224,6 +256,7 @@ export async function POST(request: NextRequest) {
             regime,
             trend_4h: htfTrend.trend,
             rr_tp1: levels.rr_tp1,
+            rr_tp2: levels.rr_tp2,
             grade,
             r_multiple: rMultiple,
           });
@@ -271,23 +304,23 @@ export async function POST(request: NextRequest) {
   const delta = {
     raw_count: `${baseline.raw_signals.count} → ${relaxed.raw_signals.count} (${relaxed.raw_signals.count - baseline.raw_signals.count > 0 ? "+" : ""}${relaxed.raw_signals.count - baseline.raw_signals.count})`,
     after_gate_b_count: `${baseline.after_gate_b.count} → ${relaxed.after_gate_b.count} (${relaxed.after_gate_b.count - baseline.after_gate_b.count > 0 ? "+" : ""}${relaxed.after_gate_b.count - baseline.after_gate_b.count})`,
-    final_win_rate: `${baseline.final_signals.win_rate_tp1} → ${relaxed.final_signals.win_rate_tp1} (${round(relaxed.final_signals.win_rate_tp1 - baseline.final_signals.win_rate_tp1, 4) > 0 ? "+" : ""}${round(relaxed.final_signals.win_rate_tp1 - baseline.final_signals.win_rate_tp1, 4)})`,
-    final_avg_r: `${baseline.final_signals.avg_r} → ${relaxed.final_signals.avg_r} (${round(relaxed.final_signals.avg_r - baseline.final_signals.avg_r, 2) > 0 ? "+" : ""}${round(relaxed.final_signals.avg_r - baseline.final_signals.avg_r, 2)})`,
-    gate_b_filter_rate_baseline: baseline.raw_signals.count > 0 ? `${round((1 - baseline.after_gate_b.count / baseline.raw_signals.count) * 100, 1)}%` : "n/a",
-    gate_b_filter_rate_relaxed: relaxed.raw_signals.count > 0 ? `${round((1 - relaxed.after_gate_b.count / relaxed.raw_signals.count) * 100, 1)}%` : "n/a",
-  };
+      final_positive_rate: `${baseline.final_signals.positive_rate} → ${relaxed.final_signals.positive_rate} (${round(relaxed.final_signals.positive_rate - baseline.final_signals.positive_rate, 4) > 0 ? "+" : ""}${round(relaxed.final_signals.positive_rate - baseline.final_signals.positive_rate, 4)})`,
+      final_avg_r: `${baseline.final_signals.avg_r} → ${relaxed.final_signals.avg_r} (${round(relaxed.final_signals.avg_r - baseline.final_signals.avg_r, 2) > 0 ? "+" : ""}${round(relaxed.final_signals.avg_r - baseline.final_signals.avg_r, 2)})`,
+      gate_b_filter_rate_baseline: baseline.raw_signals.count > 0 ? `${round((1 - baseline.after_gate_b.count / baseline.raw_signals.count) * 100, 1)}%` : "n/a",
+      gate_b_filter_rate_relaxed: relaxed.raw_signals.count > 0 ? `${round((1 - relaxed.after_gate_b.count / relaxed.raw_signals.count) * 100, 1)}%` : "n/a",
+    };
 
   return NextResponse.json({
     symbols_tested: symbolCandles.size,
     fetch_errors: errors.length > 0 ? errors.slice(0, 5) : undefined,
     runtime_ms: Date.now() - startTime,
-    approximations: {
-      gate_a: "Assumed PASS for all signals. Gate A checks live orderbook freshness and spread — not available from historical candle data. Universe symbols are pre-screened for liquidity.",
-      claude_reviewer: "Not run. Claude reviewer requires live API call (~2s each). Gate B is the last filter in replay mode.",
-      regime: hasBtcData ? "Exact — computed from cached BTC 4H/1D candles at each bar" : "Approximated — insufficient BTC cache, defaulted to sideways/mixed",
-      gate_b: "Exact — uses trend_4h, regime, ATR, R:R, RSI, ADX, volume. All derived from candle data.",
-      grading: "Exact — uses 48 forward 1H bars from cache.",
-    },
+      approximations: {
+        gate_a: "Assumed PASS for all signals. Gate A checks live orderbook freshness and spread — not available from historical candle data. Universe symbols are pre-screened for liquidity.",
+        claude_reviewer: "Not run. Claude reviewer requires live API call (~2s each). Gate B is the last filter in replay mode.",
+        regime: hasBtcData ? "Exact — computed from cached BTC 4H/1D candles at each bar" : "Approximated — insufficient BTC cache, defaulted to sideways/mixed",
+        gate_b: "Close to live — uses trend_4h, regime, ATR, R:R to TP2, RSI, ADX, and volume from candle data, including sideways SQ_SHORT reversal to SQ_LONG_REVERSAL.",
+        grading: "Close to live — replays the current 0.5/1.0/2.5 ladder over 48 forward 1H bars, but still omits fill drift, clustering, portfolio/risk caps, Telegram gating, and VPS execution details.",
+      },
     baseline,
     relaxed,
     delta,

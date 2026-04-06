@@ -5,7 +5,7 @@
  * Usage:
  *   npx tsx scripts/strategy-tester.ts --config strategy.json
  *   npx tsx scripts/strategy-tester.ts --name 'SQ_SHORT_bear' --direction SHORT --entry BB_SQUEEZE \
- *     --regime bear --tp '1.0,2.0,3.5' --split '0.33,0.33,0.34' --sl-method UPPER_BB --interval 60
+ *     --regime bear --tp '0.5,1.0,2.5' --split '0.34,0.33,0.33' --sl-method UPPER_BB --interval 60
  */
 
 import { readFileSync } from "fs";
@@ -92,7 +92,7 @@ interface StrategyConfig {
   sl_param?: number;
   tp_levels: number[];
   tp_split: number[];
-  move_sl_to_be: boolean;
+  move_sl_to_be_after_tp: number | null;
   min_vol_ratio: number | null;
   min_score: number | null;
   max_stop_pct: number;
@@ -125,7 +125,16 @@ interface Trade {
   sr_obstacle: boolean;
   sr_distance_pct: number;
   ms_structure: "DOWNTREND" | "UPTREND" | "RANGE";
-  resolution_path: "FULL_SL" | "TP1_ONLY_BE" | "TP1_TP2_BE" | "TP1_TP2_TP3" | "EXPIRED";
+  resolution_path:
+    | "FULL_SL"
+    | "TP1_ONLY_SL"
+    | "TP1_ONLY_BE"
+    | "TP1_ONLY_EXPIRED"
+    | "TP1_TP2_SL"
+    | "TP1_TP2_BE"
+    | "TP1_TP2_EXPIRED"
+    | "TP1_TP2_TP3"
+    | "EXPIRED";
   fee_in_r: number;
 }
 
@@ -178,7 +187,7 @@ function parseArgs(): StrategyConfig {
   raw.regime_filter = regimeStr.split(",").map((s: string) => s.trim());
   raw.sl_method = getArg(args, "sl-method") ?? "UPPER_BB";
   raw.sl_param = getArg(args, "sl-param") ? Number(getArg(args, "sl-param")) : 0.02;
-  const tpStr = getArg(args, "tp-levels") ?? getArg(args, "tp") ?? "1.0,2.0,3.5";
+  const tpStr = getArg(args, "tp-levels") ?? getArg(args, "tp") ?? "0.5,1.0,2.5";
   raw.tp_levels = tpStr.split(",").map(Number);
   const splitStr = getArg(args, "tp-split") ?? getArg(args, "split");
   if (splitStr) {
@@ -187,12 +196,22 @@ function parseArgs(): StrategyConfig {
     const sum = nums.reduce((a, b) => a + b, 0);
     raw.tp_split = sum > 2 ? nums.map((n) => n / 100) : nums;
   } else {
-    raw.tp_split = [0.33, 0.33, 0.34];
+    raw.tp_split = [0.34, 0.33, 0.33];
   }
-  // --use-be-stop flag (default false). Also accept legacy --move-sl-be.
+  // Default to the live behavior: move SL to breakeven after TP2.
+  // Also accept legacy --move-sl-be as "after TP1".
   const useBeStop = args.includes("--use-be-stop");
   const movSlArg = getArg(args, "move-sl-be");
-  raw.move_sl_to_be = useBeStop || (movSlArg != null && movSlArg !== "false");
+  const beAfterArg = getArg(args, "move-sl-be-after") ?? getArg(args, "be-after");
+  if (beAfterArg != null) {
+    raw.move_sl_to_be_after_tp = Number(beAfterArg);
+  } else if (movSlArg === "false") {
+    raw.move_sl_to_be_after_tp = null;
+  } else if (useBeStop || movSlArg != null) {
+    raw.move_sl_to_be_after_tp = 1;
+  } else {
+    raw.move_sl_to_be_after_tp = 2;
+  }
   raw.min_vol_ratio = getArg(args, "min-vol") ? Number(getArg(args, "min-vol")) : 0;
   raw.min_score = getArg(args, "min-score") ? Number(getArg(args, "min-score")) : 0;
   raw.max_stop_pct = getArg(args, "max-stop") ? Number(getArg(args, "max-stop")) : 0.05;
@@ -208,6 +227,19 @@ function parseArgs(): StrategyConfig {
 }
 
 function normalizeConfig(raw: Record<string, unknown>): StrategyConfig {
+  let moveSlToBeAfterTp: number | null;
+  if (raw.move_sl_to_be_after_tp === null) {
+    moveSlToBeAfterTp = null;
+  } else if (raw.move_sl_to_be_after_tp != null && raw.move_sl_to_be_after_tp !== "") {
+    moveSlToBeAfterTp = Number(raw.move_sl_to_be_after_tp);
+  } else if (raw.move_sl_to_be === true) {
+    moveSlToBeAfterTp = 1;
+  } else if (raw.move_sl_to_be === false) {
+    moveSlToBeAfterTp = null;
+  } else {
+    moveSlToBeAfterTp = 2;
+  }
+
   const config: StrategyConfig = {
     name: String(raw.name ?? "unnamed"),
     direction: String(raw.direction ?? "SHORT") as StrategyConfig["direction"],
@@ -217,9 +249,9 @@ function normalizeConfig(raw: Record<string, unknown>): StrategyConfig {
       : ["all"],
     sl_method: String(raw.sl_method ?? "UPPER_BB") as StrategyConfig["sl_method"],
     sl_param: raw.sl_param != null ? Number(raw.sl_param) : undefined,
-    tp_levels: Array.isArray(raw.tp_levels) ? raw.tp_levels.map(Number) : [1.0, 2.0, 3.5],
-    tp_split: Array.isArray(raw.tp_split) ? raw.tp_split.map(Number) : [0.33, 0.33, 0.34],
-    move_sl_to_be: raw.move_sl_to_be === true,
+    tp_levels: Array.isArray(raw.tp_levels) ? raw.tp_levels.map(Number) : [0.5, 1.0, 2.5],
+    tp_split: Array.isArray(raw.tp_split) ? raw.tp_split.map(Number) : [0.34, 0.33, 0.33],
+    move_sl_to_be_after_tp: moveSlToBeAfterTp,
     min_vol_ratio: raw.min_vol_ratio != null ? Number(raw.min_vol_ratio) : null,
     min_score: raw.min_score != null ? Number(raw.min_score) : null,
     max_stop_pct: Number(raw.max_stop_pct ?? 0.05),
@@ -253,6 +285,20 @@ function normalizeConfig(raw: Record<string, unknown>): StrategyConfig {
       `${LOG_PREFIX} tp_split sums to ${splitSum.toFixed(4)}, expected ~1.0`
     );
     process.exit(1);
+  }
+
+  if (config.move_sl_to_be_after_tp != null) {
+    const beAfterTp = config.move_sl_to_be_after_tp;
+    if (
+      !Number.isInteger(beAfterTp) ||
+      beAfterTp < 1 ||
+      beAfterTp >= config.tp_levels.length
+    ) {
+      console.error(
+        `${LOG_PREFIX} move_sl_to_be_after_tp must be an integer between 1 and ${config.tp_levels.length - 1}`
+      );
+      process.exit(1);
+    }
   }
 
   if (config.sl_method === "FIXED_PCT" && config.sl_param == null) {
@@ -844,8 +890,12 @@ function processSymbolStrategy(
           if (tpHitThisBar) {
             tpHits[k] = true;
 
-            // Move SL to breakeven after first TP hit
-            if (config.move_sl_to_be && !slMovedToBe) {
+            // Move SL to breakeven after the configured target is hit.
+            if (
+              config.move_sl_to_be_after_tp != null &&
+              !slMovedToBe &&
+              k + 1 >= config.move_sl_to_be_after_tp
+            ) {
               effectiveStop = entry;
               slMovedToBe = true;
             }
@@ -898,10 +948,14 @@ function processSymbolStrategy(
         resolutionPath = "FULL_SL";
       } else if (tpHits.every(Boolean)) {
         resolutionPath = "TP1_TP2_TP3";
+      } else if (hitSl && tpHitCount >= 2) {
+        resolutionPath = slMovedToBe ? "TP1_TP2_BE" : "TP1_TP2_SL";
+      } else if (hitSl && tpHitCount >= 1) {
+        resolutionPath = slMovedToBe ? "TP1_ONLY_BE" : "TP1_ONLY_SL";
       } else if (tpHitCount >= 2) {
-        resolutionPath = "TP1_TP2_BE";
+        resolutionPath = "TP1_TP2_EXPIRED";
       } else if (tpHitCount >= 1) {
-        resolutionPath = "TP1_ONLY_BE";
+        resolutionPath = "TP1_ONLY_EXPIRED";
       } else {
         resolutionPath = "EXPIRED";
       }
@@ -1116,7 +1170,7 @@ function printSummary(summary: TestSummary, trades: Trade[] = []): void {
     `TP Levels: [${c.tp_levels.join(", ")}] | Split: [${c.tp_split.join(", ")}]`
   );
   console.log(
-    `Regime Filter: [${c.regime_filter.join(", ")}] | Interval: ${c.interval}m | BE Stop: ${c.move_sl_to_be} | Fees: ${c.apply_fees}`
+    `Regime Filter: [${c.regime_filter.join(", ")}] | Interval: ${c.interval}m | BE Stop After: ${c.move_sl_to_be_after_tp == null ? "disabled" : `TP${c.move_sl_to_be_after_tp}`} | Fees: ${c.apply_fees}`
   );
   console.log("═══════════════════════════════════════════");
 
@@ -1251,15 +1305,23 @@ function printSummary(summary: TestSummary, trades: Trade[] = []): void {
     };
 
     const fullSl = pathStats("FULL_SL");
+    const tp1Sl = pathStats("TP1_ONLY_SL");
     const tp1Be = pathStats("TP1_ONLY_BE");
+    const tp1Expired = pathStats("TP1_ONLY_EXPIRED");
+    const tp1Tp2Sl = pathStats("TP1_TP2_SL");
     const tp1Tp2Be = pathStats("TP1_TP2_BE");
+    const tp1Tp2Expired = pathStats("TP1_TP2_EXPIRED");
     const tp1Tp2Tp3 = pathStats("TP1_TP2_TP3");
     const expired = pathStats("EXPIRED");
 
     console.log("LADDER ANALYSIS:");
     console.log(`  FULL_SL (missed TP1):   ${String(fullSl.n).padStart(4)} trades  Avg R ${fullSl.avgR}`);
+    console.log(`  TP1→SL:                 ${String(tp1Sl.n).padStart(4)} trades  Avg R ${tp1Sl.avgR}`);
     console.log(`  TP1→BE:                 ${String(tp1Be.n).padStart(4)} trades  Avg R ${tp1Be.avgR}`);
+    console.log(`  TP1→EXPIRED:            ${String(tp1Expired.n).padStart(4)} trades  Avg R ${tp1Expired.avgR}`);
+    console.log(`  TP1→TP2→SL:             ${String(tp1Tp2Sl.n).padStart(4)} trades  Avg R ${tp1Tp2Sl.avgR}`);
     console.log(`  TP1→TP2→BE:             ${String(tp1Tp2Be.n).padStart(4)} trades  Avg R ${tp1Tp2Be.avgR}`);
+    console.log(`  TP1→TP2→EXPIRED:        ${String(tp1Tp2Expired.n).padStart(4)} trades  Avg R ${tp1Tp2Expired.avgR}`);
     console.log(`  TP1→TP2→TP3:            ${String(tp1Tp2Tp3.n).padStart(4)} trades  Avg R ${tp1Tp2Tp3.avgR}`);
     if (expired.n > 0) {
       console.log(`  EXPIRED:                ${String(expired.n).padStart(4)} trades  Avg R ${expired.avgR}`);
