@@ -97,7 +97,7 @@ export interface PipelineResult {
   levels?: {
     entry: number;
     stop: number;
-    tp0: number;
+    tp0?: number;
     tp1: number;
     tp2: number;
     tp3: number;
@@ -421,17 +421,17 @@ export async function runPipeline(
     alert.type = "SQ_LONG_REVERSAL";
     reversal = true;
 
-    // Reversed geometry: R = original short's risk distance (stop - entry)
+    // Reversed geometry: reuse the original short risk distance with the canonical 3-target ladder.
     const R = levels.stop - levels.entry;        // positive: short stop is above entry
-    levels.stop  = levels.entry - R;             // new stop below entry
-    levels.tp0   = levels.entry + R;             // single 1R exit
-    levels.tp1   = levels.entry + R;
-    levels.tp2   = levels.entry + R;
-    levels.tp3   = levels.entry + R;
-    levels.risk  = R;
-    levels.rr_tp1 = 1.0;
+    levels.stop = levels.entry - R;              // new stop below entry
+    levels.tp0 = undefined;
+    levels.tp1 = levels.entry + R * 0.5;
+    levels.tp2 = levels.entry + R * 1.0;
+    levels.tp3 = levels.entry + R * 2.5;
+    levels.risk = R;
+    levels.rr_tp1 = 0.5;
     levels.rr_tp2 = 1.0;
-    levels.rr_tp3 = 1.0;
+    levels.rr_tp3 = 2.5;
 
     console.log(`[pipeline] ${alert.symbol}: sideways regime → reversed to SQ_LONG_REVERSAL`);
   }
@@ -444,6 +444,7 @@ export async function runPipeline(
     atr1h: atr14_1h,
     markPrice,
     rrTp1: levels.rr_tp1,
+    rrTp2: levels.rr_tp2,
     rsi: alert.rsi,
     adx1h: alert.adx1h,
     volume: alert.volume,
@@ -755,7 +756,7 @@ export async function runPipeline(
 
   const extendedData: Record<string, unknown> = {
     ...baseData,
-    tp0_price: levels.tp0,
+    tp0_price: levels.tp0 ?? null,
     vol_ratio: volRatio,
     entry_deviation_pct: entryDeviationPct,
     composite_score: scoreResult.composite_score,
@@ -862,8 +863,7 @@ export async function runPipeline(
       // vol_ratio>=1.5 removed 2026-03-31: vol<1.5 outperforms (PF 2.46 vs 2.24)
       const checks: { name: string; pass: boolean }[] = [
         { name: "pass_count", pass: true }, // pass_count not available in pipeline; checked at scanner level
-        // rr_tp1 is always 1.0 now (tightened from 1.5) — guard retained for future changes
-        { name: "rr_tp1>=0.8", pass: levels.rr_tp1 >= 0.8 },
+        { name: "rr_tp2>=0.8", pass: levels.rr_tp2 >= 0.8 },
         { name: "tp1_positive", pass: direction === "long" ? levels.tp1 > levels.entry : levels.tp1 < levels.entry },
         { name: "entry_mark_dev<=1%", pass: markPrice > 0 && Math.abs(levels.entry - markPrice) / markPrice <= 0.01 },
       ];
@@ -939,7 +939,7 @@ export async function runPipeline(
               direction: direction.toUpperCase() as 'LONG' | 'SHORT',
               entry_price: levels.entry,
               stop_price: levels.stop,
-              tp0_price: levels.tp0,
+              tp0_price: levels.tp0 ?? null,
               tp1_price: levels.tp1,
               tp2_price: levels.tp2,
               tp3_price: levels.tp3,

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { getSupabase } from "@/lib/supabase";
+import { estimateLadderR, isPositiveOutcome } from "@/lib/outcome-estimates";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -99,20 +100,12 @@ function buildPrompt(data: Awaited<ReturnType<typeof gatherData>>, mode: string)
 
   // ── Pre-compute breakdowns (don't make Sonnet find these patterns) ──
   type Signal = typeof allResolved[number];
-  const isWin = (s: Signal) => s.graded_outcome?.startsWith("WIN");
-  const getRmult = (s: Signal) => {
-    // Current live ladder is 0.5 / 1.0 / 2.5R, with the final runner closed at TP2.
-    if (s.graded_outcome === "WIN_FULL") return 2.5;
-    if (s.resolution_path?.includes("TP3")) return 2.5;
-    if (s.resolution_path?.includes("TP2")) return 2.5;
-    if (s.resolution_path?.includes("TP1")) return 1.0;
-    if (s.graded_outcome === "LOSS") return -1.0;
-    return 0.0;
-  };
+  const isWin = (s: Signal) => isPositiveOutcome(s.graded_outcome, s.resolution_path);
+  const getRmult = (s: Signal) => estimateLadderR(s.graded_outcome, s.resolution_path);
 
   const withEnrichment = allResolved.filter((s: Signal) => s.signal_oi_delta_1h_pct != null);
   const totalWins = allResolved.filter(isWin).length;
-  const totalLosses = allResolved.filter((s: Signal) => s.graded_outcome === "LOSS").length;
+  const totalLosses = allResolved.filter((s: Signal) => getRmult(s) < 0).length;
   const totalR = allResolved.reduce((sum: number, s: Signal) => sum + getRmult(s), 0);
 
   // Win rate by OI direction at signal time

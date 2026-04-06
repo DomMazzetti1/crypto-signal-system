@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
+import { estimateLadderR, isPositiveOutcome } from "@/lib/outcome-estimates";
 import { sendTelegram } from "@/lib/telegram";
 
 export const dynamic = "force-dynamic";
@@ -11,16 +12,6 @@ function fmtPrice(n: number): string {
   if (n >= 1000) return n.toFixed(2);
   if (n >= 1) return n.toFixed(4);
   return n.toFixed(6);
-}
-
-function estimateR(outcome: string): number {
-  if (outcome === "WIN_FULL" || outcome === "WIN_TP2" || outcome === "WIN_TP3") return 2.5;
-  if (outcome === "WIN_TP1") return 1.0;
-  if (outcome === "WIN_PARTIAL_THEN_SL" || outcome === "WIN_PARTIAL_EXPIRED") return 0.5;
-  if (outcome === "WIN_BE" || outcome === "WIN_BREAKEVEN") return 0;
-  if (outcome === "LOSS") return -1;
-  if (outcome.startsWith("WIN")) return 0.5;
-  return 0;
 }
 
 export async function GET(request: NextRequest) {
@@ -62,32 +53,32 @@ export async function GET(request: NextRequest) {
   const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000).toISOString();
   const { data: overnightRaw } = await supabase
     .from("decisions")
-    .select("graded_outcome")
+    .select("graded_outcome, resolution_path")
     .eq("telegram_sent", true)
     .not("graded_outcome", "is", null)
     .gte("created_at", twelveHoursAgo);
 
   const overnight = overnightRaw ?? [];
-  const overnightWins = overnight.filter(d => String(d.graded_outcome).startsWith("WIN")).length;
-  const overnightLosses = overnight.filter(d => d.graded_outcome === "LOSS").length;
-  const overnightR = overnight.reduce((sum, d) => sum + estimateR(String(d.graded_outcome)), 0);
+  const overnightWins = overnight.filter(d => isPositiveOutcome(d.graded_outcome, d.resolution_path)).length;
+  const overnightLosses = overnight.filter(d => estimateLadderR(d.graded_outcome, d.resolution_path) < 0).length;
+  const overnightR = overnight.reduce((sum, d) => sum + estimateLadderR(d.graded_outcome, d.resolution_path), 0);
 
   // ── Overall performance (all time, telegram_sent + graded) ──
   const { data: allGradedRaw } = await supabase
     .from("decisions")
-    .select("graded_outcome")
+    .select("graded_outcome, resolution_path")
     .eq("telegram_sent", true)
     .not("graded_outcome", "is", null);
 
   const allGraded = allGradedRaw ?? [];
-  const totalWins = allGraded.filter(d => String(d.graded_outcome).startsWith("WIN")).length;
+  const totalWins = allGraded.filter(d => isPositiveOutcome(d.graded_outcome, d.resolution_path)).length;
   const winRate = allGraded.length > 0 ? ((totalWins / allGraded.length) * 100).toFixed(0) : "--";
-  const totalR = allGraded.reduce((sum, d) => sum + estimateR(String(d.graded_outcome)), 0);
+  const totalR = allGraded.reduce((sum, d) => sum + estimateLadderR(d.graded_outcome, d.resolution_path), 0);
   const avgR = allGraded.length > 0 ? (totalR / allGraded.length).toFixed(2) : "--";
-  const winR = allGraded.filter(d => String(d.graded_outcome).startsWith("WIN"))
-    .reduce((sum, d) => sum + Math.max(0, estimateR(String(d.graded_outcome))), 0);
-  const lossR = allGraded.filter(d => d.graded_outcome === "LOSS")
-    .reduce((sum, d) => sum + Math.abs(estimateR(String(d.graded_outcome))), 0);
+  const winR = allGraded.filter(d => isPositiveOutcome(d.graded_outcome, d.resolution_path))
+    .reduce((sum, d) => sum + Math.max(0, estimateLadderR(d.graded_outcome, d.resolution_path)), 0);
+  const lossR = allGraded.filter(d => estimateLadderR(d.graded_outcome, d.resolution_path) < 0)
+    .reduce((sum, d) => sum + Math.abs(estimateLadderR(d.graded_outcome, d.resolution_path)), 0);
   const pf = lossR > 0 ? (winR / lossR).toFixed(2) : totalWins > 0 ? "inf" : "--";
 
   // ── Open positions (telegram_sent, not graded) ──

@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
  *
  * Receives position lifecycle events from the execution engine.
  * - POSITION_OPENED: stamps exec_opened_at on the decision
- * - TP0_HIT / TP1_HIT: stamps partial lifecycle markers without resolving the trade
+ * - TP0_HIT / TP1_HIT / TP2_HIT: stamps partial lifecycle markers without resolving the trade
  * - Close events: updates graded_outcome and resolution_path
  *
  * Expected payload:
@@ -27,6 +27,8 @@ export const dynamic = "force-dynamic";
 type DecisionState = {
   id: string;
   graded_outcome: string | null;
+  tp0_price?: number | string | null;
+  tp1_price?: number | string | null;
   tp1_hit_at?: string | null;
   tp2_hit_at?: string | null;
   tp3_hit_at?: string | null;
@@ -49,6 +51,28 @@ function buildPath(parts: string[]): string {
   return parts.join("->");
 }
 
+function parseMaybeNumber(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function hasLegacyTp0(existing: DecisionState): boolean {
+  const tp0Price = parseMaybeNumber(existing.tp0_price);
+  const tp1Price = parseMaybeNumber(existing.tp1_price);
+  return (
+    tp0Price != null &&
+    tp1Price != null &&
+    tp0Price > 0 &&
+    Math.abs(tp0Price - tp1Price) > 1e-9
+  );
+}
+
 function deriveTerminalOutcome(
   status: string,
   existing: DecisionState,
@@ -66,16 +90,6 @@ function deriveTerminalOutcome(
   if (existing.tp2_hit_at) pathParts.push("TP2");
   if (existing.tp3_hit_at) pathParts.push("TP3");
 
-  if (status === "TP2_HIT") {
-    if (!pathParts.includes("TP2")) pathParts.push("TP2");
-    return {
-      graded_outcome: "WIN_FULL",
-      resolution_path: buildPath(pathParts),
-      resolved_at: eventAt,
-      tp2_hit_at: eventAt,
-    };
-  }
-
   if (status === "TP3_HIT") {
     if (!pathParts.includes("TP2")) pathParts.push("TP2");
     if (!pathParts.includes("TP3")) pathParts.push("TP3");
@@ -83,6 +97,7 @@ function deriveTerminalOutcome(
       graded_outcome: "WIN_FULL",
       resolution_path: buildPath(pathParts),
       resolved_at: eventAt,
+      tp2_hit_at: existing.tp2_hit_at ?? eventAt,
       tp3_hit_at: eventAt,
     };
   }
@@ -170,11 +185,24 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ updated: false, decision_id: decisionId, status: "TP0_HIT" });
   }
 
-  const { data: existing, error: readError } = await supabase
+  const primaryRead = await supabase
     .from("decisions")
-    .select("id, graded_outcome, tp1_hit_at, tp2_hit_at, tp3_hit_at, stopped_at")
+    .select("id, graded_outcome, tp0_price, tp1_price, tp1_hit_at, tp2_hit_at, tp3_hit_at, stopped_at")
     .eq("id", decisionId)
     .maybeSingle();
+
+  let existing: DecisionState | null = primaryRead.data as DecisionState | null;
+  let readError = primaryRead.error;
+
+  if (readError?.message.includes("does not exist")) {
+    const fallback = await supabase
+      .from("decisions")
+      .select("id, graded_outcome, tp1_hit_at, tp2_hit_at, tp3_hit_at, stopped_at")
+      .eq("id", decisionId)
+      .maybeSingle();
+    existing = fallback.data as DecisionState | null;
+    readError = fallback.error;
+  }
 
   if (readError) {
     console.error(`[exec-callback] Failed to read decision ${decisionId}:`, readError.message);
@@ -183,6 +211,19 @@ export async function POST(request: NextRequest) {
 
   if (!existing) {
     return NextResponse.json({ error: `Decision ${decisionId} not found` }, { status: 404 });
+  }
+
+  const legacyTp0Position = hasLegacyTp0(existing);
+
+  if (
+    existing.graded_outcome &&
+    !OVERWRITABLE_EXEC_OUTCOMES.has(existing.graded_outcome)
+  ) {
+    console.log(`[exec-callback] Decision ${decisionId} already graded as ${existing.graded_outcome} — skipping ${status}`);
+    return NextResponse.json({
+      updated: false,
+      reason: `already graded as ${existing.graded_outcome}`,
+    });
   }
 
   if (status === "TP1_HIT") {
@@ -200,18 +241,32 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ updated: true, decision_id: decisionId, status: "TP1_HIT" });
   }
 
-  if (
-    existing.graded_outcome &&
-    !OVERWRITABLE_EXEC_OUTCOMES.has(existing.graded_outcome)
-  ) {
-    console.log(`[exec-callback] Decision ${decisionId} already graded as ${existing.graded_outcome} — skipping ${status}`);
-    return NextResponse.json({
-      updated: false,
-      reason: `already graded as ${existing.graded_outcome}`,
-    });
+  if (status === "TP2_HIT" && !legacyTp0Position) {
+    const { error } = await supabase
+      .from("decisions")
+      .update({ tp2_hit_at: eventAt })
+      .eq("id", decisionId);
+
+    if (error) {
+      console.error(`[exec-callback] Failed to set tp2_hit_at for ${decisionId}:`, error.message);
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    console.log(`[exec-callback] Decision ${decisionId}: TP2_HIT — tp2_hit_at set`);
+    return NextResponse.json({ updated: true, decision_id: decisionId, status: "TP2_HIT" });
   }
 
-  const mapping = deriveTerminalOutcome(status, existing, eventAt);
+  const mapping =
+    status === "TP2_HIT" && legacyTp0Position
+      ? {
+          graded_outcome: "WIN_FULL",
+          resolution_path: existing.tp1_hit_at ? "ENTRY->TP1->TP2" : "ENTRY->TP2",
+          resolved_at: eventAt,
+          tp2_hit_at: eventAt,
+          tp3_hit_at: undefined,
+          stopped_at: undefined,
+        }
+      : deriveTerminalOutcome(status, existing, eventAt);
   const { error } = await supabase
     .from("decisions")
     .update({
@@ -232,8 +287,12 @@ export async function POST(request: NextRequest) {
   console.log(`[exec-callback] Decision ${decisionId}: ${status} → ${mapping.graded_outcome} (${mapping.resolution_path})`);
 
   // For full-close events, persist funding data to production_signal_grades
-  const FULL_CLOSE_STATUSES = ["SL_HIT", "TP2_HIT", "TP3_HIT", "EXPIRED"];
-  if (FULL_CLOSE_STATUSES.includes(status)) {
+  const isFullCloseStatus =
+    status === "SL_HIT" ||
+    status === "TP3_HIT" ||
+    status === "EXPIRED" ||
+    (status === "TP2_HIT" && legacyTp0Position);
+  if (isFullCloseStatus) {
     const fundingCostUsd = typeof body.funding_cost_usd === "number" ? body.funding_cost_usd : null;
     const fundingSettlements = Array.isArray(body.funding_settlements) ? body.funding_settlements : null;
     const fundingSettlementCount = typeof body.funding_settlement_count === "number" ? body.funding_settlement_count : null;

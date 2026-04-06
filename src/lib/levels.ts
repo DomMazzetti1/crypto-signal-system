@@ -1,7 +1,7 @@
 export interface PriceLevels {
   entry: number;
   stop: number;
-  tp0: number;
+  tp0?: number;
   tp1: number;
   tp2: number;
   tp3: number;
@@ -23,23 +23,21 @@ export function calculateLevels(
 
   const isLong = direction !== "short";
 
-  let entry: number, stop: number, tp0: number, tp1: number, tp2: number, tp3: number;
+  let entry: number, stop: number, tp1: number, tp2: number, tp3: number;
 
   if (isLong) {
     entry = markPrice;
     stop = entry - riskDistance;
     const risk = riskDistance;
-    tp0 = entry + risk * 0.5;
-    tp1 = entry + risk * 1.0;
-    tp2 = entry + risk * 2.5;
+    tp1 = entry + risk * 0.5;
+    tp2 = entry + risk * 1.0;
     tp3 = entry + risk * 2.5;
   } else {
     entry = markPrice;
     stop = entry + riskDistance;
     const risk = riskDistance;
-    tp0 = entry - risk * 0.5;
-    tp1 = entry - risk * 1.0;
-    tp2 = entry - risk * 2.5;
+    tp1 = entry - risk * 0.5;
+    tp2 = entry - risk * 1.0;
     tp3 = entry - risk * 2.5;
   }
 
@@ -55,10 +53,9 @@ export function calculateLevels(
   } else if (!Number.isFinite(risk) || risk <= 0) {
     valid = false;
     invalid_reason = `zero or invalid risk: ${risk}`;
-  } else if (tp0 <= 0 || tp1 <= 0 || tp2 <= 0 || tp3 <= 0) {
+  } else if (tp1 <= 0 || tp2 <= 0 || tp3 <= 0) {
     // Clamp negative TPs to a floor (0.1% of entry) instead of allowing negatives
     const floor = entry * 0.001;
-    if (tp0 <= 0) tp0 = floor;
     if (tp1 <= 0) tp1 = floor;
     if (tp2 <= 0) tp2 = floor;
     if (tp3 <= 0) tp3 = floor;
@@ -75,7 +72,6 @@ export function calculateLevels(
   return {
     entry,
     stop,
-    tp0,
     tp1,
     tp2,
     tp3,

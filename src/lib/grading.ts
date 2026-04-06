@@ -18,7 +18,7 @@ const SLIPPAGE = 0.0005;
 const TAKER_FEE = 0.00055;
 
 /**
- * Compute ladder-adjusted R for 33/33/34 TP split with SL→breakeven after TP1.
+ * Compute ladder-adjusted R for the live 34/33/33 TP split with SL→breakeven after TP2.
  * Uses actual R-multiples from stored prices (not hardcoded).
  */
 function computeLadderR(
@@ -27,21 +27,20 @@ function computeLadderR(
 ): number {
   if (!hit_tp1 && hit_sl) return -1.0;       // Full stop
   if (!hit_tp1 && !hit_sl) return 0;          // Expired, no TP hits
-  // TP1 hit — SL moves to breakeven
-  let r = 0.33 * tp1R;                        // TP1 tranche locked in
+  let r = 0.34 * tp1R;                        // TP1 tranche locked in
   if (hit_tp2) {
     r += 0.33 * tp2R;                         // TP2 tranche locked in
     if (hit_tp3) {
-      r += 0.34 * tp3R;                       // TP3 tranche
+      r += 0.33 * tp3R;                       // TP3 tranche
     } else if (hit_sl) {
-      r += 0.34 * 0.0;                        // Last tranche stopped at breakeven
+      r += 0.33 * 0.0;                        // Last tranche stopped at breakeven
     } else {
-      r += 0.34 * (tp2R * 0.8);              // Expired near TP2 area (estimate)
+      r += 0.33 * 0.0;                        // Runner unresolved at expiry — conservative estimate
     }
   } else if (hit_sl) {
-    r += 0.67 * 0.0;                          // Remaining stopped at breakeven
+    r -= 0.66;                                // Remaining size still carries full stop risk before TP2
   } else {
-    r += 0.67 * (tp1R * 0.5);                // Expired between entry and TP1 area (estimate)
+    r += 0.66 * 0.0;                          // Conservative: only locked-in TP1 tranche counted at expiry
   }
   return Math.round(r * 100) / 100;
 }
@@ -154,13 +153,13 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
 
     let tp1: number = Number.isFinite(Number(dec.tp1_price)) && Number(dec.tp1_price) > 0
       ? Number(dec.tp1_price)
-      : isLong ? entry + rawRisk * 1.5 : entry - rawRisk * 1.5;
+      : isLong ? entry + rawRisk * 0.5 : entry - rawRisk * 0.5;
     let tp2: number = Number.isFinite(Number(dec.tp2_price)) && Number(dec.tp2_price) > 0
       ? Number(dec.tp2_price)
-      : isLong ? entry + rawRisk * 2.5 : entry - rawRisk * 2.5;
+      : isLong ? entry + rawRisk * 1.0 : entry - rawRisk * 1.0;
     let tp3: number = Number.isFinite(Number(dec.tp3_price)) && Number(dec.tp3_price) > 0
       ? Number(dec.tp3_price)
-      : isLong ? entry + rawRisk * 4.0 : entry - rawRisk * 4.0;
+      : isLong ? entry + rawRisk * 2.5 : entry - rawRisk * 2.5;
 
     // Apply friction model to match backtest/shadow grading methodology
     const fillEntry = isLong ? entry * (1 + SLIPPAGE) : entry * (1 - SLIPPAGE);
@@ -248,8 +247,8 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
 
     // Compute actual R-multiples from stored prices (not hardcoded)
     const tp1R = rawRisk > 0 ? Math.abs(tp1 - entry) / rawRisk : 1.0;
-    const tp2R = rawRisk > 0 ? Math.abs(tp2 - entry) / rawRisk : 2.0;
-    const tp3R = rawRisk > 0 ? Math.abs(tp3 - entry) / rawRisk : 3.5;
+    const tp2R = rawRisk > 0 ? Math.abs(tp2 - entry) / rawRisk : 1.0;
+    const tp3R = rawRisk > 0 ? Math.abs(tp3 - entry) / rawRisk : 2.5;
 
     // outcome_r = full-position R (as if entire position exits at highest TP hit)
     let outcome_r = 0;

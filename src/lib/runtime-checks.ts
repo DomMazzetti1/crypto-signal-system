@@ -1,6 +1,12 @@
 import type { ExecSignalPayload } from "@/lib/exec-webhook";
 
 const CURRENT_SIGNAL_LADDER_R = {
+  tp1: 0.5,
+  tp2: 1.0,
+  tp3: 2.5,
+} as const;
+
+const LEGACY_SIGNAL_LADDER_R = {
   tp0: 0.5,
   tp1: 1.0,
   tp2: 2.5,
@@ -64,31 +70,47 @@ export function warnExecPayloadConsistency(payload: ExecSignalPayload): void {
     return;
   }
 
-  const tp0R = round3(ratio(payload.entry_price, payload.tp0_price, risk));
+  const legacyTp0Payload =
+    typeof payload.tp0_price === "number" &&
+    Number.isFinite(payload.tp0_price) &&
+    payload.tp0_price > 0 &&
+    Math.abs(payload.tp0_price - payload.tp1_price) > 1e-9;
+  const tp0R = legacyTp0Payload && payload.tp0_price != null
+    ? round3(ratio(payload.entry_price, payload.tp0_price, risk))
+    : null;
   const tp1R = round3(ratio(payload.entry_price, payload.tp1_price, risk));
   const tp2R = round3(ratio(payload.entry_price, payload.tp2_price, risk));
   const tp3R = round3(ratio(payload.entry_price, payload.tp3_price, risk));
 
-  const expected = CURRENT_SIGNAL_LADDER_R;
+  const expected = legacyTp0Payload ? LEGACY_SIGNAL_LADDER_R : CURRENT_SIGNAL_LADDER_R;
   const isLong = payload.direction === "LONG";
   const monotonic =
-    isLong
-      ? payload.tp0_price > payload.stop_price &&
-        payload.tp0_price > 0 &&
-        payload.tp0_price <= payload.tp1_price &&
-        payload.tp1_price <= payload.tp2_price &&
-        payload.tp2_price <= payload.tp3_price
-      : payload.tp0_price < payload.stop_price &&
-        payload.tp3_price <= payload.tp2_price &&
-        payload.tp2_price <= payload.tp1_price &&
-        payload.tp1_price <= payload.tp0_price;
+    legacyTp0Payload
+      ? isLong
+        ? payload.tp0_price! > payload.stop_price &&
+          payload.tp0_price! > 0 &&
+          payload.tp0_price! <= payload.tp1_price &&
+          payload.tp1_price <= payload.tp2_price &&
+          payload.tp2_price <= payload.tp3_price
+        : payload.tp0_price! < payload.stop_price &&
+          payload.tp3_price <= payload.tp2_price &&
+          payload.tp2_price <= payload.tp1_price &&
+          payload.tp1_price <= payload.tp0_price!
+      : isLong
+        ? payload.tp1_price > payload.stop_price &&
+          payload.tp1_price > 0 &&
+          payload.tp1_price <= payload.tp2_price &&
+          payload.tp2_price <= payload.tp3_price
+        : payload.tp1_price < payload.stop_price &&
+          payload.tp3_price <= payload.tp2_price &&
+          payload.tp2_price <= payload.tp1_price;
 
   if (!monotonic) {
     console.warn(
       `[runtime-checks] ${payload.symbol} non-monotonic exec payload levels: ${JSON.stringify({
         entry: payload.entry_price,
         stop: payload.stop_price,
-        tp0: payload.tp0_price,
+        tp0: payload.tp0_price ?? null,
         tp1: payload.tp1_price,
         tp2: payload.tp2_price,
         tp3: payload.tp3_price,
@@ -97,7 +119,7 @@ export function warnExecPayloadConsistency(payload: ExecSignalPayload): void {
   }
 
   const mismatches = [
-    Math.abs(tp0R - expected.tp0) > RATIO_TOLERANCE ? `tp0=${tp0R}R` : null,
+    legacyTp0Payload && tp0R != null && Math.abs(tp0R - LEGACY_SIGNAL_LADDER_R.tp0) > RATIO_TOLERANCE ? `tp0=${tp0R}R` : null,
     Math.abs(tp1R - expected.tp1) > RATIO_TOLERANCE ? `tp1=${tp1R}R` : null,
     Math.abs(tp2R - expected.tp2) > RATIO_TOLERANCE ? `tp2=${tp2R}R` : null,
     Math.abs(tp3R - expected.tp3) > RATIO_TOLERANCE ? `tp3=${tp3R}R` : null,

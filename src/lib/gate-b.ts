@@ -13,6 +13,7 @@ export interface GateBInput {
   atr1h: number;
   markPrice: number;
   rrTp1: number;
+  rrTp2?: number;
   // Signal indicator values for regime-specific thresholds
   rsi?: number;
   adx1h?: number;
@@ -27,7 +28,7 @@ export interface GateBVariant {
 export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult {
   const {
     alertType, trend4h, btcRegime,
-    atr1h, markPrice, rrTp1, rsi,
+    atr1h, markPrice, rrTp1, rrTp2, rsi,
   } = input;
   const lowerType = alertType.toLowerCase();
   const allowCounterTrend = variant?.allow_counter_trend ?? false;
@@ -62,13 +63,13 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
   }
 
   // ── R:R minimum check ─────────────────────────────────
-  // NOTE: rr_tp1 is now 1.0 after TP ladder tightening (was 1.5).
-  // Guard retained for when entry is set to a non-mark price (e.g., limit order offset).
-  const rrRounded = Math.round(rrTp1 * 100) / 100;
+  // With TP1 now at 0.5R, use the second target for minimum viability checks.
+  // Fall back to rrTp1 for older callers that haven't been updated yet.
+  const rrRounded = Math.round((rrTp2 ?? rrTp1) * 100) / 100;
   if (rrRounded < 0.8) {
     return {
       passed: false,
-      reason: `R:R to TP1 too low: ${rrRounded} < 0.8`,
+      reason: `R:R to TP2 too low: ${rrRounded} < 0.8`,
     };
   }
 

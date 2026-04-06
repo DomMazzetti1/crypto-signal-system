@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
+import { estimateLadderR, isPositiveOutcome } from "@/lib/outcome-estimates";
 
 export const dynamic = "force-dynamic";
 
@@ -33,7 +34,7 @@ export async function GET(req: NextRequest) {
   // Try querying extended columns — if they don't exist, return gracefully
   const { data: rows, error } = await supabase
     .from("decisions")
-    .select("selected_for_execution, suppressed_reason, cluster_rank, graded_outcome")
+    .select("selected_for_execution, suppressed_reason, cluster_rank, graded_outcome, resolution_path")
     .in("decision", ["LONG", "SHORT", "MR_LONG", "MR_SHORT"])
     .gte("created_at", cutoff);
 
@@ -67,31 +68,20 @@ export async function GET(req: NextRequest) {
 
   function computeStats(subset: typeof resolved) {
     const total = subset.length;
-    const winFull = subset.filter((r) =>
-      r.graded_outcome === "WIN_FULL" ||
-      r.graded_outcome === "WIN_TP2" ||
-      r.graded_outcome === "WIN_TP3"
-    ).length;
-    // Win rate treats partial outcomes and legacy WIN_TP1 as wins.
-    const winPartial = subset.filter((r) =>
-      r.graded_outcome === "WIN_PARTIAL" ||
-      r.graded_outcome === "WIN_TP1" ||
-      r.graded_outcome === "WIN_PARTIAL_THEN_SL" ||
-      r.graded_outcome === "WIN_PARTIAL_EXPIRED"
-    ).length;
-    const loss = subset.filter((r) => r.graded_outcome === "LOSS").length;
+    const winCount = subset.filter((r) => isPositiveOutcome(r.graded_outcome, r.resolution_path)).length;
+    const loss = subset.filter((r) => estimateLadderR(r.graded_outcome, r.resolution_path) < 0).length;
     const expired = subset.filter((r) => r.graded_outcome === "EXPIRED").length;
     const excluded = subset.filter((r) => nonComparisonOutcomes.has(r.graded_outcome)).length;
     const eligibleForRate = total - excluded;
     const winRate =
       eligibleForRate > 0
-        ? Math.round(((winFull + winPartial) / eligibleForRate) * 1000) / 10
+        ? Math.round((winCount / eligibleForRate) * 1000) / 10
         : null;
 
     return {
       total,
-      win_full: winFull,
-      win_partial: winPartial,
+      win_full: winCount,
+      win_partial: 0,
       loss,
       expired,
       excluded,

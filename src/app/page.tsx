@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { estimateLadderR, isPositiveOutcome } from "@/lib/outcome-estimates";
 
 const REFRESH_INTERVAL = 30_000;
 
@@ -37,6 +38,7 @@ interface Signal {
   score: number | null;
   live_status: string;
   graded_outcome: string | null;
+  resolution_path?: string | null;
   telegram_sent: boolean;
   gate_b_passed: boolean;
   gate_b_reason: string | null;
@@ -287,26 +289,14 @@ interface DayPerf {
 function PerformanceSection({ signals }: { signals: Signal[] }) {
   const graded = signals.filter(s => s.telegram_sent && s.graded_outcome);
 
-  const wins = graded.filter(s => s.graded_outcome?.startsWith("WIN"));
-  const losses = graded.filter(s => s.graded_outcome === "LOSS");
+  const wins = graded.filter(s => isPositiveOutcome(s.graded_outcome, s.resolution_path));
+  const losses = graded.filter(s => estimateLadderR(s.graded_outcome, s.resolution_path) < 0);
   const winRate = graded.length > 0 ? (wins.length / graded.length * 100).toFixed(1) : "--";
 
-  // Avg R: approximate from graded outcomes under the current live ladder.
-  function estimateR(outcome: string | null): number {
-    if (!outcome) return 0;
-    if (outcome === "WIN_FULL" || outcome === "WIN_TP2" || outcome === "WIN_TP3") return 2.5;
-    if (outcome === "WIN_TP1") return 1.0;
-    if (outcome === "WIN_PARTIAL_THEN_SL" || outcome === "WIN_PARTIAL_EXPIRED") return 0.5;
-    if (outcome === "WIN_BE" || outcome === "WIN_BREAKEVEN") return 0;
-    if (outcome === "LOSS") return -1;
-    if (outcome.startsWith("WIN")) return 0.5;
-    return 0;
-  }
-
-  const totalR = graded.reduce((sum, s) => sum + estimateR(s.graded_outcome), 0);
+  const totalR = graded.reduce((sum, s) => sum + estimateLadderR(s.graded_outcome, s.resolution_path), 0);
   const avgR = graded.length > 0 ? (totalR / graded.length).toFixed(2) : "--";
-  const totalWinR = wins.reduce((sum, s) => sum + Math.max(0, estimateR(s.graded_outcome)), 0);
-  const totalLossR = losses.reduce((sum, s) => sum + Math.abs(estimateR(s.graded_outcome)), 0);
+  const totalWinR = wins.reduce((sum, s) => sum + Math.max(0, estimateLadderR(s.graded_outcome, s.resolution_path)), 0);
+  const totalLossR = losses.reduce((sum, s) => sum + Math.abs(estimateLadderR(s.graded_outcome, s.resolution_path)), 0);
   const pf = totalLossR > 0 ? (totalWinR / totalLossR).toFixed(2) : wins.length > 0 ? "inf" : "--";
 
   // Win rate by day (last 7 days)
@@ -322,8 +312,9 @@ function PerformanceSection({ signals }: { signals: Signal[] }) {
     const entry = dayMap.get(key);
     if (!entry) continue;
     entry.total++;
-    if (s.graded_outcome?.startsWith("WIN")) entry.wins++;
-    else entry.losses++;
+    const estimatedR = estimateLadderR(s.graded_outcome, s.resolution_path);
+    if (estimatedR > 0) entry.wins++;
+    else if (estimatedR < 0) entry.losses++;
   }
   const days = Array.from(dayMap.values());
   const maxDay = Math.max(...days.map(d => d.total), 1);
