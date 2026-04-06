@@ -14,12 +14,12 @@ function fmtPrice(n: number): string {
 }
 
 function estimateR(outcome: string): number {
-  if (outcome === "WIN_TP3") return 4.5;
-  if (outcome === "WIN_TP2") return 3;
-  if (outcome === "WIN_TP1") return 1.5;
+  if (outcome === "WIN_FULL" || outcome === "WIN_TP2" || outcome === "WIN_TP3") return 2.5;
+  if (outcome === "WIN_TP1") return 1.0;
+  if (outcome === "WIN_PARTIAL_THEN_SL" || outcome === "WIN_PARTIAL_EXPIRED") return 0.5;
   if (outcome === "WIN_BE" || outcome === "WIN_BREAKEVEN") return 0;
   if (outcome === "LOSS") return -1;
-  if (outcome.startsWith("WIN")) return 1.5;
+  if (outcome.startsWith("WIN")) return 0.5;
   return 0;
 }
 

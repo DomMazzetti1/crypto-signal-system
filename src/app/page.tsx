@@ -291,16 +291,15 @@ function PerformanceSection({ signals }: { signals: Signal[] }) {
   const losses = graded.filter(s => s.graded_outcome === "LOSS");
   const winRate = graded.length > 0 ? (wins.length / graded.length * 100).toFixed(1) : "--";
 
-  // Avg R: approximate from graded outcomes
-  // WIN_TP1 ~ 1.5R, WIN_TP2 ~ 3R, WIN_TP3 ~ 4.5R, LOSS ~ -1R, WIN_BE ~ 0R
+  // Avg R: approximate from graded outcomes under the current live ladder.
   function estimateR(outcome: string | null): number {
     if (!outcome) return 0;
-    if (outcome === "WIN_TP3") return 4.5;
-    if (outcome === "WIN_TP2") return 3;
-    if (outcome === "WIN_TP1") return 1.5;
+    if (outcome === "WIN_FULL" || outcome === "WIN_TP2" || outcome === "WIN_TP3") return 2.5;
+    if (outcome === "WIN_TP1") return 1.0;
+    if (outcome === "WIN_PARTIAL_THEN_SL" || outcome === "WIN_PARTIAL_EXPIRED") return 0.5;
     if (outcome === "WIN_BE" || outcome === "WIN_BREAKEVEN") return 0;
     if (outcome === "LOSS") return -1;
-    if (outcome.startsWith("WIN")) return 1.5;
+    if (outcome.startsWith("WIN")) return 0.5;
     return 0;
   }
 

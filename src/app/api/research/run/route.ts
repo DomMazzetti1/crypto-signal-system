@@ -101,10 +101,10 @@ function buildPrompt(data: Awaited<ReturnType<typeof gatherData>>, mode: string)
   type Signal = typeof allResolved[number];
   const isWin = (s: Signal) => s.graded_outcome?.startsWith("WIN");
   const getRmult = (s: Signal) => {
-    // Use new TP ladder values (1.0/2.0/3.5R) — old signals with 1.5/2.5/4.0 will be slightly off
-    // but this is correct for all signals going forward
-    if (s.resolution_path?.includes("TP3")) return 3.5;
-    if (s.resolution_path?.includes("TP2")) return 2.0;
+    // Current live ladder is 0.5 / 1.0 / 2.5R, with the final runner closed at TP2.
+    if (s.graded_outcome === "WIN_FULL") return 2.5;
+    if (s.resolution_path?.includes("TP3")) return 2.5;
+    if (s.resolution_path?.includes("TP2")) return 2.5;
     if (s.resolution_path?.includes("TP1")) return 1.0;
     if (s.graded_outcome === "LOSS") return -1.0;
     return 0.0;
@@ -161,7 +161,7 @@ function buildPrompt(data: Awaited<ReturnType<typeof gatherData>>, mode: string)
     .map((d: typeof derivedMetrics[number]) => `${d.symbol}: beta=${Number(d.btc_beta_24h).toFixed(1)}, corr=${Number(d.btc_correlation_24h).toFixed(2)}`)
     .join("\n");
 
-  return `You are the quant researcher for a live crypto perpetual futures trading system (SQ_SHORT — BB squeeze detection, short-biased). TP ladder: 1.0/2.0/3.5R. Risk: 4% per trade, 2% burst.
+  return `You are the quant researcher for a live crypto perpetual futures trading system (SQ_SHORT — BB squeeze detection, short-biased). Current live TP ladder: 0.5/1.0/2.5R, with the final runner exiting at TP2 (tp3 mirrors tp2 for compatibility). Risk: 4% per trade, 2% burst.
 
 SYSTEM STATE:
 - Total resolved: ${allResolved.length} signals | ${totalWins}W ${totalLosses}L | ${totalR.toFixed(1)}R total

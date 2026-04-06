@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
  *       rows without selection metadata are excluded to avoid contamination)
  *
  * WIN RATE DEFINITION:
- *   (WIN_FULL + WIN_PARTIAL) / eligible_for_rate
+ *   (WIN_FULL + WIN_PARTIAL + legacy WIN_TP*) / eligible_for_rate
  *   where eligible_for_rate = total minus INVALID/CANCELLED/STALE_ENTRY outcomes
  *   Returned as a percentage, e.g. 66.7
  *
@@ -67,10 +67,15 @@ export async function GET(req: NextRequest) {
 
   function computeStats(subset: typeof resolved) {
     const total = subset.length;
-    const winFull = subset.filter((r) => r.graded_outcome === "WIN_FULL").length;
-    // Win rate treats WIN_PARTIAL, WIN_PARTIAL_THEN_SL, and WIN_PARTIAL_EXPIRED as wins
+    const winFull = subset.filter((r) =>
+      r.graded_outcome === "WIN_FULL" ||
+      r.graded_outcome === "WIN_TP2" ||
+      r.graded_outcome === "WIN_TP3"
+    ).length;
+    // Win rate treats partial outcomes and legacy WIN_TP1 as wins.
     const winPartial = subset.filter((r) =>
       r.graded_outcome === "WIN_PARTIAL" ||
+      r.graded_outcome === "WIN_TP1" ||
       r.graded_outcome === "WIN_PARTIAL_THEN_SL" ||
       r.graded_outcome === "WIN_PARTIAL_EXPIRED"
     ).length;
@@ -103,8 +108,8 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     schema_available: true,
-    // Win rate = (WIN_FULL + WIN_PARTIAL) / (total - INVALID - CANCELLED - STALE_ENTRY)
-    win_rate_definition: "(WIN_FULL + WIN_PARTIAL) / eligible, excl INVALID/CANCELLED/STALE_ENTRY",
+    // Win rate = (WIN_FULL + WIN_PARTIAL + legacy WIN_TP*) / (total - INVALID - CANCELLED - STALE_ENTRY)
+    win_rate_definition: "(WIN_FULL + WIN_PARTIAL + legacy WIN_TP*) / eligible, excl INVALID/CANCELLED/STALE_ENTRY",
     total_resolved: resolved.length,
     total_unresolved: unresolved.length,
     comparison_eligible: tagged.length,
