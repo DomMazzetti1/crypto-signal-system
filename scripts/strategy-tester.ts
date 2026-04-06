@@ -210,7 +210,7 @@ function parseArgs(): StrategyConfig {
   } else if (useBeStop || movSlArg != null) {
     raw.move_sl_to_be_after_tp = 1;
   } else {
-    raw.move_sl_to_be_after_tp = 2;
+    raw.move_sl_to_be_after_tp = 1;
   }
   raw.min_vol_ratio = getArg(args, "min-vol") ? Number(getArg(args, "min-vol")) : 0;
   raw.min_score = getArg(args, "min-score") ? Number(getArg(args, "min-score")) : 0;

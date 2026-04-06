@@ -18,29 +18,28 @@ const SLIPPAGE = 0.0005;
 const TAKER_FEE = 0.00055;
 
 /**
- * Compute ladder-adjusted R for the live 34/33/33 TP split with SL→breakeven after TP2.
+ * Compute ladder-adjusted R for the live 34/33/33 TP split with SL→breakeven after TP1.
  * Uses actual R-multiples from stored prices (not hardcoded).
  */
 function computeLadderR(
   hit_tp1: boolean, hit_tp2: boolean, hit_tp3: boolean, hit_sl: boolean,
   tp1R: number, tp2R: number, tp3R: number
 ): number {
-  if (!hit_tp1 && hit_sl) return -1.0;       // Full stop
+  if (!hit_tp1 && hit_sl) return -1.0;       // Full stop before TP1
   if (!hit_tp1 && !hit_sl) return 0;          // Expired, no TP hits
+  // TP1 hit → SL moved to breakeven. Remaining 66% risk-free.
   let r = 0.34 * tp1R;                        // TP1 tranche locked in
   if (hit_tp2) {
     r += 0.33 * tp2R;                         // TP2 tranche locked in
     if (hit_tp3) {
       r += 0.33 * tp3R;                       // TP3 tranche
-    } else if (hit_sl) {
-      r += 0.33 * 0.0;                        // Last tranche stopped at breakeven
     } else {
-      r += 0.33 * 0.0;                        // Runner unresolved at expiry — conservative estimate
+      // Last tranche: BE stop or expiry — 0R either way
     }
   } else if (hit_sl) {
-    r -= 0.66;                                // Remaining size still carries full stop risk before TP2
+    // SL after TP1 = breakeven on remaining (SL moved to entry after TP1)
   } else {
-    r += 0.66 * 0.0;                          // Conservative: only locked-in TP1 tranche counted at expiry
+    // Expired after TP1, no TP2 — remaining at 0R (conservative)
   }
   return Math.round(r * 100) / 100;
 }
@@ -182,6 +181,7 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
     let tp2HitAt: string | null = null;
     let tp3HitAt: string | null = null;
     let stoppedAt: string | null = null;
+    let effectiveStop = stop; // Moves to entry (BE) after TP1
 
     for (let i = 0; i < futureBars.length; i++) {
       const bar = futureBars[i];
@@ -193,10 +193,10 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
         if (fav > max_favorable) max_favorable = fav;
         if (adv > max_adverse) max_adverse = adv;
 
-        const sl_hit_this_bar = !hit_sl && bar.low <= stop;
+        const sl_hit_this_bar = !hit_sl && bar.low <= effectiveStop;
         const tp1_hit_this_bar = !hit_tp1 && bar.high >= tp1;
 
-        // Same bar conflict — SL wins ties (conservative)
+        // Same bar conflict — SL wins ties (conservative), but only before TP1
         if (sl_hit_this_bar && tp1_hit_this_bar && !hit_tp1) {
           hit_sl = true;
           stoppedAt = barTime;
@@ -207,9 +207,14 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
         if (sl_hit_this_bar) {
           hit_sl = true;
           stoppedAt = barTime;
-          if (!hit_tp1) { bars_to_resolution = i + 1; break; }
+          bars_to_resolution = i + 1;
+          break; // SL hit (original or BE) — done
         }
-        if (tp1_hit_this_bar) { hit_tp1 = true; tp1HitAt = barTime; }
+        if (tp1_hit_this_bar) {
+          hit_tp1 = true;
+          tp1HitAt = barTime;
+          effectiveStop = entry; // Move SL to breakeven
+        }
         if (!hit_tp2 && bar.high >= tp2) { hit_tp2 = true; tp2HitAt = barTime; }
         if (!hit_tp3 && bar.high >= tp3) { hit_tp3 = true; tp3HitAt = barTime; }
       } else {
@@ -218,10 +223,10 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
         if (fav > max_favorable) max_favorable = fav;
         if (adv > max_adverse) max_adverse = adv;
 
-        const sl_hit_this_bar = !hit_sl && bar.high >= stop;
+        const sl_hit_this_bar = !hit_sl && bar.high >= effectiveStop;
         const tp1_hit_this_bar = !hit_tp1 && bar.low <= tp1;
 
-        // Same bar conflict — SL wins ties (conservative)
+        // Same bar conflict — SL wins ties (conservative), but only before TP1
         if (sl_hit_this_bar && tp1_hit_this_bar && !hit_tp1) {
           hit_sl = true;
           stoppedAt = barTime;
@@ -232,9 +237,14 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
         if (sl_hit_this_bar) {
           hit_sl = true;
           stoppedAt = barTime;
-          if (!hit_tp1) { bars_to_resolution = i + 1; break; }
+          bars_to_resolution = i + 1;
+          break; // SL hit (original or BE) — done
         }
-        if (tp1_hit_this_bar) { hit_tp1 = true; tp1HitAt = barTime; }
+        if (tp1_hit_this_bar) {
+          hit_tp1 = true;
+          tp1HitAt = barTime;
+          effectiveStop = entry; // Move SL to breakeven
+        }
         if (!hit_tp2 && bar.low <= tp2) { hit_tp2 = true; tp2HitAt = barTime; }
         if (!hit_tp3 && bar.low <= tp3) { hit_tp3 = true; tp3HitAt = barTime; }
       }
@@ -257,7 +267,7 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
     else if (hit_tp1) outcome_r = tp1R;
     else if (hit_sl) outcome_r = -1;
 
-    // outcome_r_ladder = adjusted for 33/33/34 TP ladder with SL→breakeven after TP1
+    // outcome_r_ladder = adjusted for 34/33/33 TP ladder with SL→breakeven after TP1
     const outcome_r_ladder = computeLadderR(hit_tp1, hit_tp2, hit_tp3, hit_sl, tp1R, tp2R, tp3R);
 
     const { gradedOutcome, resolutionPath, resolvedAt } = deriveOutcome({
@@ -282,7 +292,7 @@ export async function gradeBatch(batchSize = 50): Promise<GradeBatchResult> {
       bars_to_resolution,
       max_favorable, max_adverse,
       close_at_48h_price,
-      sl_moved_to_tp2: hit_tp2,
+      sl_moved_to_be: hit_tp1,
     }, { onConflict: "decision_id" });
 
     if (upsertErr) {
