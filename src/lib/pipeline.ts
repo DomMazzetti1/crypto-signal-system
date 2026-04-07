@@ -128,6 +128,11 @@ interface PipelineOptions {
   deferClusterExecution?: boolean;
 }
 
+function shouldPersistBtcRangeMetric(alertType: string): boolean {
+  const lowerType = alertType.toLowerCase();
+  return lowerType.includes("short") && !lowerType.includes("data");
+}
+
 export async function runPipeline(
   alert: AlertPayload,
   alertId: string | null,
@@ -779,7 +784,6 @@ export async function runPipeline(
   const extendedData: Record<string, unknown> = {
     ...baseData,
     tp0_price: levels.tp0 ?? null,
-    btc_range_pct_12h: btcRangePct12h,
     vol_ratio: volRatio,
     entry_deviation_pct: entryDeviationPct,
     composite_score: scoreResult.composite_score,
@@ -820,6 +824,21 @@ export async function runPipeline(
   }
 
   console.log(`[pipeline] Decision stored: ${decisionId} ${alert.symbol} ${decision}`);
+
+  if (decisionId && shouldPersistBtcRangeMetric(alert.type)) {
+    try {
+      const { error: btcRangeErr } = await supabase
+        .from("decisions")
+        .update({ btc_range_pct_12h: btcRangePct12h })
+        .eq("id", decisionId);
+
+      if (btcRangeErr && !btcRangeErr.message.includes("does not exist")) {
+        console.warn(`[pipeline] Failed to persist btc_range_pct_12h for ${alert.symbol}:`, btcRangeErr.message);
+      }
+    } catch (err) {
+      console.warn(`[pipeline] Failed to persist btc_range_pct_12h for ${alert.symbol}:`, err);
+    }
+  }
 
   // ── 10b. Try to finalize cluster if window already expired ──
   // This handles the case where a signal arrives after the 60s window.
