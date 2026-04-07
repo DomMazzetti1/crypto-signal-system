@@ -128,11 +128,6 @@ interface PipelineOptions {
   deferClusterExecution?: boolean;
 }
 
-function shouldPersistBtcRangeMetric(alertType: string): boolean {
-  const lowerType = alertType.toLowerCase();
-  return lowerType.includes("short") && !lowerType.includes("data");
-}
-
 export async function runPipeline(
   alert: AlertPayload,
   alertId: string | null,
@@ -354,6 +349,14 @@ export async function runPipeline(
     console.warn("[pipeline] Failed to fetch BTC 4h change:", err);
   }
 
+  // ── 4c. BTC 12h range position (computed early so all stored decisions have it) ──
+  let btcRangePct12h: number | null = null;
+  btcRangePct12h = await getShortBtcRangePosition(
+    alert.symbol,
+    alert.type,
+    new Date()
+  );
+
   // ── 5. Price levels ───────────────────────────────────
   const levels = calculateLevels(markPrice, atr14_1h, direction);
   const effectiveRisk = regime.transition_zone ? levels.risk * 0.5 : levels.risk;
@@ -376,6 +379,7 @@ export async function runPipeline(
       trend_1d: trend1d.trend,
       btc_regime: regime.btc_regime,
       alt_environment: regime.alt_environment,
+      btc_range_pct_12h: btcRangePct12h,
       cooldown_active: false,
     });
     await markProcessed(supabase, alertId);
@@ -409,6 +413,7 @@ export async function runPipeline(
       trend_1d: trend1d.trend,
       btc_regime: regime.btc_regime,
       alt_environment: regime.alt_environment,
+      btc_range_pct_12h: btcRangePct12h,
       cooldown_active: false,
     });
     await markProcessed(supabase, alertId);
@@ -455,13 +460,6 @@ export async function runPipeline(
   }
 
   // ── 6. Gate B ─────────────────────────────────────────
-  let btcRangePct12h: number | null = null;
-  btcRangePct12h = await getShortBtcRangePosition(
-    alert.symbol,
-    alert.type,
-    new Date()
-  );
-
   const gateB = runGateB({
     symbol: alert.symbol,
     alertType: alert.type,
@@ -518,8 +516,9 @@ export async function runPipeline(
   });
 
   // ── 8c. Pre-review score/volume gate ──────────────────
+  const volRatioMinimum = parseFloat(process.env.VOL_RATIO_MIN ?? "0.5");
   const preReviewBlocked =
-    (volRatio !== null && volRatio < 1.0) ||
+    (volRatio !== null && volRatio < volRatioMinimum) ||
     scoreResult.composite_score < 20;
 
   let reasoning: string | null = null;
@@ -785,6 +784,7 @@ export async function runPipeline(
     ...baseData,
     tp0_price: levels.tp0 ?? null,
     vol_ratio: volRatio,
+    btc_range_pct_12h: btcRangePct12h,
     entry_deviation_pct: entryDeviationPct,
     composite_score: scoreResult.composite_score,
     cluster_id: clusterData.cluster_id,
@@ -824,21 +824,6 @@ export async function runPipeline(
   }
 
   console.log(`[pipeline] Decision stored: ${decisionId} ${alert.symbol} ${decision}`);
-
-  if (decisionId && shouldPersistBtcRangeMetric(alert.type)) {
-    try {
-      const { error: btcRangeErr } = await supabase
-        .from("decisions")
-        .update({ btc_range_pct_12h: btcRangePct12h })
-        .eq("id", decisionId);
-
-      if (btcRangeErr && !btcRangeErr.message.includes("does not exist")) {
-        console.warn(`[pipeline] Failed to persist btc_range_pct_12h for ${alert.symbol}:`, btcRangeErr.message);
-      }
-    } catch (err) {
-      console.warn(`[pipeline] Failed to persist btc_range_pct_12h for ${alert.symbol}:`, err);
-    }
-  }
 
   // ── 10b. Try to finalize cluster if window already expired ──
   // This handles the case where a signal arrives after the 60s window.
