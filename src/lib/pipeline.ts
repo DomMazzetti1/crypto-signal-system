@@ -16,7 +16,7 @@ import { calculateLevels } from "@/lib/levels";
 import { isCooldownActive, setCooldown } from "@/lib/cooldown";
 import { reviewWithClaude, ClaudeReviewInput } from "@/lib/reviewer";
 import { buildMessage, sendTelegram } from "@/lib/telegram";
-import { sendToExecutionEngine } from "@/lib/exec-webhook";
+import { sendToExecutionEngine, type ExecSignalPayload } from "@/lib/exec-webhook";
 import { computeCompositeScore } from "@/lib/scoring";
 import { assignCluster, finalizeClusterSelection, deriveTier } from "@/lib/cluster";
 import { runPreTradeRiskChecks, RiskCheckResult } from "@/lib/risk-manager";
@@ -77,6 +77,12 @@ export interface PipelineResult {
   status: string;
   symbol: string;
   decision: string;
+  decision_id?: string | null;
+  cluster_id?: string | null;
+  selected_for_execution?: boolean;
+  suppressed_reason?: string | null;
+  auto_exec_eligible?: boolean;
+  execution_payload?: ExecSignalPayload | null;
   gate_a: { passed: boolean; quality: string; reject_reason: string | null };
   gate_b?: { passed: boolean; reason: string | null };
   regime?: {
@@ -118,12 +124,18 @@ export interface PipelineResult {
   http_status?: number;
 }
 
+interface PipelineOptions {
+  deferClusterExecution?: boolean;
+}
+
 export async function runPipeline(
   alert: AlertPayload,
-  alertId: string | null
+  alertId: string | null,
+  options?: PipelineOptions
 ): Promise<PipelineResult> {
   warnSignalRuntimeConfigOnce();
   const supabase = getSupabase();
+  const deferClusterExecution = options?.deferClusterExecution === true;
 
   const rawType = alert.type.toLowerCase();
   let direction: "long" | "short" = rawType.includes("short") ? "short" : "long";
@@ -802,7 +814,7 @@ export async function runPipeline(
   // ── 10b. Try to finalize cluster if window already expired ──
   // This handles the case where a signal arrives after the 60s window.
   // For signals within the window, finalization is triggered by dashboard reads.
-  if (clusterData.cluster_id && !clusterData.selected_for_execution && !clusterData.suppressed_reason) {
+  if (!deferClusterExecution && clusterData.cluster_id && !clusterData.selected_for_execution && !clusterData.suppressed_reason) {
     try {
 
       await finalizeClusterSelection(clusterData.cluster_id);
@@ -825,6 +837,26 @@ export async function runPipeline(
   let telegramBlockReason: string | null = null;
 
   const isTrade = decision === "LONG" || decision === "SHORT";
+  const autoExecEligible = isTrade && !isLongDirection;
+  const executionPayload: ExecSignalPayload | null = autoExecEligible
+    ? {
+        symbol: alert.symbol,
+        direction: direction.toUpperCase() as 'LONG' | 'SHORT',
+        entry_price: levels.entry,
+        stop_price: levels.stop,
+        tp0_price: levels.tp0 ?? null,
+        tp1_price: levels.tp1,
+        tp2_price: levels.tp2,
+        tp3_price: levels.tp3,
+        risk_amount: effectiveRisk,
+        btc_regime: regime.btc_regime,
+        composite_score: scoreResult.composite_score,
+        alert_type: alert.type,
+        confidence: claudeConfidence ?? 0,
+        decision_id: decisionId ?? '',
+        timestamp: new Date().toISOString(),
+      }
+    : null;
 
   if (isTrade) {
     let sendTelegram_ = true;
@@ -901,28 +933,16 @@ export async function runPipeline(
         });
         telegramSent = await sendTelegram(msg);
         if (telegramSent) {
-          if (clusterData.selected_for_execution) {
+          if (clusterData.selected_for_execution && executionPayload) {
             // Send to execution engine (AWAITED — Vercel serverless kills pending fetches when handler returns)
-            try {
-              await sendToExecutionEngine({
-                symbol: alert.symbol,
-                direction: direction.toUpperCase() as 'LONG' | 'SHORT',
-                entry_price: levels.entry,
-                stop_price: levels.stop,
-                tp0_price: levels.tp0 ?? null,
-                tp1_price: levels.tp1,
-                tp2_price: levels.tp2,
-                tp3_price: levels.tp3,
-                risk_amount: effectiveRisk,
-                btc_regime: regime.btc_regime,
-                composite_score: scoreResult.composite_score,
-                alert_type: alert.type,
-                confidence: claudeConfidence ?? 0,
-                decision_id: decisionId ?? '',
-                timestamp: new Date().toISOString(),
-              });
-            } catch (err) {
-              console.error('[pipeline] Exec webhook error (awaited):', err);
+            if (deferClusterExecution) {
+              console.log(`[pipeline] ${alert.symbol} webhook deferred: scanner-managed cluster finalization`);
+            } else {
+              try {
+                await sendToExecutionEngine(executionPayload);
+              } catch (err) {
+                console.error('[pipeline] Exec webhook error (awaited):', err);
+              }
             }
           } else {
             console.log(`[pipeline] ${alert.symbol} webhook skipped: selected_for_execution=false`);
@@ -962,6 +982,12 @@ export async function runPipeline(
     status: "decision_made",
     symbol: alert.symbol,
     decision,
+    decision_id: decisionId,
+    cluster_id: clusterData.cluster_id,
+    selected_for_execution: clusterData.selected_for_execution,
+    suppressed_reason: clusterData.suppressed_reason,
+    auto_exec_eligible: autoExecEligible,
+    execution_payload: executionPayload,
     gate_a: { passed: true, quality: gateA.quality, reject_reason: null },
     gate_b: { passed: gateB.passed, reason: finalGateBReason },
     regime: {

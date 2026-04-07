@@ -70,6 +70,24 @@ export interface ClusterResult {
   suppressed_reason: string | null;
 }
 
+export interface ClusterSelectionMember {
+  id: string;
+  composite_score: unknown;
+  rr_tp1: unknown;
+  alert_type: string;
+  cooldown_active?: unknown;
+  selected_for_execution?: unknown;
+  suppressed_reason?: unknown;
+}
+
+interface ClusterSelectionUpdate {
+  id: string;
+  selected_for_execution: boolean;
+  suppressed_reason: string | null;
+  cluster_rank: number;
+  cluster_size: number;
+}
+
 function truncateToHour(d: Date): Date {
   const t = new Date(d);
   t.setMinutes(0, 0, 0);
@@ -90,6 +108,72 @@ export function buildClusterId(
 ): string {
   const hourKey = hourBucket.toISOString().slice(0, 13); // "YYYY-MM-DDTHH"
   return `${hourKey}:${direction}:${regime}`;
+}
+
+export function rankClusterMembers<T extends ClusterSelectionMember>(
+  members: readonly T[]
+): T[] {
+  return [...members].sort((a, b) => {
+    const scoreA = Number(a.composite_score) || 0;
+    const scoreB = Number(b.composite_score) || 0;
+    if (scoreA !== scoreB) return scoreB - scoreA;
+    const rrA = Number(a.rr_tp1) || 0;
+    const rrB = Number(b.rr_tp1) || 0;
+    return rrB - rrA;
+  });
+}
+
+export function selectClusterWinnerId<T extends ClusterSelectionMember>(
+  rankedMembers: readonly T[],
+  eligibleSignalIds?: Iterable<string>
+): string | null {
+  const explicitEligibleIds = eligibleSignalIds
+    ? new Set(Array.from(eligibleSignalIds))
+    : null;
+
+  const eligible = rankedMembers.filter((member) => {
+    if (explicitEligibleIds && !explicitEligibleIds.has(member.id)) return false;
+    const tier = deriveTier(member.alert_type);
+    return tier !== "DATA_ONLY" && member.cooldown_active !== true;
+  });
+
+  const strictCandidates = eligible.filter((m) => deriveTier(m.alert_type) === "STRICT");
+  const relaxedCandidates = eligible.filter((m) => deriveTier(m.alert_type) === "RELAXED");
+
+  if (strictCandidates.length > 0) return strictCandidates[0].id;
+  if (relaxedCandidates.length > 0) return relaxedCandidates[0].id;
+  return null;
+}
+
+export function buildEligibleClusterUpdates<T extends ClusterSelectionMember>(
+  rankedMembers: readonly T[],
+  eligibleSignalIds: Iterable<string>,
+  selectedId: string | null
+): ClusterSelectionUpdate[] {
+  const clusterSize = rankedMembers.length;
+  const eligibleSet = new Set(Array.from(eligibleSignalIds));
+
+  return rankedMembers.map((member, index) => {
+    const currentSuppressedReason =
+      typeof member.suppressed_reason === "string" ? member.suppressed_reason : null;
+    const isSelected = selectedId != null && member.id === selectedId;
+    const isEligibleLoser =
+      selectedId != null && eligibleSet.has(member.id) && member.id !== selectedId;
+
+    return {
+      id: member.id,
+      selected_for_execution: isSelected
+        ? true
+        : member.selected_for_execution === true && !eligibleSet.has(member.id),
+      suppressed_reason: isSelected
+        ? null
+        : isEligibleLoser
+          ? "LOWER_SCORE_IN_CLUSTER"
+          : currentSuppressedReason,
+      cluster_rank: index + 1,
+      cluster_size: clusterSize,
+    };
+  });
 }
 
 /**
@@ -251,33 +335,8 @@ export async function finalizeClusterSelection(clusterId: string): Promise<boole
   const firstCreatedAt = new Date(members[0].created_at).getTime();
   if (Date.now() - firstCreatedAt < CLUSTER_SELECTION_WINDOW_MS) return false;
 
-  const clusterSize = members.length;
-
-  // Rank all members by composite_score DESC, rr_tp1 DESC
-  const ranked = [...members].sort((a, b) => {
-    const scoreA = Number(a.composite_score) || 0;
-    const scoreB = Number(b.composite_score) || 0;
-    if (scoreA !== scoreB) return scoreB - scoreA;
-    const rrA = Number(a.rr_tp1) || 0;
-    const rrB = Number(b.rr_tp1) || 0;
-    return rrB - rrA;
-  });
-
-  // Determine winner: STRICT priority over RELAXED, then highest score
-  const eligible = ranked.filter((m) => {
-    const tier = deriveTier(m.alert_type);
-    return tier !== "DATA_ONLY" && !m.cooldown_active;
-  });
-
-  const strictCandidates = eligible.filter((m) => deriveTier(m.alert_type) === "STRICT");
-  const relaxedCandidates = eligible.filter((m) => deriveTier(m.alert_type) === "RELAXED");
-
-  let selectedId: string | null = null;
-  if (strictCandidates.length > 0) {
-    selectedId = strictCandidates[0].id; // highest-scoring STRICT
-  } else if (relaxedCandidates.length > 0) {
-    selectedId = relaxedCandidates[0].id; // highest-scoring RELAXED
-  }
+  const ranked = rankClusterMembers(members);
+  const selectedId = selectClusterWinnerId(ranked);
 
   // Update all members with final selection state
   const updates = ranked.map((m, i) => {
@@ -301,7 +360,7 @@ export async function finalizeClusterSelection(clusterId: string): Promise<boole
       selected_for_execution: isSelected,
       suppressed_reason: suppressedReason,
       cluster_rank: rank,
-      cluster_size: clusterSize,
+      cluster_size: members.length,
     };
   });
 
@@ -329,6 +388,78 @@ export async function finalizeClusterSelection(clusterId: string): Promise<boole
   );
 
   return true;
+}
+
+/**
+ * Explicitly finalizes a cluster from a pre-filtered eligible subset.
+ * This bypasses the 60s collection window and is intended for scanner-time
+ * synchronous selection after Telegram/deliverability filters have run.
+ *
+ * Existing 60s-window lazy finalization remains unchanged for backfill paths.
+ */
+export async function finalizeClusterSelectionEligible(
+  clusterId: string,
+  eligibleSignalIds: string[]
+): Promise<{ selectedId: string | null }> {
+  const eligibleIds = eligibleSignalIds.filter(Boolean);
+  if (eligibleIds.length === 0) {
+    return { selectedId: null };
+  }
+
+  const supabase = getSupabase();
+
+  const { data: members, error } = await supabase
+    .from("decisions")
+    .select("id, composite_score, rr_tp1, alert_type, cooldown_active, selected_for_execution, suppressed_reason, created_at")
+    .eq("cluster_id", clusterId)
+    .in("decision", ["LONG", "SHORT"])
+    .order("created_at", { ascending: true });
+
+  if (error || !members || members.length === 0) {
+    if (error) {
+      console.warn(`[cluster] finalizeClusterSelectionEligible query failed for ${clusterId}:`, error.message);
+    }
+    return { selectedId: null };
+  }
+
+  if (members.some((member) => member.selected_for_execution === true)) {
+    return { selectedId: null };
+  }
+
+  const ranked = rankClusterMembers(members);
+  const selectedId = selectClusterWinnerId(ranked, eligibleIds);
+
+  if (!selectedId) {
+    return { selectedId: null };
+  }
+
+  const updates = buildEligibleClusterUpdates(ranked, eligibleIds, selectedId);
+
+  await Promise.all(
+    updates.map((update) =>
+      supabase
+        .from("decisions")
+        .update({
+          selected_for_execution: update.selected_for_execution,
+          suppressed_reason: update.suppressed_reason,
+          cluster_rank: update.cluster_rank,
+          cluster_size: update.cluster_size,
+        })
+        .eq("id", update.id)
+        .then(({ error: updateErr }) => {
+          if (updateErr) {
+            console.warn(`[cluster] eligible finalize update failed for ${update.id}:`, updateErr.message);
+          }
+        })
+    )
+  );
+
+  console.log(
+    `[cluster] Explicitly finalized ${clusterId}: eligible=${eligibleIds.length}, selected=${selectedId}, ` +
+    `top_score=${Number(ranked[0]?.composite_score) || 0}`
+  );
+
+  return { selectedId };
 }
 
 /**

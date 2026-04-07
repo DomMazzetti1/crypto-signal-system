@@ -11,6 +11,8 @@ import { classifyRegime } from "@/lib/regime";
 import { selectFromBurst } from "@/lib/portfolio-manager";
 import { isKillSwitchActive } from "@/lib/kill-switch";
 import { computeCompositeScore } from "@/lib/scoring";
+import { finalizeClusterSelectionEligible } from "@/lib/cluster";
+import { sendToExecutionEngine } from "@/lib/exec-webhook";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -565,10 +567,17 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    const processedCandidates: Array<{
+      candidate: PipelineCandidate;
+      result: Awaited<ReturnType<typeof runPipeline>>;
+    } | null> = [];
+
     for (let rank = 0; rank < portfolioFiltered.length; rank++) {
       const candidate = portfolioFiltered[rank];
       try {
-        const result = await runPipeline(candidate.alertPayload, candidate.alertId);
+        const result = await runPipeline(candidate.alertPayload, candidate.alertId, {
+          deferClusterExecution: true,
+        });
 
         if (result.decision === "LONG" || result.decision === "SHORT") {
           await supabase.from("candle_signals").upsert({
@@ -582,14 +591,71 @@ export async function GET(request: NextRequest) {
           console.log(`[scanner] Ranked #${rank + 1}: ${candidate.symbol} ${candidate.signalType} score=${candidate.compositeScore.toFixed(1)} → ${result.decision} (${result.gate_b?.reason || 'filtered'})`);
         }
 
-        // Update shadow row with baseline final decision
         await supabase.from("shadow_signals")
           .update({ baseline_decision: result.decision })
           .eq("symbol", candidate.symbol)
           .eq("setup_type", candidate.signalType)
           .eq("candle_time", candidate.candleTime);
+
+        processedCandidates.push({ candidate, result });
       } catch (err) {
         console.error(`[scanner] Pipeline error for ${candidate.symbol} ${candidate.signalType}:`, err);
+        processedCandidates.push(null);
+      }
+    }
+
+    const directExecutionCandidates = new Map<string, NonNullable<(typeof processedCandidates)[number]>>();
+    const eligibleByCluster = new Map<string, string[]>();
+    const resultByDecisionId = new Map<string, NonNullable<(typeof processedCandidates)[number]>>();
+
+    for (const processed of processedCandidates) {
+      if (!processed) continue;
+      const decisionId = processed.result.decision_id;
+      if (!decisionId || !processed.result.execution_payload || processed.result.telegram_sent !== true) {
+        continue;
+      }
+
+      resultByDecisionId.set(decisionId, processed);
+
+      if (processed.result.selected_for_execution === true) {
+        directExecutionCandidates.set(decisionId, processed);
+        continue;
+      }
+
+      if (processed.result.auto_exec_eligible !== true || !processed.result.cluster_id) {
+        continue;
+      }
+
+      const clusterEligible = eligibleByCluster.get(processed.result.cluster_id) ?? [];
+      clusterEligible.push(decisionId);
+      eligibleByCluster.set(processed.result.cluster_id, clusterEligible);
+    }
+
+    const executionQueue = Array.from(directExecutionCandidates.values());
+
+    for (const [clusterId, eligibleIds] of Array.from(eligibleByCluster.entries())) {
+      try {
+        const { selectedId } = await finalizeClusterSelectionEligible(clusterId, eligibleIds);
+        if (!selectedId) continue;
+
+        const selected = resultByDecisionId.get(selectedId);
+        if (!selected) {
+          console.warn(`[scanner] Eligible cluster winner missing pipeline result: cluster=${clusterId} selected=${selectedId}`);
+          continue;
+        }
+
+        executionQueue.push(selected);
+      } catch (err) {
+        console.error(`[scanner] Explicit cluster finalization failed for ${clusterId}:`, err);
+      }
+    }
+
+    for (const selected of executionQueue) {
+      if (!selected.result.execution_payload) continue;
+      try {
+        await sendToExecutionEngine(selected.result.execution_payload);
+      } catch (err) {
+        console.error(`[scanner] Exec webhook error for ${selected.candidate.symbol}:`, err);
       }
     }
 
