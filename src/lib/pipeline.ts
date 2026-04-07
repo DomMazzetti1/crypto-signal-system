@@ -803,9 +803,15 @@ export async function runPipeline(
   // This handles the case where a signal arrives after the 60s window.
   // For signals within the window, finalization is triggered by dashboard reads.
   if (clusterData.cluster_id && !clusterData.selected_for_execution && !clusterData.suppressed_reason) {
-    finalizeClusterSelection(clusterData.cluster_id).catch((err) => {
-      console.warn("[pipeline] Post-store cluster finalization failed (non-blocking):", err);
-    });
+    try {
+
+      await finalizeClusterSelection(clusterData.cluster_id);
+
+    } catch (err) {
+
+      console.error('[pipeline] finalizeClusterSelection error:', err);
+
+    }
   }
 
   // ── 11. Mark alert processed ──────────────────────────
@@ -896,26 +902,28 @@ export async function runPipeline(
         telegramSent = await sendTelegram(msg);
         if (telegramSent) {
           if (clusterData.selected_for_execution) {
-            // Send to execution engine (non-blocking, fire-and-forget)
-            sendToExecutionEngine({
-              symbol: alert.symbol,
-              direction: direction.toUpperCase() as 'LONG' | 'SHORT',
-              entry_price: levels.entry,
-              stop_price: levels.stop,
-              tp0_price: levels.tp0 ?? null,
-              tp1_price: levels.tp1,
-              tp2_price: levels.tp2,
-              tp3_price: levels.tp3,
-              risk_amount: effectiveRisk,
-              btc_regime: regime.btc_regime,
-              composite_score: scoreResult.composite_score,
-              alert_type: alert.type,
-              confidence: claudeConfidence ?? 0,
-              decision_id: decisionId ?? '',
-              timestamp: new Date().toISOString(),
-            }).catch(err => {
-              console.error('[pipeline] Exec webhook fire-and-forget error:', err);
-            });
+            // Send to execution engine (AWAITED — Vercel serverless kills pending fetches when handler returns)
+            try {
+              await sendToExecutionEngine({
+                symbol: alert.symbol,
+                direction: direction.toUpperCase() as 'LONG' | 'SHORT',
+                entry_price: levels.entry,
+                stop_price: levels.stop,
+                tp0_price: levels.tp0 ?? null,
+                tp1_price: levels.tp1,
+                tp2_price: levels.tp2,
+                tp3_price: levels.tp3,
+                risk_amount: effectiveRisk,
+                btc_regime: regime.btc_regime,
+                composite_score: scoreResult.composite_score,
+                alert_type: alert.type,
+                confidence: claudeConfidence ?? 0,
+                decision_id: decisionId ?? '',
+                timestamp: new Date().toISOString(),
+              });
+            } catch (err) {
+              console.error('[pipeline] Exec webhook error (awaited):', err);
+            }
           } else {
             console.log(`[pipeline] ${alert.symbol} webhook skipped: selected_for_execution=false`);
           }
