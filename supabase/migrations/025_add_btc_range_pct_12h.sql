@@ -1,0 +1,2 @@
+ALTER TABLE decisions
+ADD COLUMN IF NOT EXISTS btc_range_pct_12h NUMERIC;

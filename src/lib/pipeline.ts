@@ -11,7 +11,7 @@ import {
 } from "@/lib/bybit";
 import { computeHTFTrend, latestATR } from "@/lib/ta";
 import { classifyRegime } from "@/lib/regime";
-import { runGateB } from "@/lib/gate-b";
+import { getShortBtcRangePosition, runGateB } from "@/lib/gate-b";
 import { calculateLevels } from "@/lib/levels";
 import { isCooldownActive, setCooldown } from "@/lib/cooldown";
 import { reviewWithClaude, ClaudeReviewInput } from "@/lib/reviewer";
@@ -450,7 +450,15 @@ export async function runPipeline(
   }
 
   // ── 6. Gate B ─────────────────────────────────────────
+  let btcRangePct12h: number | null = null;
+  btcRangePct12h = await getShortBtcRangePosition(
+    alert.symbol,
+    alert.type,
+    new Date()
+  );
+
   const gateB = runGateB({
+    symbol: alert.symbol,
     alertType: alert.type,
     trend4h: trend4h.trend,
     btcRegime: regime.btc_regime,
@@ -462,6 +470,7 @@ export async function runPipeline(
     adx1h: alert.adx1h,
     volume: alert.volume,
     sma20Volume: alert.sma20_volume,
+    btcRangePct12h,
   });
 
   // ── 7. Cooldown check ─────────────────────────────────
@@ -770,6 +779,7 @@ export async function runPipeline(
   const extendedData: Record<string, unknown> = {
     ...baseData,
     tp0_price: levels.tp0 ?? null,
+    btc_range_pct_12h: btcRangePct12h,
     vol_ratio: volRatio,
     entry_deviation_pct: entryDeviationPct,
     composite_score: scoreResult.composite_score,

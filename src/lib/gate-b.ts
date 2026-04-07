@@ -1,5 +1,6 @@
 import { TrendDirection } from "./ta";
 import { BTCRegime } from "./regime";
+import { fetchKlines, Kline } from "./bybit";
 
 export interface GateBResult {
   passed: boolean;
@@ -8,6 +9,7 @@ export interface GateBResult {
 
 export interface GateBInput {
   alertType: string;
+  symbol?: string;
   trend4h: TrendDirection;
   btcRegime: BTCRegime;
   atr1h: number;
@@ -19,16 +21,108 @@ export interface GateBInput {
   adx1h?: number;
   volume?: number;
   sma20Volume?: number;
+  btcRangePct12h?: number | null;
 }
 
 export interface GateBVariant {
   allow_counter_trend?: boolean;
 }
 
+export interface BtcRangeFilterConfig {
+  enabled: boolean;
+  low: number;
+  high: number;
+}
+
+const BTC_RANGE_WINDOW_HOURS = 12;
+const BTC_RANGE_MIN_DATA_BARS = 6;
+
+function parseBound(raw: string | undefined, fallback: number): number {
+  const parsed = raw == null ? Number.NaN : parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export function getBtcRangeFilterConfig(
+  env: NodeJS.ProcessEnv = process.env
+): BtcRangeFilterConfig {
+  return {
+    enabled: env.BTC_RANGE_FILTER_ENABLED !== "false",
+    low: parseBound(env.BTC_RANGE_FILTER_LOW, 15),
+    high: parseBound(env.BTC_RANGE_FILTER_HIGH, 50),
+  };
+}
+
+export function shouldEvaluateBtcRangeFilter(
+  alertType: string,
+  config: BtcRangeFilterConfig = getBtcRangeFilterConfig()
+): boolean {
+  const lowerType = alertType.toLowerCase();
+  return config.enabled && lowerType.includes("short") && !lowerType.includes("data");
+}
+
+export function calculateBtcRangePositionPct(
+  bars: readonly Pick<Kline, "high" | "low" | "close">[]
+): number | null {
+  if (bars.length < BTC_RANGE_MIN_DATA_BARS) return null;
+
+  const btc12hLow = Math.min(...bars.map((bar) => bar.low));
+  const btc12hHigh = Math.max(...bars.map((bar) => bar.high));
+  const btcAtSignal = bars[bars.length - 1]?.close;
+
+  if (!Number.isFinite(btc12hLow) || !Number.isFinite(btc12hHigh) || !Number.isFinite(btcAtSignal)) {
+    return null;
+  }
+  if (btc12hHigh <= btc12hLow) return null;
+
+  return ((btcAtSignal - btc12hLow) / (btc12hHigh - btc12hLow)) * 100;
+}
+
+export async function computeBtcRangePosition(
+  signalTime: Date
+): Promise<number | null> {
+  const closedHourBoundary = new Date(signalTime);
+  closedHourBoundary.setUTCMinutes(0, 0, 0);
+
+  const btcBars = await fetchKlines(
+    "BTCUSDT",
+    "60",
+    BTC_RANGE_WINDOW_HOURS + 2,
+    closedHourBoundary.getTime()
+  );
+
+  const closedBars = btcBars
+    .filter((bar) => bar.startTime < closedHourBoundary.getTime())
+    .slice(-BTC_RANGE_WINDOW_HOURS);
+
+  return calculateBtcRangePositionPct(closedBars);
+}
+
+export async function getShortBtcRangePosition(
+  symbol: string,
+  alertType: string,
+  signalTime: Date,
+  config: BtcRangeFilterConfig = getBtcRangeFilterConfig()
+): Promise<number | null> {
+  if (!shouldEvaluateBtcRangeFilter(alertType, config)) {
+    return null;
+  }
+
+  try {
+    const rangePct = await computeBtcRangePosition(signalTime);
+    if (rangePct == null) {
+      console.warn(`[gate-b] ${symbol} BTC 12h range position unavailable — fail open`);
+    }
+    return rangePct;
+  } catch (err) {
+    console.warn(`[gate-b] ${symbol} BTC 12h range position unavailable — fail open:`, err);
+    return null;
+  }
+}
+
 export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult {
   const {
     alertType, trend4h, btcRegime,
-    atr1h, markPrice, rrTp1, rrTp2, rsi,
+    atr1h, markPrice, rrTp1, rrTp2, rsi, btcRangePct12h, symbol,
   } = input;
   const lowerType = alertType.toLowerCase();
   const allowCounterTrend = variant?.allow_counter_trend ?? false;
@@ -71,6 +165,22 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
       passed: false,
       reason: `R:R to TP2 too low: ${rrRounded} < 0.8`,
     };
+  }
+
+  // ── BTC 12h range position filter (SHORT only) ───────
+  const btcRangeConfig = getBtcRangeFilterConfig();
+  if (shouldEvaluateBtcRangeFilter(alertType, btcRangeConfig) && btcRangePct12h != null) {
+    if (btcRangePct12h < btcRangeConfig.low || btcRangePct12h > btcRangeConfig.high) {
+      const logSymbol = symbol ?? alertType;
+      console.log(
+        `[gate-b] ${logSymbol} blocked: BTC at ${btcRangePct12h.toFixed(1)}% of 12h range ` +
+        `(must be ${btcRangeConfig.low}-${btcRangeConfig.high}%)`
+      );
+      return {
+        passed: false,
+        reason: "BTC_RANGE_POSITION_OUT_OF_RANGE",
+      };
+    }
   }
 
   // ── Regime-aware signal gating ────────────────────────

@@ -143,12 +143,22 @@ export interface Kline {
 export async function fetchKlines(
   symbol: string,
   interval: string,
-  limit: number
+  limit: number,
+  endTimeMs?: number
 ): Promise<Kline[]> {
-  const res = await fetch(
-    `${BYBIT_BASE}/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${limit}`,
-    { cache: "no-store" }
-  );
+  const params = new URLSearchParams({
+    category: "linear",
+    symbol,
+    interval,
+    limit: String(limit),
+  });
+  if (typeof endTimeMs === "number" && Number.isFinite(endTimeMs)) {
+    params.set("end", String(endTimeMs));
+  }
+
+  const res = await fetch(`${BYBIT_BASE}/kline?${params.toString()}`, {
+    cache: "no-store",
+  });
   const data = await parseBybitResponse(res, `Kline ${symbol} (${interval})`);
   if (data.retCode !== 0) {
     throw new Error(`Kline fetch failed for ${symbol} (${interval}): ${data.retMsg}`);
