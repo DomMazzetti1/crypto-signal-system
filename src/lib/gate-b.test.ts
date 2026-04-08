@@ -7,8 +7,8 @@ import {
   shouldEvaluateBtcRangeFilter,
 } from "./gate-b";
 
-// Wednesday 2026-04-08 16:00 UTC — premium hour, premium day, so the
-// hour/day filters never fire and existing tests stay deterministic.
+// Wednesday 2026-04-08 16:00 UTC — not a Tuesday, so the day-of-week filter
+// never fires and existing tests stay deterministic.
 const TEST_SIGNAL_TIME = new Date(Date.UTC(2026, 3, 8, 16, 0, 0));
 
 function baseGateBInput() {
@@ -25,6 +25,8 @@ function baseGateBInput() {
     signalTime: TEST_SIGNAL_TIME,
   };
 }
+
+// ── BTC 12h range helpers ────────────────────────────────
 
 test("calculateBtcRangePositionPct returns normalized BTC position", () => {
   const pct = calculateBtcRangePositionPct([
@@ -99,13 +101,24 @@ test("shouldEvaluateBtcRangeFilter only applies to executable SHORT alerts", () 
   assert.equal(shouldEvaluateBtcRangeFilter("SQ_LONG_REVERSAL", config), false);
 });
 
-// ── Validated 2-yr backtest filters ──────────────────────
+// ── Path C filter stack (OOS-validated subset, April 2026) ──
 
-test("symbol blacklist rejects banned tickers", () => {
-  for (const symbol of ["BERAUSDT", "CAKEUSDT", "APTUSDT", "HYPEUSDT", "LINKUSDT", "ARBUSDT"]) {
+test("symbol blacklist rejects banned tickers with SYMBOL_BLACKLIST reason", () => {
+  const banned = [
+    "BERAUSDT",
+    "CAKEUSDT",
+    "APTUSDT",
+    "RESOLVUSDT",
+    "PIPPINUSDT",
+    "ASTERUSDT",
+    "HYPEUSDT",
+    "LINKUSDT",
+    "ARBUSDT",
+  ];
+  for (const symbol of banned) {
     const result = runGateB({ ...baseGateBInput(), symbol });
     assert.equal(result.passed, false, `${symbol} should be blocked`);
-    assert.match(result.reason ?? "", /blacklisted/);
+    assert.equal(result.reason, "SYMBOL_BLACKLIST", `${symbol} reason mismatch`);
   }
 });
 
@@ -114,66 +127,135 @@ test("symbol blacklist allows non-banned tickers", () => {
   assert.equal(result.passed, true);
 });
 
-test("hour-of-day gate rejects avoid hours UTC", () => {
+test("day-of-week gate rejects Tuesday UTC with TUESDAY_AVOID reason", () => {
+  // 2026-04-07 is a Tuesday
+  const signalTime = new Date(Date.UTC(2026, 3, 7, 16, 0, 0));
+  const result = runGateB({ ...baseGateBInput(), signalTime });
+  assert.equal(result.passed, false);
+  assert.equal(result.reason, "TUESDAY_AVOID");
+});
+
+test("day-of-week gate allows Monday and Wed-Sun UTC", () => {
+  // 2026-04-04 Sat, 2026-04-05 Sun, 2026-04-06 Mon, 2026-04-08 Wed,
+  // 2026-04-09 Thu, 2026-04-10 Fri
+  for (const day of [4, 5, 6, 8, 9, 10]) {
+    const signalTime = new Date(Date.UTC(2026, 3, day, 16, 0, 0));
+    const result = runGateB({ ...baseGateBInput(), signalTime });
+    assert.equal(
+      result.passed,
+      true,
+      `2026-04-${day} should be allowed (was ${result.reason ?? "null"})`
+    );
+  }
+});
+
+test("day-of-week gate does not fire on any hour other than Tuesday", () => {
+  // Regression test: the hour-of-day filter was removed entirely. Hours
+  // that used to be in the old avoid set (6, 8, 9, 15, 18, 20, 22) should
+  // now pass on non-Tuesday days.
   for (const hour of [6, 8, 9, 15, 18, 20, 22]) {
-    const signalTime = new Date(Date.UTC(2026, 3, 8, hour, 0, 0));
+    const signalTime = new Date(Date.UTC(2026, 3, 8, hour, 0, 0)); // Wed
     const result = runGateB({ ...baseGateBInput(), signalTime });
-    assert.equal(result.passed, false, `${hour}:00 UTC should be blocked`);
-    assert.match(result.reason ?? "", /avoid set/);
+    assert.equal(
+      result.passed,
+      true,
+      `Wed ${hour}:00 UTC should be allowed (was ${result.reason ?? "null"})`
+    );
   }
 });
 
-test("hour-of-day gate allows premium hours UTC", () => {
-  for (const hour of [10, 11, 13, 16]) {
-    const signalTime = new Date(Date.UTC(2026, 3, 8, hour, 0, 0));
-    const result = runGateB({ ...baseGateBInput(), signalTime });
-    assert.equal(result.passed, true, `${hour}:00 UTC should be allowed`);
-  }
-});
-
-test("day-of-week gate rejects Mon and Tue UTC", () => {
-  // 2026-04-06 = Monday, 2026-04-07 = Tuesday
-  for (const day of [6, 7]) {
-    const signalTime = new Date(Date.UTC(2026, 3, day, 16, 0, 0));
-    const result = runGateB({ ...baseGateBInput(), signalTime });
-    assert.equal(result.passed, false, `2026-04-${day} should be blocked`);
-    assert.match(result.reason ?? "", /avoid set/);
-  }
-});
-
-test("day-of-week gate allows weekends and Wed-Fri UTC", () => {
-  // 2026-04-04 Sat, 2026-04-05 Sun, 2026-04-08 Wed, 2026-04-09 Thu, 2026-04-10 Fri
-  for (const day of [4, 5, 8, 9, 10]) {
-    const signalTime = new Date(Date.UTC(2026, 3, day, 16, 0, 0));
-    const result = runGateB({ ...baseGateBInput(), signalTime });
-    assert.equal(result.passed, true, `2026-04-${day} should be allowed`);
-  }
-});
-
-test("data-only signals bypass blacklist/hour/day filters", () => {
+test("data-only signals bypass blacklist and day-of-week filters", () => {
   // Data-only cohorts must keep firing so we can compare against the gated set.
   const result = runGateB({
     ...baseGateBInput(),
     symbol: "BERAUSDT",
     alertType: "SQ_SHORT_DATA",
-    signalTime: new Date(Date.UTC(2026, 3, 6, 8, 0, 0)), // Mon 8:00 UTC
+    signalTime: new Date(Date.UTC(2026, 3, 7, 16, 0, 0)), // Tue
   });
   assert.equal(result.passed, true);
 });
 
-test("MR_LONG blocked in sideways regime", () => {
+test("bear SQ_LONG exact-match rule does not reject SQ_LONG_REVERSAL", () => {
+  // Regression test for the substring bug: lowerType.includes("sq_long")
+  // used to also match "sq_long_reversal". After the fix, SQ_LONG_REVERSAL
+  // should pass the bear-regime gate (subject only to the directional
+  // trend filter, which it bypasses via the `reversal` carve-out).
+  const result = runGateB({
+    ...baseGateBInput(),
+    alertType: "SQ_LONG_REVERSAL",
+    btcRegime: "bear",
+    trend4h: "bearish",
+  });
+  assert.equal(result.passed, true);
+  assert.equal(result.reason, null);
+});
+
+test("bear SQ_LONG (exact) is still blocked", () => {
+  const result = runGateB({
+    ...baseGateBInput(),
+    alertType: "SQ_LONG",
+    btcRegime: "bear",
+    trend4h: "neutral",
+  });
+  assert.equal(result.passed, false);
+  assert.equal(result.reason, "SQ_LONG blocked in bear regime");
+});
+
+test("sideways MR_LONG soft gate rejects below composite_score 40", () => {
   const result = runGateB({
     ...baseGateBInput(),
     alertType: "MR_LONG",
     btcRegime: "sideways",
     trend4h: "neutral",
-    rsi: 22,
+    rsi: 28,
+    compositeScore: 25,
   });
   assert.equal(result.passed, false);
-  assert.match(result.reason ?? "", /sideways regime/);
+  assert.equal(result.reason, "SIDEWAYS_MR_LONG_LOW_SCORE");
 });
 
-test("MR_SHORT allowed in sideways regime", () => {
+test("sideways MR_LONG soft gate passes at composite_score == 40", () => {
+  const result = runGateB({
+    ...baseGateBInput(),
+    alertType: "MR_LONG",
+    btcRegime: "sideways",
+    trend4h: "neutral",
+    rsi: 28,
+    compositeScore: 40,
+  });
+  assert.equal(result.passed, true);
+  assert.equal(result.reason, null);
+});
+
+test("sideways MR_LONG soft gate passes above composite_score 40", () => {
+  const result = runGateB({
+    ...baseGateBInput(),
+    alertType: "MR_LONG",
+    btcRegime: "sideways",
+    trend4h: "neutral",
+    rsi: 28,
+    compositeScore: 72,
+  });
+  assert.equal(result.passed, true);
+  assert.equal(result.reason, null);
+});
+
+test("sideways MR_LONG soft gate fails open when compositeScore is undefined", () => {
+  // Backtest / shadow callers may omit compositeScore. The soft gate should
+  // NOT block in that case — only score-bearing callers get the extra gate.
+  const result = runGateB({
+    ...baseGateBInput(),
+    alertType: "MR_LONG",
+    btcRegime: "sideways",
+    trend4h: "neutral",
+    rsi: 28,
+    // compositeScore intentionally omitted
+  });
+  assert.equal(result.passed, true);
+  assert.equal(result.reason, null);
+});
+
+test("sideways MR_SHORT still passes in sideways regime", () => {
   const result = runGateB({
     ...baseGateBInput(),
     alertType: "MR_SHORT",
@@ -184,22 +266,37 @@ test("MR_SHORT allowed in sideways regime", () => {
   assert.equal(result.passed, true);
 });
 
-test("MR setups blocked in bull regime", () => {
-  // Use trend4h="neutral" so the directional trend gate doesn't intercept
-  // MR_SHORT before we reach the bull-regime MR block.
-  for (const alertType of ["MR_LONG", "MR_SHORT"]) {
-    const result = runGateB({
-      ...baseGateBInput(),
-      alertType,
-      btcRegime: "bull",
-      trend4h: "neutral",
-    });
-    assert.equal(result.passed, false, `${alertType} in bull should be blocked`);
-    assert.match(result.reason ?? "", /bull regime/);
-  }
+test("bull regime: MR_LONG no longer hard-banned", () => {
+  // Regression test for removed bull MR ban. With trend4h="neutral" the
+  // directional trend filter doesn't fire, and after Path C the blanket
+  // bull MR ban is gone. MR_LONG in bull should pass.
+  const result = runGateB({
+    ...baseGateBInput(),
+    alertType: "MR_LONG",
+    btcRegime: "bull",
+    trend4h: "neutral",
+    rsi: 28,
+  });
+  assert.equal(result.passed, true);
+  assert.equal(result.reason, null);
 });
 
-test("SQ_SHORT still allowed in bull regime", () => {
+test("bull regime: MR_SHORT no longer hard-banned (trend4h neutral)", () => {
+  // Regression test: the blanket bull MR_SHORT ban has been removed.
+  // The directional trend filter still applies (blocks short in bullish
+  // 4H trend), but with neutral trend nothing should stop it.
+  const result = runGateB({
+    ...baseGateBInput(),
+    alertType: "MR_SHORT",
+    btcRegime: "bull",
+    trend4h: "neutral",
+    rsi: 75,
+  });
+  assert.equal(result.passed, true);
+  assert.equal(result.reason, null);
+});
+
+test("bull regime: SQ_SHORT still allowed", () => {
   const result = runGateB({
     ...baseGateBInput(),
     btcRegime: "bull",
