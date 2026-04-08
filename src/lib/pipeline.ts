@@ -459,6 +459,26 @@ export async function runPipeline(
     console.log(`[pipeline] ${alert.symbol}: sideways regime → reversed to SQ_LONG_REVERSAL`);
   }
 
+  // ── 5b. Compute scoring inputs + composite score ──────
+  // Moved BEFORE gate B so the sideways-MR_LONG soft gate can use the
+  // composite score. computeCompositeScore is a pure function with no
+  // side effects, so reordering is safe.
+  const volRatio =
+    alert.sma20_volume && alert.sma20_volume > 0
+      ? (alert.volume ?? 0) / alert.sma20_volume
+      : null;
+  const entryDeviationPct =
+    markPrice > 0
+      ? Math.abs(levels.entry - markPrice) / markPrice
+      : null;
+
+  const scoreResult = computeCompositeScore({
+    atr14_1h: atr14_1h,
+    mark_price: markPrice,
+    vol_ratio: volRatio,
+    alert_type: alert.type,
+  });
+
   // ── 6. Gate B ─────────────────────────────────────────
   const gateB = runGateB({
     symbol: alert.symbol,
@@ -475,6 +495,7 @@ export async function runPipeline(
     sma20Volume: alert.sma20_volume,
     btcRangePct12h,
     signalTime: new Date(),
+    compositeScore: scoreResult.composite_score,
   });
 
   // ── 7. Cooldown check ─────────────────────────────────
@@ -498,23 +519,6 @@ export async function runPipeline(
       ` regime=${regime.btc_regime} trend_4h=${trend4h.trend}` +
       (finalGateBReason ? ` reason=${finalGateBReason}` : "")
   );
-
-  // ── 8b. Compute scoring inputs + composite score ──────
-  const volRatio =
-    alert.sma20_volume && alert.sma20_volume > 0
-      ? (alert.volume ?? 0) / alert.sma20_volume
-      : null;
-  const entryDeviationPct =
-    markPrice > 0
-      ? Math.abs(levels.entry - markPrice) / markPrice
-      : null;
-
-  const scoreResult = computeCompositeScore({
-    atr14_1h: atr14_1h,
-    mark_price: markPrice,
-    vol_ratio: volRatio,
-    alert_type: alert.type,
-  });
 
   // ── 8c. Pre-review score/volume gate ──────────────────
   const volRatioMinimum = parseFloat(process.env.VOL_RATIO_MIN ?? "0.5");

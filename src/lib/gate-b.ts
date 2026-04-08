@@ -22,11 +22,16 @@ export interface GateBInput {
   volume?: number;
   sma20Volume?: number;
   btcRangePct12h?: number | null;
-  // Time the candle that produced this signal closed. Used for hour-of-day
-  // and day-of-week filters. Production callers can omit (defaults to now);
+  // Time the candle that produced this signal closed. Used for the
+  // day-of-week filter. Production callers can omit (defaults to now);
   // backtest callers MUST pass the historical bar time so the filters are
   // evaluated against the period the signal would have fired in.
   signalTime?: Date;
+  // Composite score (0-100) from computeCompositeScore(). Used by the
+  // sideways MR_LONG soft gate. Optional: when undefined, the soft gate
+  // fails open (does not block). Production pipeline callers should pass
+  // this; backtest / shadow callers may omit.
+  compositeScore?: number;
 }
 
 // ─────────────────────────────────────────────────────────
@@ -49,19 +54,22 @@ export const SYMBOL_BLACKLIST: ReadonlySet<string> = new Set([
   "ARBUSDT",    // 39.4% WR, -0.125R, n=71 (soft watchlist promoted)
 ]);
 
-// UTC hours where the system bleeds. Net -0.132R / 32.9% WR across 572 trades
-// in the avoid bucket vs +0.914R / 63.6% WR in the premium bucket.
-// The avoid edge has STRENGTHENED in 2026 (-0.421R/trade vs +0.113R in 2025),
-// so this filter is getting sharper, not staler.
-export const AVOID_HOURS_UTC: ReadonlySet<number> = new Set([
-  6, 8, 9, 15, 18, 20, 22,
-]);
+// UTC days of the week to avoid. OOS validation (April 2026) showed the
+// original Mon+Tue avoid set did NOT hold out-of-sample: Mon came in at
+// -0.116R deriv but +0.027R holdout (flipped sign), while Tue was -0.189R
+// deriv and -0.144R holdout (still negative). Keep Tue only; Mon is
+// statistically indistinguishable from zero on holdout and gets dropped.
+// The hour-of-day avoid set was dropped entirely pending re-evaluation
+// against a fresh week of live data (see brain/oos_validation_2026-04-08).
+export const AVOID_DOWS_UTC: ReadonlySet<number> = new Set([2]);
 
-// UTC days of the week to avoid. Mon (1) and Tue (2) sit at +0.04R / +0.02R
-// vs Sat/Sun at +0.50-0.54R. Both have meaningful sample sizes (253, 205).
-export const AVOID_DOWS_UTC: ReadonlySet<number> = new Set([1, 2]);
-
-const DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+// Minimum composite score required for a sideways-regime MR_LONG signal to
+// pass. Below this threshold the signal is rejected with
+// SIDEWAYS_MR_LONG_LOW_SCORE. OOS validation (April 2026) showed sideways
+// MR_LONG as a whole still has negative derivation-period EV, but the
+// holdout cohort split on composite_score=40 produced enough separation
+// to justify a soft (score-based) gate rather than a hard ban.
+const SIDEWAYS_MR_LONG_MIN_SCORE = 40;
 
 export interface GateBVariant {
   allow_counter_trend?: boolean;
@@ -170,32 +178,23 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
   // collecting comparison data on rejected cohorts instead of going dark.
   const isDataOnly = lowerType.includes("_data");
 
-  // ── Symbol blacklist (validated 2-yr backtest) ────────
+  // ── Symbol blacklist (validated 2-yr backtest + OOS) ──
   if (!isDataOnly && symbol && SYMBOL_BLACKLIST.has(symbol)) {
     return {
       passed: false,
-      reason: `Symbol ${symbol} blacklisted (negative EV across 2yr backtest)`,
-    };
-  }
-
-  // ── Time-of-day gate (UTC hour) ───────────────────────
-  // Defaults to "now" so production callers don't need to pass anything;
-  // backtest callers should pass the historical candle close time.
-  const signalTime = input.signalTime ?? new Date();
-  const utcHour = signalTime.getUTCHours();
-  if (!isDataOnly && AVOID_HOURS_UTC.has(utcHour)) {
-    return {
-      passed: false,
-      reason: `Hour ${utcHour}:00 UTC in avoid set (-0.13R historical avg, 32.9% WR)`,
+      reason: "SYMBOL_BLACKLIST",
     };
   }
 
   // ── Day-of-week gate (UTC) ────────────────────────────
+  // Defaults to "now" so production callers don't need to pass anything;
+  // backtest callers should pass the historical candle close time.
+  const signalTime = input.signalTime ?? new Date();
   const utcDow = signalTime.getUTCDay();
   if (!isDataOnly && AVOID_DOWS_UTC.has(utcDow)) {
     return {
       passed: false,
-      reason: `${DOW_NAMES[utcDow]} UTC in avoid set (~+0.02R historical avg, 36-40% WR)`,
+      reason: "TUESDAY_AVOID",
     };
   }
 
@@ -259,8 +258,10 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
 
   if (btcRegime === "bear") {
     // BEAR: allow SQ_SHORT freely
-    // SQ_LONG: blocked in bear regime — counter-trend long squeeze has no edge
-    if (lowerType.includes("sq_long")) {
+    // SQ_LONG: blocked in bear regime — counter-trend long squeeze has no edge.
+    // Use EXACT match (not substring) so that SQ_LONG_REVERSAL and
+    // SQ_LONG_RELAXED variants are not mis-caught by this rule.
+    if (lowerType === "sq_long") {
       return {
         passed: false,
         reason: "SQ_LONG blocked in bear regime",
@@ -283,27 +284,28 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
   }
 
   if (btcRegime === "sideways") {
-    // MR_LONG: 21.1% WR, -0.337R in 2yr backtest (n=19)
-    if (lowerType.includes("mr_long")) {
-      return {
-        passed: false,
-        reason: "MR_LONG fails in sideways regime (-0.34R, 21% WR over 2yr backtest)",
-      };
+    // MR_LONG: soft gate by composite score. OOS validation (April 2026)
+    // showed sideways MR_LONG has negative deriv-period EV but the holdout
+    // cohort split on composite_score produced enough lift above 40 to
+    // keep the setup alive on a score-gated basis instead of hard-banning.
+    // If compositeScore is not supplied (e.g. backtest callers), fail open.
+    if (lowerType.includes("mr_long") && input.compositeScore !== undefined) {
+      if (input.compositeScore < SIDEWAYS_MR_LONG_MIN_SCORE) {
+        return {
+          passed: false,
+          reason: "SIDEWAYS_MR_LONG_LOW_SCORE",
+        };
+      }
     }
     // MR_SHORT: validated edge in sideways (53.5% WR, +0.476R, n=101) — allow
     // SQ_SHORT: already blocked above
   }
 
-  if (btcRegime === "bull") {
-    // SQ_LONG: insufficient sample but conceptually fine; not tested.
-    // MR setups in bull both produced -1.00R (n=1, n=3) — block until proven.
-    if (lowerType.includes("mr_long") || lowerType.includes("mr_short")) {
-      return {
-        passed: false,
-        reason: "MR setups not validated in bull regime (insufficient sample, -1.00R)",
-      };
-    }
-  }
+  // Bull regime: no additional filters. The previous blanket MR_LONG/MR_SHORT
+  // bull ban was dropped after OOS validation — the derivation-period sample
+  // sizes (n=1, n=3) were too small to justify a hard rule, and the middle-path
+  // filter stack relies on other gates (symbol blacklist, trend, composite score)
+  // to handle these cases.
 
   return { passed: true, reason: null };
 }
