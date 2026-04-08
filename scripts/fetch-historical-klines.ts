@@ -1,7 +1,10 @@
 /**
  * Fetch historical klines from Bybit V5 API and upsert into candle_cache.
  *
- * Usage: npx tsx scripts/fetch-historical-klines.ts --symbols BTCUSDT,SOLUSDT --interval 60 --years 1
+ * Usage:
+ *   npx tsx scripts/fetch-historical-klines.ts --symbols BTCUSDT,SOLUSDT --interval 60 --years 1
+ *   npx tsx scripts/fetch-historical-klines.ts --symbols HYPEUSDT,ONTUSDT --interval 15 \
+ *     --from 2026-03-27T00:00:00Z --to 2026-04-06T00:00:00Z --backfill-range
  */
 
 import { readFileSync } from "fs";
@@ -16,7 +19,16 @@ try {
   const lines = readFileSync(envPath, "utf8").split("\n");
   for (const line of lines) {
     const match = line.match(/^([^#=]+)=(.*)$/);
-    if (match) process.env[match[1].trim()] ??= match[2].trim();
+    if (match) {
+      let value = match[2].trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      process.env[match[1].trim()] ??= value;
+    }
   }
 } catch {}
 
@@ -72,13 +84,34 @@ interface Candle {
   volume: number;
 }
 
+interface CliArgs {
+  symbols: string[];
+  interval: string;
+  years: number;
+  fromMs: number | null;
+  toMs: number | null;
+  backfillRange: boolean;
+}
+
 // ── CLI arg parsing ───────────────────────────────────────
 
-function parseArgs(): { symbols: string[]; interval: string; years: number } {
+function parseIsoArg(value: string, flag: string): number {
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) {
+    console.error(`[fetch-klines] Invalid ${flag}: ${value}`);
+    process.exit(1);
+  }
+  return ms;
+}
+
+function parseArgs(): CliArgs {
   const args = process.argv.slice(2);
   let symbols: string[] = [...ALL_SYMBOLS];
   let interval = "60";
   let years = 2;
+  let fromMs: number | null = null;
+  let toMs: number | null = null;
+  let backfillRange = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--symbols" && args[i + 1]) {
       const val = args[++i];
@@ -87,9 +120,27 @@ function parseArgs(): { symbols: string[]; interval: string; years: number } {
       interval = args[++i];
     } else if (args[i] === "--years" && args[i + 1]) {
       years = Number(args[++i]);
+    } else if (args[i] === "--from" && args[i + 1]) {
+      fromMs = parseIsoArg(args[++i], "--from");
+    } else if (args[i] === "--to" && args[i + 1]) {
+      toMs = parseIsoArg(args[++i], "--to");
+    } else if (args[i] === "--backfill-range") {
+      backfillRange = true;
     }
   }
-  return { symbols, interval, years };
+
+  if (backfillRange) {
+    if (fromMs == null || toMs == null) {
+      console.error("[fetch-klines] --backfill-range requires both --from and --to");
+      process.exit(1);
+    }
+    if (toMs <= fromMs) {
+      console.error("[fetch-klines] --to must be later than --from");
+      process.exit(1);
+    }
+  }
+
+  return { symbols, interval, years, fromMs, toMs, backfillRange };
 }
 
 // ── Query latest stored candle time ───────────────────────
@@ -156,10 +207,19 @@ async function fetchAllKlines(
   symbol: string,
   interval: string,
   years: number,
-  latestStoredMs: number | null
+  latestStoredMs: number | null,
+  opts?: {
+    fromMs?: number | null;
+    toMs?: number | null;
+    backfillRange?: boolean;
+  }
 ): Promise<Candle[]> {
-  const cutoffMs = Date.now() - years * 365.25 * 24 * 60 * 60 * 1000;
-  let endMs = Date.now();
+  const fromMs = opts?.fromMs ?? null;
+  const toMs = opts?.toMs ?? null;
+  const backfillRange = opts?.backfillRange === true;
+  const cutoffMs =
+    fromMs ?? Date.now() - years * 365.25 * 24 * 60 * 60 * 1000;
+  let endMs = toMs ?? Date.now();
   let callCount = 0;
   const allCandles: Candle[] = [];
 
@@ -167,9 +227,14 @@ async function fetchAllKlines(
     const page = await fetchKlinesPage(symbol, interval, endMs);
     if (page.length === 0) break;
 
-    const filtered = latestStoredMs
-      ? page.filter((c) => c.startTime > latestStoredMs)
-      : page;
+    const filtered = page.filter((c) => {
+      if (backfillRange) {
+        if (fromMs != null && c.startTime < fromMs) return false;
+        if (toMs != null && c.startTime > toMs) return false;
+        return true;
+      }
+      return latestStoredMs ? c.startTime > latestStoredMs : true;
+    });
 
     if (filtered.length === 0) break;
 
@@ -239,9 +304,10 @@ async function upsertCandles(
 // ── Main ──────────────────────────────────────────────────
 
 async function main() {
-  const { symbols, interval, years } = parseArgs();
-  console.log(
-    `[fetch-klines] ${symbols.length} symbols, interval=${interval}, years=${years}`
+  const { symbols, interval, years, fromMs, toMs, backfillRange } = parseArgs();
+  console.log(backfillRange
+    ? `[fetch-klines] ${symbols.length} symbols, interval=${interval}, range=${new Date(fromMs!).toISOString()} -> ${new Date(toMs!).toISOString()}`
+    : `[fetch-klines] ${symbols.length} symbols, interval=${interval}, years=${years}`
   );
 
   let totalCandles = 0;
@@ -253,9 +319,17 @@ async function main() {
       const latestStr = latestMs
         ? new Date(latestMs).toISOString().slice(0, 16)
         : "none";
-      console.log(`[fetch-klines] Fetching ${symbol} (latest stored: ${latestStr})`);
+      console.log(
+        backfillRange
+          ? `[fetch-klines] Backfilling ${symbol} (${new Date(fromMs!).toISOString().slice(0, 10)} -> ${new Date(toMs!).toISOString().slice(0, 10)}, latest stored: ${latestStr})`
+          : `[fetch-klines] Fetching ${symbol} (latest stored: ${latestStr})`
+      );
 
-      const candles = await fetchAllKlines(symbol, interval, years, latestMs);
+      const candles = await fetchAllKlines(symbol, interval, years, latestMs, {
+        fromMs,
+        toMs,
+        backfillRange,
+      });
 
       if (candles.length > 0) {
         await upsertCandles(symbol, interval, candles);
