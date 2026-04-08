@@ -223,6 +223,7 @@ export async function POST(request: NextRequest) {
 
           // Gate B: exact — uses trend, regime, ATR, R:R (all computed from candles)
           const gateBInput: GateBInput = {
+            symbol,
             alertType: setupType,
             trend4h: htfTrend.trend,
             btcRegime: regime as "bull" | "bear" | "sideways",
@@ -234,6 +235,7 @@ export async function POST(request: NextRequest) {
             adx1h: ind.adx_1h,
             volume: ind.volume,
             sma20Volume: ind.sma20_volume,
+            signalTime: new Date(barTime),
           };
           const gateB = runGateB(gateBInput);
 

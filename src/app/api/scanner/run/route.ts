@@ -380,6 +380,7 @@ export async function GET(request: NextRequest) {
 
         // Shadow baseline Gate B (same as production, for comparison logging)
         const shadowBaselineGateB = runGateB({
+          symbol,
           alertType: sig.type,
           trend4h: shadowTrend4h as "bullish" | "bearish" | "neutral",
           btcRegime: shadowRegime as "bull" | "bear" | "sideways",
@@ -390,6 +391,7 @@ export async function GET(request: NextRequest) {
           adx1h: indicators.adx_1h,
           volume: indicators.volume,
           sma20Volume: indicators.sma20_volume,
+          signalTime: new Date(indicators.candle_start_time),
         });
 
         // Shadow baseline cooldown check (reads production cooldown keys)
@@ -403,6 +405,7 @@ export async function GET(request: NextRequest) {
 
         // Shadow relaxed Gate B
         const shadowRelaxedGateB = runGateBRelaxed({
+          symbol,
           alertType: sig.type,
           trend4h: shadowTrend4h as "bullish" | "bearish" | "neutral",
           btcRegime: shadowRegime as "bull" | "bear" | "sideways",
@@ -413,6 +416,7 @@ export async function GET(request: NextRequest) {
           adx1h: indicators.adx_1h,
           volume: indicators.volume,
           sma20Volume: indicators.sma20_volume,
+          signalTime: new Date(indicators.candle_start_time),
         });
 
         // Shadow relaxed cooldown (separate Redis namespace, 4h TTL)

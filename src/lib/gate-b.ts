@@ -22,7 +22,46 @@ export interface GateBInput {
   volume?: number;
   sma20Volume?: number;
   btcRangePct12h?: number | null;
+  // Time the candle that produced this signal closed. Used for hour-of-day
+  // and day-of-week filters. Production callers can omit (defaults to now);
+  // backtest callers MUST pass the historical bar time so the filters are
+  // evaluated against the period the signal would have fired in.
+  signalTime?: Date;
 }
+
+// ─────────────────────────────────────────────────────────
+// Validated rejection sets — derived from the 2-yr backtest
+// (2024-03 → 2026-04, 2,075 signals across 52 symbols).
+// See alchemy-tools/brain/pattern_analysis_2yr.md for full math.
+// ─────────────────────────────────────────────────────────
+
+// Symbols with negative or near-zero EV across the full 2-yr window.
+// Hard ban: every signal on these symbols is dropped at the gate.
+export const SYMBOL_BLACKLIST: ReadonlySet<string> = new Set([
+  "BERAUSDT",   // 0.0% WR, -1.000R, n=22
+  "CAKEUSDT",   // 12.2% WR, -0.657R, n=74
+  "APTUSDT",    // 20.0% WR, -0.507R, n=50
+  "RESOLVUSDT", // 26.2% WR, -0.375R, n=42
+  "PIPPINUSDT", // 21.1% WR, -0.327R, n=19
+  "ASTERUSDT",  // 27.8% WR, -0.324R, n=18
+  "HYPEUSDT",   // 29.0% WR, -0.200R, n=31
+  "LINKUSDT",   // 36.4% WR, -0.198R, n=55 (soft watchlist promoted)
+  "ARBUSDT",    // 39.4% WR, -0.125R, n=71 (soft watchlist promoted)
+]);
+
+// UTC hours where the system bleeds. Net -0.132R / 32.9% WR across 572 trades
+// in the avoid bucket vs +0.914R / 63.6% WR in the premium bucket.
+// The avoid edge has STRENGTHENED in 2026 (-0.421R/trade vs +0.113R in 2025),
+// so this filter is getting sharper, not staler.
+export const AVOID_HOURS_UTC: ReadonlySet<number> = new Set([
+  6, 8, 9, 15, 18, 20, 22,
+]);
+
+// UTC days of the week to avoid. Mon (1) and Tue (2) sit at +0.04R / +0.02R
+// vs Sat/Sun at +0.50-0.54R. Both have meaningful sample sizes (253, 205).
+export const AVOID_DOWS_UTC: ReadonlySet<number> = new Set([1, 2]);
+
+const DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export interface GateBVariant {
   allow_counter_trend?: boolean;
@@ -127,6 +166,39 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
   const lowerType = alertType.toLowerCase();
   const allowCounterTrend = variant?.allow_counter_trend ?? false;
 
+  // Skip the new validated filters for data-only / shadow signals so we keep
+  // collecting comparison data on rejected cohorts instead of going dark.
+  const isDataOnly = lowerType.includes("_data");
+
+  // ── Symbol blacklist (validated 2-yr backtest) ────────
+  if (!isDataOnly && symbol && SYMBOL_BLACKLIST.has(symbol)) {
+    return {
+      passed: false,
+      reason: `Symbol ${symbol} blacklisted (negative EV across 2yr backtest)`,
+    };
+  }
+
+  // ── Time-of-day gate (UTC hour) ───────────────────────
+  // Defaults to "now" so production callers don't need to pass anything;
+  // backtest callers should pass the historical candle close time.
+  const signalTime = input.signalTime ?? new Date();
+  const utcHour = signalTime.getUTCHours();
+  if (!isDataOnly && AVOID_HOURS_UTC.has(utcHour)) {
+    return {
+      passed: false,
+      reason: `Hour ${utcHour}:00 UTC in avoid set (-0.13R historical avg, 32.9% WR)`,
+    };
+  }
+
+  // ── Day-of-week gate (UTC) ────────────────────────────
+  const utcDow = signalTime.getUTCDay();
+  if (!isDataOnly && AVOID_DOWS_UTC.has(utcDow)) {
+    return {
+      passed: false,
+      reason: `${DOW_NAMES[utcDow]} UTC in avoid set (~+0.02R historical avg, 36-40% WR)`,
+    };
+  }
+
   // ── Sideways regime: block SQ_SHORT only ─────────────
   if (btcRegime.toLowerCase() === "sideways" && lowerType.includes("sq_short")) {
     return {
@@ -194,7 +266,7 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
         reason: "SQ_LONG blocked in bear regime",
       };
     }
-    // MR_SHORT: blocked — 0% win rate, -1.00R in backtest
+    // MR_SHORT: blocked — 26.3% WR, -0.156R in 2yr backtest (n=76)
     if (lowerType.includes("mr_short")) {
       return {
         passed: false,
@@ -206,6 +278,29 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
       return {
         passed: false,
         reason: `MR_LONG in BEAR regime requires RSI < 25, got ${rsi.toFixed(1)}`,
+      };
+    }
+  }
+
+  if (btcRegime === "sideways") {
+    // MR_LONG: 21.1% WR, -0.337R in 2yr backtest (n=19)
+    if (lowerType.includes("mr_long")) {
+      return {
+        passed: false,
+        reason: "MR_LONG fails in sideways regime (-0.34R, 21% WR over 2yr backtest)",
+      };
+    }
+    // MR_SHORT: validated edge in sideways (53.5% WR, +0.476R, n=101) — allow
+    // SQ_SHORT: already blocked above
+  }
+
+  if (btcRegime === "bull") {
+    // SQ_LONG: insufficient sample but conceptually fine; not tested.
+    // MR setups in bull both produced -1.00R (n=1, n=3) — block until proven.
+    if (lowerType.includes("mr_long") || lowerType.includes("mr_short")) {
+      return {
+        passed: false,
+        reason: "MR setups not validated in bull regime (insufficient sample, -1.00R)",
       };
     }
   }

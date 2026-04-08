@@ -474,6 +474,7 @@ export async function runPipeline(
     volume: alert.volume,
     sma20Volume: alert.sma20_volume,
     btcRangePct12h,
+    signalTime: new Date(),
   });
 
   // ── 7. Cooldown check ─────────────────────────────────

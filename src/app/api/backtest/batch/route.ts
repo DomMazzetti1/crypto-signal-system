@@ -814,6 +814,7 @@ export async function GET(request: NextRequest) {
         const atrVal = indicators.atr_1h;
 
         const gateB = runGateB({
+          symbol,
           alertType: sig.type,
           trend4h: trend4h.trend,
           btcRegime: regime,
@@ -824,6 +825,7 @@ export async function GET(request: NextRequest) {
           adx1h: indicators.adx_1h,
           volume: indicators.volume,
           sma20Volume: indicators.sma20_volume,
+          signalTime: new Date(candles1h[i].startTime),
         }, {
           allow_counter_trend: variantConfig.allow_counter_trend,
         });
