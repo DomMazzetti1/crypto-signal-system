@@ -37,9 +37,12 @@ export function getTelegramFilterBlockReason(
     }
   }
 
-  if (input.isRelaxed && input.regimeWeakening) {
-    return "REGIME_WEAKENING";
-  }
+  // REGIME_WEAKENING gate removed 2026-04-09: OOS validation showed the filter
+  // was catastrophically inverted on 2026 hold-out data (blocked +1.79R/68%WR
+  // signals while passing +0.07R/28%WR signals). `regime_weakening` is still
+  // computed in regime.ts and persisted on decisions for future analysis, but
+  // is no longer used to gate Telegram delivery.
+  // Ref: brain/regime_weakening_oos_2026-04-09.md
 
   if (input.isRelaxed) {
     const relaxedChecks = [

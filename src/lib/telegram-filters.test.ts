@@ -46,3 +46,16 @@ test("telegram filters allow a healthy strict setup through", () => {
 
   assert.equal(reason, null);
 });
+
+// Regression: REGIME_WEAKENING gate removed 2026-04-09 after OOS validation
+// showed the filter was catastrophically inverted on 2026 hold-out data.
+// Ref: brain/regime_weakening_oos_2026-04-09.md
+test("telegram filters no longer block RELAXED setups on regime_weakening=true", () => {
+  const reason = getTelegramFilterBlockReason({
+    ...baseInput(),
+    isRelaxed: true,
+    regimeWeakening: true,
+  });
+
+  assert.equal(reason, null);
+});
