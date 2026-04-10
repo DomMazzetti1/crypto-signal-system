@@ -49,14 +49,13 @@ test("buildMessage includes AI analysis block when ai_review is present", () => 
   const input = baseTelegramInput({ ai_review: mockAIReview() });
   const msg = buildMessage(input);
 
-  assert.ok(msg.includes("🤖 AI Analysis:"), "Should contain AI Analysis header");
+  assert.ok(msg.includes("✅ AI: strong_setup (72/100)"), "Should contain AI verdict in header");
   assert.ok(msg.includes("72/100"), "Should contain confidence score");
-  assert.ok(msg.includes("clean_breakdown"), "Should contain pattern label");
-  assert.ok(msg.includes("strong_setup"), "Should contain verdict");
-  assert.ok(msg.includes("📊 AI-suggested levels:"), "Should contain AI levels section");
-  assert.ok(msg.includes("TP1:"), "Should contain TP1");
-  assert.ok(msg.includes("TP2:"), "Should contain TP2");
-  assert.ok(msg.includes("⚠️ Concerns:"), "Should contain concerns section");
+  assert.ok(msg.includes("<b>TP1</b>"), "Should contain TP1 with bold tag");
+  assert.ok(msg.includes("<b>TP2</b>"), "Should contain TP2 with bold tag");
+  assert.ok(msg.includes("⚠️"), "Should contain concerns indicator");
+  assert.ok(!msg.includes("🤖 AI Analysis:"), "Should NOT contain old AI Analysis header");
+  assert.ok(!msg.includes("📊 AI-suggested levels:"), "Should NOT contain old AI levels section");
 });
 
 test("buildMessage shows AI stop when different from system stop", () => {
@@ -82,15 +81,20 @@ test("buildMessage handles null TP3 gracefully", () => {
   const input = baseTelegramInput({ ai_review: ai });
   const msg = buildMessage(input);
 
-  assert.ok(msg.includes("TP3: none"), "Should show 'none' for null TP3");
+  // When AI TP3 is null, it's simply not included in the output
+  assert.ok(msg.includes("<b>TP1</b>"), "Should include TP1");
+  assert.ok(msg.includes("<b>TP2</b>"), "Should include TP2");
+  // Verify TP3 line is not present
+  const tp3Match = msg.match(/<b>TP3<\/b>/);
+  assert.equal(tp3Match, null, "Should not show TP3 block when AI TP3 is null");
 });
 
 test("buildMessage shows no AI block when ai_review is undefined", () => {
   const input = baseTelegramInput();
   const msg = buildMessage(input);
 
-  assert.ok(!msg.includes("🤖 AI Analysis:"), "Should NOT contain AI Analysis when undefined");
-  assert.ok(!msg.includes("📊 AI-suggested levels:"), "Should NOT contain AI levels when undefined");
+  assert.ok(!msg.includes("✅ AI:"), "Should NOT contain AI verdict in header when undefined");
+  assert.ok(msg.includes("Confidence: 7/10"), "Should show system confidence when no ai_review");
 });
 
 test("buildMessage handles avoid verdict", () => {
@@ -103,8 +107,7 @@ test("buildMessage handles avoid verdict", () => {
   const input = baseTelegramInput({ ai_review: ai });
   const msg = buildMessage(input);
 
-  assert.ok(msg.includes("15/100"), "Should show low confidence");
-  assert.ok(msg.includes("avoid"), "Should show avoid verdict");
+  assert.ok(msg.includes("❌ AI: avoid (15/100)"), "Should show avoid verdict with ❌ icon in header");
   assert.ok(msg.includes("support_nearby"), "Should list concerns");
 });
 
@@ -119,7 +122,31 @@ test("buildMessage escapes HTML in AI review fields", () => {
 
   assert.ok(!msg.includes("<broke>"), "Should escape angle brackets in reasoning");
   assert.ok(msg.includes("&lt;broke&gt;"), "Should HTML-escape reasoning");
-  assert.ok(msg.includes("test&lt;pattern&gt;"), "Should HTML-escape pattern");
+  // Pattern is in ai_review but not displayed in new format (only verdict is shown)
+  // The test verifies that rationales are properly escaped
+  assert.ok(msg.includes("&lt;with&gt;"), "Should HTML-escape rationales");
+});
+
+test("buildMessage works with system fallback path (no ai_review)", () => {
+  const input = baseTelegramInput({ ai_review: undefined });
+  const msg = buildMessage(input);
+
+  // Should show system TPs
+  assert.ok(msg.includes("<b>TP1</b>"), "Should show system TP1");
+  assert.ok(msg.includes("<b>TP2</b>"), "Should show system TP2");
+  assert.ok(msg.includes("<b>TP3</b>"), "Should show system TP3");
+
+  // Should show system confidence
+  assert.ok(msg.includes("Confidence: 7/10"), "Should show system confidence");
+
+  // Should show system reasoning (not in italics when no AI)
+  assert.ok(msg.includes("Price breaking below support"), "Should include system reasoning");
+  assert.ok(!msg.includes("<i>Price breaking below support</i>"), "System reasoning should NOT be in italics");
+
+  // Should not have AI verdict in header
+  assert.ok(!msg.includes("✅ AI:"), "Should not have AI verdict in header");
+  assert.ok(!msg.includes("⚠️ AI:"), "Should not have marginal verdict in header");
+  assert.ok(!msg.includes("❌ AI:"), "Should not have avoid verdict in header");
 });
 
 // ── AI review result validation (unit tests for the reviewer) ──

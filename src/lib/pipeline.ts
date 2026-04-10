@@ -548,7 +548,7 @@ export async function runPipeline(
   let riskFlags: string[] = [];
   let aiReview: AIReviewResult | null = null;
 
-  if ((decision === "LONG" || decision === "SHORT") && !preReviewBlocked) {
+  if (decision === "SHORT" && !preReviewBlocked) {
     try {
       // Gather comprehensive market context for Sonnet
       const marketContext = await gatherMarketContext(

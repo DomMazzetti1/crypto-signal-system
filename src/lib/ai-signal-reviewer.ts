@@ -7,6 +7,9 @@
  * Telegram alert for Yuri to validate.
  *
  * This is observation mode: AI informs, it does NOT gate signals.
+ *
+ * This reviewer only handles SHORT signals. The caller (pipeline.ts)
+ * guards against routing LONG signals here.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -194,6 +197,32 @@ export async function reviewSignalWithSonnet(
       typeof response.overall_verdict !== "string"
     ) {
       console.error("[ai-reviewer] Invalid response structure from Sonnet:", response);
+      return null;
+    }
+
+    // ── Geometry validation (SHORT signals only) ──────────
+    const entryPrice = marketContext.signal_metadata.entry;
+    const tps = [response.tp1_price, response.tp2_price, response.tp3_price]
+      .filter((p): p is number => p != null);
+
+    const allBelowEntry = tps.every(p => p < entryPrice);
+    const monotoneDescending = tps.every((p, i) => i === 0 || p < tps[i - 1]);
+
+    if (!allBelowEntry || !monotoneDescending) {
+      console.error("[ai-reviewer] Invalid TP geometry — TPs must be below entry and monotone descending", {
+        entry: entryPrice,
+        tps,
+        allBelowEntry,
+        monotoneDescending,
+      });
+      return null;
+    }
+
+    if (response.suggested_stop <= entryPrice) {
+      console.error("[ai-reviewer] Invalid stop geometry — stop must be above entry for shorts", {
+        entry: entryPrice,
+        suggested_stop: response.suggested_stop,
+      });
       return null;
     }
 

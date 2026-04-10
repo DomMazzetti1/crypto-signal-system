@@ -39,69 +39,66 @@ export function buildMessage(input: TelegramMessageInput): string {
         ? "🔴"
         : "⚪";
 
+  // ── Header with AI verdict ────────────────────────────
+  let header = `${icon} ${escapeHtml(input.decision)} — ${escapeHtml(input.symbol)}`;
+  if (input.ai_review) {
+    const vi =
+      input.ai_review.overall_verdict === "strong_setup"
+        ? "✅"
+        : input.ai_review.overall_verdict === "marginal"
+          ? "⚠️"
+          : "❌";
+    header += `   ${vi} AI: ${escapeHtml(input.ai_review.overall_verdict)} (${input.ai_review.confidence}/100)`;
+  }
+
+  // ── Price levels (single block: AI if present, else system) ──
+  const ai = input.ai_review;
+  const stopLine = ai && Math.abs(ai.suggested_stop - input.stop) / input.stop > 0.001
+    ? `<b>SL</b>    ${formatPrice(input.stop)} (AI: ${formatPrice(ai.suggested_stop)})`
+    : `<b>SL</b>    ${formatPrice(input.stop)}`;
+
+  let tpBlock: string;
+  if (ai) {
+    tpBlock = `<b>TP1</b>   ${formatPrice(ai.tp1_price)}  — ${escapeHtml(ai.tp1_rationale)}
+<b>TP2</b>   ${formatPrice(ai.tp2_price)}  — ${escapeHtml(ai.tp2_rationale)}`;
+    if (ai.tp3_price != null && ai.tp3_rationale) {
+      tpBlock += `\n<b>TP3</b>   ${formatPrice(ai.tp3_price)}  — ${escapeHtml(ai.tp3_rationale)}`;
+    }
+  } else {
+    tpBlock = `<b>TP1</b>   ${formatPrice(input.tp1)}
+<b>TP2</b>   ${formatPrice(input.tp2)}
+<b>TP3</b>   ${formatPrice(input.tp3)}`;
+  }
+
+  // ── Metadata line ─────────────────────────────────────
   const fundingPct = (input.funding_rate * 100).toFixed(4);
   const flags = input.risk_flags.length > 0
     ? input.risk_flags.map(escapeHtml).join(", ")
     : "none";
 
-  let msg = `${icon} ${escapeHtml(input.decision)} — $${escapeHtml(input.symbol)}
+  // ── Reasoning ─────────────────────────────────────────
+  const reasoningText = ai
+    ? `<i>${escapeHtml(ai.reasoning)}</i>`
+    : escapeHtml(input.reasoning);
 
-Entry:  ${formatPrice(input.entry)}
-SL:     ${formatPrice(input.stop)}
-TP1:    ${formatPrice(input.tp1)}
-TP2:    ${formatPrice(input.tp2)}
-TP3:    ${formatPrice(input.tp3)}
+  // ── Confidence (only show system confidence when no AI review) ──
+  const confidenceLine = ai ? "" : `\nConfidence: ${input.confidence}/10`;
 
-Confidence: ${input.confidence}/10
-Setup: ${escapeHtml(input.setup_type)}
-Regime: ${escapeHtml(input.btc_regime)} / ${escapeHtml(input.alt_environment)}
-Funding: ${fundingPct}%
+  // ── Concerns ──────────────────────────────────────────
+  const concernsLine = ai && ai.concerns.length > 0
+    ? `\n⚠️ ${ai.concerns.map(escapeHtml).join(", ")}`
+    : "";
 
-Risk: ${flags}
+  return `${header}
 
-${escapeHtml(input.reasoning)}`;
+<b>Entry</b> ${formatPrice(input.entry)}
+${stopLine}
+${tpBlock}
 
-  // ── AI Analysis block (Sonnet) ──────────────────────────
-  if (input.ai_review) {
-    const ai = input.ai_review;
-    msg += `
+Regime: ${escapeHtml(input.btc_regime)} / ${escapeHtml(input.alt_environment)} · Funding: ${fundingPct}%
+Risk: ${flags}${confidenceLine}
 
-🤖 AI Analysis: ${ai.confidence}/100 — ${escapeHtml(ai.pattern)}
-Verdict: ${escapeHtml(ai.overall_verdict)}
-"${escapeHtml(ai.reasoning)}"
-
-📊 AI-suggested levels:
-Entry: $${formatPrice(input.entry)} (system entry)`;
-
-    // Show AI stop if different from system stop
-    if (Math.abs(ai.suggested_stop - input.stop) / input.stop > 0.001) {
-      msg += `
-Stop: $${formatPrice(input.stop)} (AI: $${formatPrice(ai.suggested_stop)})`;
-    } else {
-      msg += `
-Stop: $${formatPrice(input.stop)}`;
-    }
-
-    msg += `
-TP1: $${formatPrice(ai.tp1_price)} — ${escapeHtml(ai.tp1_rationale)}
-TP2: $${formatPrice(ai.tp2_price)} — ${escapeHtml(ai.tp2_rationale)}`;
-
-    if (ai.tp3_price != null && ai.tp3_rationale) {
-      msg += `
-TP3: $${formatPrice(ai.tp3_price)} — ${escapeHtml(ai.tp3_rationale)}`;
-    } else {
-      msg += `
-TP3: none`;
-    }
-
-    if (ai.concerns.length > 0) {
-      msg += `
-
-⚠️ Concerns: ${ai.concerns.map(escapeHtml).join(", ")}`;
-    }
-  }
-
-  return msg;
+${reasoningText}${concernsLine}`;
 }
 
 export async function sendTelegram(text: string): Promise<boolean> {
