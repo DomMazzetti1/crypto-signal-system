@@ -2,9 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   calculateBtcRangePositionPct,
-  getBtcRangeFilterConfig,
   runGateB,
-  shouldEvaluateBtcRangeFilter,
 } from "./gate-b";
 
 // Wednesday 2026-04-08 16:00 UTC — not a Tuesday, so the day-of-week filter
@@ -50,17 +48,30 @@ test("calculateBtcRangePositionPct returns null for insufficient history", () =>
   assert.equal(pct, null);
 });
 
-test("short BTC range filter blocks out-of-range SHORT signals", () => {
-  const result = runGateB({
-    ...baseGateBInput(),
-    btcRangePct12h: 6.7,
-  });
+// ── BTC 12h range filter removal regression (2026-04-09) ──
+// The 15-50% SHORT-only band was proven value-destructive on both derivation
+// (-0.067R) and 2026 hold-out (-0.244R). It was first "disabled" via env var
+// on 2026-04-08 but the toggle was unreliable (27 rejections in 24h despite
+// BTC_RANGE_FILTER_ENABLED=false), so the gate was removed entirely. Data
+// collection via btc_range_pct_12h continues.
+// Ref: brain/oos_validation_2026-04-08.md
+test("BTC range filter removed — SHORT signals outside 15-50% now pass gate B", () => {
+  for (const btcRangePct12h of [0, 6.7, 14.9, 50.1, 75, 100]) {
+    const result = runGateB({
+      ...baseGateBInput(),
+      btcRangePct12h,
+    });
 
-  assert.equal(result.passed, false);
-  assert.equal(result.reason, "BTC_RANGE_POSITION_OUT_OF_RANGE");
+    assert.equal(
+      result.passed,
+      true,
+      `SHORT at btcRangePct12h=${btcRangePct12h} should pass (was ${result.reason ?? "null"})`
+    );
+    assert.equal(result.reason, null);
+  }
 });
 
-test("short BTC range filter allows in-range SHORT signals", () => {
+test("BTC range filter removed — SHORT signals inside 15-50% still pass gate B", () => {
   const result = runGateB({
     ...baseGateBInput(),
     btcRangePct12h: 34.2,
@@ -70,7 +81,7 @@ test("short BTC range filter allows in-range SHORT signals", () => {
   assert.equal(result.reason, null);
 });
 
-test("short BTC range filter is skipped for LONG signals", () => {
+test("BTC range filter removed — LONG signals unaffected regardless of btcRangePct12h", () => {
   const result = runGateB({
     ...baseGateBInput(),
     alertType: "SQ_LONG",
@@ -81,24 +92,6 @@ test("short BTC range filter is skipped for LONG signals", () => {
 
   assert.equal(result.passed, true);
   assert.equal(result.reason, null);
-});
-
-test("btc range filter config defaults to enabled 15-50", () => {
-  const config = getBtcRangeFilterConfig({});
-
-  assert.deepEqual(config, {
-    enabled: true,
-    low: 15,
-    high: 50,
-  });
-});
-
-test("shouldEvaluateBtcRangeFilter only applies to executable SHORT alerts", () => {
-  const config = { enabled: true, low: 15, high: 50 };
-
-  assert.equal(shouldEvaluateBtcRangeFilter("SQ_SHORT", config), true);
-  assert.equal(shouldEvaluateBtcRangeFilter("SQ_SHORT_DATA", config), false);
-  assert.equal(shouldEvaluateBtcRangeFilter("SQ_LONG_REVERSAL", config), false);
 });
 
 // ── Path C filter stack (OOS-validated subset, April 2026) ──

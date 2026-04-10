@@ -75,37 +75,18 @@ export interface GateBVariant {
   allow_counter_trend?: boolean;
 }
 
-export interface BtcRangeFilterConfig {
-  enabled: boolean;
-  low: number;
-  high: number;
-}
+// BTC 12h range filter REMOVED 2026-04-09: OOS validation (see
+// brain/oos_validation_2026-04-08.md) showed the filter was value-destructive
+// on both derivation (-0.067R) and 2026 hold-out (-0.244R). It was first
+// "disabled" via BTC_RANGE_FILTER_ENABLED=false in Vercel prod env on
+// 2026-04-08, but the env toggle proved unreliable — 27 real signals
+// (KERNEL/POL/SOL/PENGU/…) were still rejected with BTC_RANGE_POSITION_OUT_OF_RANGE
+// in the 24h window before removal. `btc_range_pct_12h` is still COMPUTED on
+// every SHORT decision and persisted for future analysis via computeBtcRangePosition(),
+// it is just no longer used as a gate.
 
 const BTC_RANGE_WINDOW_HOURS = 12;
 const BTC_RANGE_MIN_DATA_BARS = 6;
-
-function parseBound(raw: string | undefined, fallback: number): number {
-  const parsed = raw == null ? Number.NaN : parseFloat(raw);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-export function getBtcRangeFilterConfig(
-  env: NodeJS.ProcessEnv = process.env
-): BtcRangeFilterConfig {
-  return {
-    enabled: env.BTC_RANGE_FILTER_ENABLED !== "false",
-    low: parseBound(env.BTC_RANGE_FILTER_LOW, 15),
-    high: parseBound(env.BTC_RANGE_FILTER_HIGH, 50),
-  };
-}
-
-export function shouldEvaluateBtcRangeFilter(
-  alertType: string,
-  config: BtcRangeFilterConfig = getBtcRangeFilterConfig()
-): boolean {
-  const lowerType = alertType.toLowerCase();
-  return config.enabled && lowerType.includes("short") && !lowerType.includes("data");
-}
 
 export function calculateBtcRangePositionPct(
   bars: readonly Pick<Kline, "high" | "low" | "close">[]
@@ -144,24 +125,31 @@ export async function computeBtcRangePosition(
   return calculateBtcRangePositionPct(closedBars);
 }
 
+/**
+ * Compute the BTC 12h range position for an executable SHORT signal and
+ * return it for persistence on the decisions row. Returns null for LONG or
+ * data-only alerts (we only persist the metric on executable shorts, which
+ * matches the pre-removal behaviour). Never gates — kept purely as a data
+ * collection hook so btc_range_pct_12h stays populated for future analysis.
+ */
 export async function getShortBtcRangePosition(
   symbol: string,
   alertType: string,
-  signalTime: Date,
-  config: BtcRangeFilterConfig = getBtcRangeFilterConfig()
+  signalTime: Date
 ): Promise<number | null> {
-  if (!shouldEvaluateBtcRangeFilter(alertType, config)) {
+  const lowerType = alertType.toLowerCase();
+  if (!lowerType.includes("short") || lowerType.includes("data")) {
     return null;
   }
 
   try {
     const rangePct = await computeBtcRangePosition(signalTime);
     if (rangePct == null) {
-      console.warn(`[gate-b] ${symbol} BTC 12h range position unavailable — fail open`);
+      console.warn(`[gate-b] ${symbol} BTC 12h range position unavailable — data collection only`);
     }
     return rangePct;
   } catch (err) {
-    console.warn(`[gate-b] ${symbol} BTC 12h range position unavailable — fail open:`, err);
+    console.warn(`[gate-b] ${symbol} BTC 12h range position unavailable — data collection only:`, err);
     return null;
   }
 }
@@ -169,7 +157,7 @@ export async function getShortBtcRangePosition(
 export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult {
   const {
     alertType, trend4h, btcRegime,
-    atr1h, markPrice, rrTp1, rrTp2, rsi, btcRangePct12h, symbol,
+    atr1h, markPrice, rrTp1, rrTp2, rsi, symbol,
   } = input;
   const lowerType = alertType.toLowerCase();
   const allowCounterTrend = variant?.allow_counter_trend ?? false;
@@ -238,21 +226,13 @@ export function runGateB(input: GateBInput, variant?: GateBVariant): GateBResult
     };
   }
 
-  // ── BTC 12h range position filter (SHORT only) ───────
-  const btcRangeConfig = getBtcRangeFilterConfig();
-  if (shouldEvaluateBtcRangeFilter(alertType, btcRangeConfig) && btcRangePct12h != null) {
-    if (btcRangePct12h < btcRangeConfig.low || btcRangePct12h > btcRangeConfig.high) {
-      const logSymbol = symbol ?? alertType;
-      console.log(
-        `[gate-b] ${logSymbol} blocked: BTC at ${btcRangePct12h.toFixed(1)}% of 12h range ` +
-        `(must be ${btcRangeConfig.low}-${btcRangeConfig.high}%)`
-      );
-      return {
-        passed: false,
-        reason: "BTC_RANGE_POSITION_OUT_OF_RANGE",
-      };
-    }
-  }
+  // ── BTC 12h range position filter REMOVED 2026-04-09 ──
+  // The 15-50% SHORT-only band was proven value-destructive on both the
+  // derivation window (-0.067R) and the 2026 hold-out (-0.244R). It was
+  // first "disabled" via the BTC_RANGE_FILTER_ENABLED env var on 2026-04-08
+  // but the toggle was unreliable — 27 live rejections in the 24h window
+  // before removal. Ref: brain/oos_validation_2026-04-08.md.
+  // btc_range_pct_12h is still computed + stored for future analysis.
 
   // ── Regime-aware signal gating ────────────────────────
 
