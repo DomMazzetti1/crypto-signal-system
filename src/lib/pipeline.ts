@@ -14,7 +14,8 @@ import { classifyRegime } from "@/lib/regime";
 import { getShortBtcRangePosition, runGateB } from "@/lib/gate-b";
 import { calculateLevels } from "@/lib/levels";
 import { isCooldownActive, setCooldown } from "@/lib/cooldown";
-import { reviewWithClaude, ClaudeReviewInput } from "@/lib/reviewer";
+import { reviewSignalWithSonnet, type AIReviewResult } from "@/lib/ai-signal-reviewer";
+import { gatherMarketContext } from "@/lib/market-data-gatherer";
 import { buildMessage, sendTelegram } from "@/lib/telegram";
 import { sendToExecutionEngine, type ExecSignalPayload } from "@/lib/exec-webhook";
 import { computeCompositeScore } from "@/lib/scoring";
@@ -117,6 +118,7 @@ export interface PipelineResult {
     risk_flags: string[];
     reasoning: string | null;
   };
+  ai_review?: AIReviewResult | null;
   cooldown_active?: boolean;
   telegram_sent?: boolean;
   telegram_block_reason?: string | null;
@@ -535,102 +537,63 @@ export async function runPipeline(
     );
   }
 
-  // ── 9. Claude review (only if deterministic passed) ───
-  // Fetch enrichment context early so it's available for the reviewer
+  // ── 9. AI Signal Review (Sonnet — observation mode) ────
+  // Replaces Haiku reviewer. Every gate-b-passed signal gets Sonnet analysis.
+  // AI does NOT gate signals — it informs via Telegram. All signals still flow.
   const signalCtx = await getSignalContext(alert.symbol);
 
   let claudeDecision: string | null = null;
   let claudeConfidence: number | null = null;
   let setupType: string | null = null;
   let riskFlags: string[] = [];
+  let aiReview: AIReviewResult | null = null;
 
   if ((decision === "LONG" || decision === "SHORT") && !preReviewBlocked) {
-    // Prompt version lookup disabled — migration 004 not applied
-    // const { data: promptRow } = await supabase
-    //   .from("prompt_versions").select("id")
-    //   .eq("is_production", true).limit(1).maybeSingle();
-
-    const reviewInput: ClaudeReviewInput = {
-      symbol: alert.symbol,
-      direction,
-      alert_tf: alert.tf,
-      alert_price: alert.price,
-      alert_rsi: alert.rsi,
-      alert_adx1h: alert.adx1h,
-      alert_adx4h: alert.adx4h,
-      alert_bb_width: alert.bb_width,
-      mark_price: markPrice,
-      funding_rate: fundingRate,
-      turnover_24h: turnover24h,
-      spread_bps: spreadBps,
-      open_interest_value: parseFloat(ticker.openInterestValue),
-      book_depth_bid_usd: bookDepthBidUsd,
-      book_depth_ask_usd: bookDepthAskUsd,
-      oi_delta_5m: oiDelta5m,
-      oi_delta_15m: oiDelta15m,
-      oi_delta_1h: oiDelta1h,
-      trend_4h: trend4h.trend,
-      trend_1d: trend1d.trend,
-      ema20_4h: trend4h.ema20,
-      ema50_4h: trend4h.ema50,
-      atr14_1h,
-      atr14_4h,
-      btc_regime: regime.btc_regime,
-      alt_environment: regime.alt_environment,
-      entry: levels.entry,
-      stop: levels.stop,
-      tp1: levels.tp1,
-      tp2: levels.tp2,
-      tp3: levels.tp3,
-      rr_tp1: levels.rr_tp1,
-      snapshot_quality: gateA.quality,
-      gate_a_quality: gateA.quality,
-      gate_b_passed: gateB.passed,
-      enrichment_funding_rate: signalCtx.funding_rate,
-      enrichment_funding_interval: signalCtx.funding_interval,
-      enrichment_oi_delta_1h_pct: signalCtx.oi_delta_1h_pct,
-      enrichment_oi_delta_4h_pct: signalCtx.oi_delta_4h_pct,
-      enrichment_spread_pct: signalCtx.spread_pct,
-      enrichment_btc_correlation: signalCtx.btc_correlation,
-      enrichment_btc_beta: signalCtx.btc_beta,
-    };
-
     try {
-      const review = await reviewWithClaude(reviewInput);
-      claudeDecision = review.response.decision;
-      claudeConfidence = review.response.confidence;
-      setupType = review.response.setup_type;
-      riskFlags = review.response.risk_flags;
-      reasoning = review.response.reasoning;
-
-      console.log(
-        `[pipeline] Claude: decision=${claudeDecision} confidence=${claudeConfidence} setup=${setupType}`
+      // Gather comprehensive market context for Sonnet
+      const marketContext = await gatherMarketContext(
+        alert.symbol,
+        {
+          entry: levels.entry,
+          stop: levels.stop,
+          tp1: levels.tp1,
+          tp2: levels.tp2,
+          tp3: levels.tp3,
+          alert_type: alert.type,
+          bb_width: alert.bb_width,
+          atr14_1h,
+        },
+        signalCtx
       );
 
-      // Tier-aware reviewer policy:
-      // STRICT_PROD: reviewer can veto (blocking)
-      // RELAXED_PROD: reviewer is annotation-only (non-blocking for subjective reasoning)
-      if (claudeDecision === "NO_TRADE" || claudeDecision === "INVALID") {
-        if (isRelaxed) {
-          // Non-blocking: keep original LONG/SHORT decision, attach reasoning as annotation
-          console.log(`[pipeline] ${alert.symbol} RELAXED reviewer annotation (non-blocking): ${claudeDecision} — ${reasoning}`);
-          // decision stays as LONG/SHORT
-        } else {
-          decision = "NO_TRADE";
-        }
-      }
-    } catch (err) {
-      if (isRelaxed) {
-        // RELAXED: reviewer failure is non-blocking
-        console.log(`[pipeline] ${alert.symbol} RELAXED reviewer unavailable (non-blocking):`, err);
-        reasoning = "Claude review unavailable (non-blocking for RELAXED)";
-      } else {
-        // STRICT: reviewer failure is now non-blocking (trade already passed Gate A + B + risk checks)
-        console.warn("[pipeline] Claude review failed — proceeding without review:", err);
-        reasoning = "Claude review unavailable (non-blocking fallback)";
-      }
-    }
+      // Call Sonnet for structural analysis
+      aiReview = await reviewSignalWithSonnet(marketContext);
 
+      if (aiReview) {
+        // Map Sonnet output to existing pipeline fields for backward compatibility
+        claudeConfidence = Math.round(aiReview.confidence / 10); // 0-100 → 1-10 scale
+        setupType = aiReview.pattern;
+        riskFlags = aiReview.concerns;
+        reasoning = aiReview.reasoning;
+
+        // Map verdict to a decision label (for backward compat with dashboard/grading)
+        // NOTE: this does NOT gate the signal — decision stays LONG/SHORT regardless
+        claudeDecision = aiReview.overall_verdict === "avoid" ? "NO_TRADE" : decision;
+
+        console.log(
+          `[pipeline] Sonnet AI: confidence=${aiReview.confidence}/100 pattern=${aiReview.pattern} verdict=${aiReview.overall_verdict}`
+        );
+      } else {
+        console.warn(`[pipeline] ${alert.symbol} Sonnet review returned null — pipeline continues`);
+        reasoning = "AI review unavailable";
+      }
+
+      // NO GATING: signal proceeds regardless of AI verdict.
+      // The AI's job is to inform, not filter.
+    } catch (err) {
+      console.warn("[pipeline] AI signal review failed — proceeding without review:", err);
+      reasoning = "AI review unavailable (error)";
+    }
   }
 
   // Set cooldown only if final decision is a trade
@@ -811,6 +774,7 @@ export async function runPipeline(
     signal_spread_pct: signalCtx.spread_pct,
     signal_btc_correlation: signalCtx.btc_correlation,
     signal_btc_beta: signalCtx.btc_beta,
+    ai_review: aiReview,
   };
 
   const decisionId = await storeDecision(supabase, extendedData, baseData);
@@ -949,6 +913,7 @@ export async function runPipeline(
           reasoning: reversal
             ? `REVERSAL: SQ_SHORT flipped to LONG in sideways regime (59% WR, +0.16R). ${reasoning ?? ""}`
             : (reasoning ?? ""),
+          ai_review: aiReview ?? undefined,
         });
         telegramSent = await sendTelegram(msg);
         if (telegramSent) {
@@ -1044,6 +1009,7 @@ export async function runPipeline(
     cooldown_active: cooldownActive,
     telegram_sent: telegramSent,
     telegram_block_reason: telegramBlockReason,
+    ai_review: aiReview,
   };
 }
 

@@ -1,3 +1,5 @@
+import { type AIReviewResult } from "@/lib/ai-signal-reviewer";
+
 export interface TelegramMessageInput {
   symbol: string;
   decision: string;
@@ -13,6 +15,7 @@ export interface TelegramMessageInput {
   funding_rate: number;
   risk_flags: string[];
   reasoning: string;
+  ai_review?: AIReviewResult;
 }
 
 function escapeHtml(text: string): string {
@@ -41,7 +44,7 @@ export function buildMessage(input: TelegramMessageInput): string {
     ? input.risk_flags.map(escapeHtml).join(", ")
     : "none";
 
-  return `${icon} ${escapeHtml(input.decision)} — $${escapeHtml(input.symbol)}
+  let msg = `${icon} ${escapeHtml(input.decision)} — $${escapeHtml(input.symbol)}
 
 Entry:  ${formatPrice(input.entry)}
 SL:     ${formatPrice(input.stop)}
@@ -57,6 +60,48 @@ Funding: ${fundingPct}%
 Risk: ${flags}
 
 ${escapeHtml(input.reasoning)}`;
+
+  // ── AI Analysis block (Sonnet) ──────────────────────────
+  if (input.ai_review) {
+    const ai = input.ai_review;
+    msg += `
+
+🤖 AI Analysis: ${ai.confidence}/100 — ${escapeHtml(ai.pattern)}
+Verdict: ${escapeHtml(ai.overall_verdict)}
+"${escapeHtml(ai.reasoning)}"
+
+📊 AI-suggested levels:
+Entry: $${formatPrice(input.entry)} (system entry)`;
+
+    // Show AI stop if different from system stop
+    if (Math.abs(ai.suggested_stop - input.stop) / input.stop > 0.001) {
+      msg += `
+Stop: $${formatPrice(input.stop)} (AI: $${formatPrice(ai.suggested_stop)})`;
+    } else {
+      msg += `
+Stop: $${formatPrice(input.stop)}`;
+    }
+
+    msg += `
+TP1: $${formatPrice(ai.tp1_price)} — ${escapeHtml(ai.tp1_rationale)}
+TP2: $${formatPrice(ai.tp2_price)} — ${escapeHtml(ai.tp2_rationale)}`;
+
+    if (ai.tp3_price != null && ai.tp3_rationale) {
+      msg += `
+TP3: $${formatPrice(ai.tp3_price)} — ${escapeHtml(ai.tp3_rationale)}`;
+    } else {
+      msg += `
+TP3: none`;
+    }
+
+    if (ai.concerns.length > 0) {
+      msg += `
+
+⚠️ Concerns: ${ai.concerns.map(escapeHtml).join(", ")}`;
+    }
+  }
+
+  return msg;
 }
 
 export async function sendTelegram(text: string): Promise<boolean> {
