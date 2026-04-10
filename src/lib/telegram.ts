@@ -1,3 +1,5 @@
+import { type AIReviewResult } from "@/lib/ai-signal-reviewer";
+
 export interface TelegramMessageInput {
   symbol: string;
   decision: string;
@@ -13,6 +15,7 @@ export interface TelegramMessageInput {
   funding_rate: number;
   risk_flags: string[];
   reasoning: string;
+  ai_review?: AIReviewResult;
 }
 
 function escapeHtml(text: string): string {
@@ -36,27 +39,66 @@ export function buildMessage(input: TelegramMessageInput): string {
         ? "🔴"
         : "⚪";
 
+  // ── Header with AI verdict ────────────────────────────
+  let header = `${icon} ${escapeHtml(input.decision)} — ${escapeHtml(input.symbol)}`;
+  if (input.ai_review) {
+    const vi =
+      input.ai_review.overall_verdict === "strong_setup"
+        ? "✅"
+        : input.ai_review.overall_verdict === "marginal"
+          ? "⚠️"
+          : "❌";
+    header += `   ${vi} AI: ${escapeHtml(input.ai_review.overall_verdict)} (${input.ai_review.confidence}/100)`;
+  }
+
+  // ── Price levels (single block: AI if present, else system) ──
+  const ai = input.ai_review;
+  const stopLine = ai && Math.abs(ai.suggested_stop - input.stop) / input.stop > 0.001
+    ? `<b>SL</b>    ${formatPrice(input.stop)} (AI: ${formatPrice(ai.suggested_stop)})`
+    : `<b>SL</b>    ${formatPrice(input.stop)}`;
+
+  let tpBlock: string;
+  if (ai) {
+    tpBlock = `<b>TP1</b>   ${formatPrice(ai.tp1_price)}  — ${escapeHtml(ai.tp1_rationale)}
+<b>TP2</b>   ${formatPrice(ai.tp2_price)}  — ${escapeHtml(ai.tp2_rationale)}`;
+    if (ai.tp3_price != null && ai.tp3_rationale) {
+      tpBlock += `\n<b>TP3</b>   ${formatPrice(ai.tp3_price)}  — ${escapeHtml(ai.tp3_rationale)}`;
+    }
+  } else {
+    tpBlock = `<b>TP1</b>   ${formatPrice(input.tp1)}
+<b>TP2</b>   ${formatPrice(input.tp2)}
+<b>TP3</b>   ${formatPrice(input.tp3)}`;
+  }
+
+  // ── Metadata line ─────────────────────────────────────
   const fundingPct = (input.funding_rate * 100).toFixed(4);
   const flags = input.risk_flags.length > 0
     ? input.risk_flags.map(escapeHtml).join(", ")
     : "none";
 
-  return `${icon} ${escapeHtml(input.decision)} — $${escapeHtml(input.symbol)}
+  // ── Reasoning ─────────────────────────────────────────
+  const reasoningText = ai
+    ? `<i>${escapeHtml(ai.reasoning)}</i>`
+    : escapeHtml(input.reasoning);
 
-Entry:  ${formatPrice(input.entry)}
-SL:     ${formatPrice(input.stop)}
-TP1:    ${formatPrice(input.tp1)}
-TP2:    ${formatPrice(input.tp2)}
-TP3:    ${formatPrice(input.tp3)}
+  // ── Confidence (only show system confidence when no AI review) ──
+  const confidenceLine = ai ? "" : `\nConfidence: ${input.confidence}/10`;
 
-Confidence: ${input.confidence}/10
-Setup: ${escapeHtml(input.setup_type)}
-Regime: ${escapeHtml(input.btc_regime)} / ${escapeHtml(input.alt_environment)}
-Funding: ${fundingPct}%
+  // ── Concerns ──────────────────────────────────────────
+  const concernsLine = ai && ai.concerns.length > 0
+    ? `\n⚠️ ${ai.concerns.map(escapeHtml).join(", ")}`
+    : "";
 
-Risk: ${flags}
+  return `${header}
 
-${escapeHtml(input.reasoning)}`;
+<b>Entry</b> ${formatPrice(input.entry)}
+${stopLine}
+${tpBlock}
+
+Regime: ${escapeHtml(input.btc_regime)} / ${escapeHtml(input.alt_environment)} · Funding: ${fundingPct}%
+Risk: ${flags}${confidenceLine}
+
+${reasoningText}${concernsLine}`;
 }
 
 export async function sendTelegram(text: string): Promise<boolean> {

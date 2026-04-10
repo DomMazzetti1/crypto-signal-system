@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx next:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(curl -s \"http://localhost:3099/api/dashboard/active-signals?hours=24\")",
+      "Bash(kill %1)",
+      "Bash(pkill -f \"next dev\")",
+      "Bash(curl -s \"http://localhost:3100/api/dashboard/active-signals?hours=4\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f''''status={d.get\\(\"\"schema_version\"\"\\)}, count={d.get\\(\"\"count\"\"\\)}, prices={d.get\\(\"\"prices_loaded\"\"\\)}''''\\)\")",
+      "Bash(pkill -f \"next dev --port 3100\")",
+      "Bash(npx supabase:*)",
+      "Bash(ls /Users/ydasilva/projects/crypto-signal-system/supabase/config*)",
+      "Bash(cat /Users/ydasilva/projects/crypto-signal-system/supabase/.temp/*)",
+      "Bash(export SUPABASE_ACCESS_TOKEN=\"41619f76\")",
+      "Bash(python3 -c \":*)",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s \"http://localhost:3100/api/shadow/grade-production\")",
+      "Bash(curl -s \"http://localhost:3100/api/dashboard/selection-stats\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d, indent=2\\)\\)\")",
+      "Bash(curl -s \"http://localhost:3100/api/dashboard/active-signals?hours=720\")",
+      "Bash(node -e \":*)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f''''schema={d[\"\"schema_version\"\"]}, count={d[\"\"count\"\"]}, prices={d[\"\"prices_loaded\"\"]}''''\\)\" echo \"=== Stats ===\" curl -s \"http://localhost:3100/api/dashboard/selection-stats\")",
+      "Read(//Users/ydasilva/projects/crypto-signal-system/**)"
+    ]
+  }
+}
