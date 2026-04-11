@@ -537,63 +537,16 @@ export async function runPipeline(
     );
   }
 
-  // ── 9. AI Signal Review (Sonnet — observation mode) ────
-  // Replaces Haiku reviewer. Every gate-b-passed signal gets Sonnet analysis.
-  // AI does NOT gate signals — it informs via Telegram. All signals still flow.
+  // ── 9. AI Signal Review variables (Sonnet runs AFTER telegram filters in §12) ──
+  // Sonnet review has been moved to run only on signals that pass legacy telegram
+  // filters, so every Sonnet-reviewed signal reaches Telegram delivery.
   const signalCtx = await getSignalContext(alert.symbol);
 
   let claudeDecision: string | null = null;
   let claudeConfidence: number | null = null;
-  let setupType: string | null = null;
+  let setupType: string | null = alert.type.includes("SQ_") ? "squeeze_breakout" : "mean_reversion";
   let riskFlags: string[] = [];
   let aiReview: AIReviewResult | null = null;
-
-  if (decision === "SHORT" && !preReviewBlocked) {
-    try {
-      // Gather comprehensive market context for Sonnet
-      const marketContext = await gatherMarketContext(
-        alert.symbol,
-        {
-          entry: levels.entry,
-          stop: levels.stop,
-          tp1: levels.tp1,
-          tp2: levels.tp2,
-          tp3: levels.tp3,
-          alert_type: alert.type,
-          bb_width: alert.bb_width,
-          atr14_1h,
-        },
-        signalCtx
-      );
-
-      // Call Sonnet for structural analysis
-      aiReview = await reviewSignalWithSonnet(marketContext);
-
-      if (aiReview) {
-        // Map Sonnet output to existing pipeline fields for backward compatibility
-        setupType = aiReview.pattern;
-        riskFlags = aiReview.concerns;
-        reasoning = aiReview.reasoning;
-
-        // Map verdict to a decision label (for backward compat with dashboard/grading)
-        // NOTE: this does NOT gate the signal — decision stays LONG/SHORT regardless
-        claudeDecision = aiReview.overall_verdict === "avoid" ? "NO_TRADE" : decision;
-
-        console.log(
-          `[pipeline] Sonnet AI: confidence=${aiReview.confidence}/100 pattern=${aiReview.pattern} verdict=${aiReview.overall_verdict}`
-        );
-      } else {
-        console.warn(`[pipeline] ${alert.symbol} Sonnet review returned null — pipeline continues`);
-        reasoning = "AI review unavailable";
-      }
-
-      // NO GATING: signal proceeds regardless of AI verdict.
-      // The AI's job is to inform, not filter.
-    } catch (err) {
-      console.warn("[pipeline] AI signal review failed — proceeding without review:", err);
-      reasoning = "AI review unavailable (error)";
-    }
-  }
 
   // Set cooldown only if final decision is a trade
   if (decision === "LONG" || decision === "SHORT") {
@@ -604,7 +557,6 @@ export async function runPipeline(
   // Deterministic fallback when Claude API is unavailable — avoids "0/10, unknown" in Telegram
   if (!claudeConfidence && scoreResult) {
     claudeConfidence = scoreResult.composite_score > 70 ? 7 : scoreResult.composite_score > 50 ? 5 : 3;
-    setupType = alert.type.includes("SQ_") ? "squeeze_breakout" : "mean_reversion";
   }
 
   // ── 9c. Cluster assignment + execution selection ──────
@@ -889,6 +841,50 @@ export async function runPipeline(
         const suppressWindow = isRelaxed ? "12h" : "4h";
         telegramBlockReason = `repeat_signal_within_${suppressWindow}`;
         console.log(`[pipeline] ${alert.symbol} Telegram suppressed: ${telegramBlockReason}`);
+      }
+    }
+
+    // ── 12a. Sonnet AI review (runs only for signals passing ALL legacy filters) ──
+    if (sendTelegram_ && decision === "SHORT" && !preReviewBlocked) {
+      try {
+        const marketContext = await gatherMarketContext(
+          alert.symbol,
+          {
+            entry: levels.entry,
+            stop: levels.stop,
+            tp1: levels.tp1,
+            tp2: levels.tp2,
+            tp3: levels.tp3,
+            alert_type: alert.type,
+            bb_width: alert.bb_width,
+            atr14_1h,
+          },
+          signalCtx
+        );
+
+        aiReview = await reviewSignalWithSonnet(marketContext);
+
+        if (aiReview) {
+          setupType = aiReview.pattern;
+          riskFlags = aiReview.concerns;
+          reasoning = aiReview.reasoning;
+          claudeDecision = aiReview.overall_verdict === "avoid" ? "NO_TRADE" : decision;
+
+          console.log(
+            `[pipeline] Sonnet AI: confidence=${aiReview.confidence}/100 pattern=${aiReview.pattern} verdict=${aiReview.overall_verdict}`
+          );
+        } else {
+          console.warn(`[pipeline] ${alert.symbol} Sonnet review returned null — pipeline continues`);
+          reasoning = "AI review unavailable";
+        }
+      } catch (err) {
+        console.warn("[pipeline] AI signal review failed — proceeding without review:", err);
+        reasoning = "AI review unavailable (error)";
+      }
+
+      // UPDATE the stored decision row with ai_review (it was null at insert time)
+      if (decisionId && aiReview) {
+        await supabase.from("decisions").update({ ai_review: aiReview as unknown as Record<string, unknown> }).eq("id", decisionId);
       }
     }
 
