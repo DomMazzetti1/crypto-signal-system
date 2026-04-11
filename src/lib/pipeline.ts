@@ -571,7 +571,6 @@ export async function runPipeline(
 
       if (aiReview) {
         // Map Sonnet output to existing pipeline fields for backward compatibility
-        claudeConfidence = Math.round(aiReview.confidence / 10); // 0-100 → 1-10 scale
         setupType = aiReview.pattern;
         riskFlags = aiReview.concerns;
         reasoning = aiReview.reasoning;
