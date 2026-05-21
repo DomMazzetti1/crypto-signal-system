@@ -77,7 +77,8 @@ export async function updateAccountState(): Promise<AccountState> {
   if (drawdownPct >= 0.50) {
     killReason = `50% drawdown from HWM ($${hwm.toFixed(0)} → $${currentEquity.toFixed(0)})`;
     console.error(`[kill-switch] EMERGENCY: ${killReason}`);
-    await sendTelegram(`🛑 EMERGENCY: 50% drawdown. All signals halted.\n\nHWM: $${hwm.toFixed(0)}\nCurrent: $${currentEquity.toFixed(0)}\nDrawdown: ${(drawdownPct * 100).toFixed(1)}%`);
+    // Telegram alert disabled per user request 2026-04-29 (halt logic below stays armed)
+    // await sendTelegram(`🛑 EMERGENCY: 50% drawdown. All signals halted.\n\nHWM: $${hwm.toFixed(0)}\nCurrent: $${currentEquity.toFixed(0)}\nDrawdown: ${(drawdownPct * 100).toFixed(1)}%`);
   }
 
   const state: AccountState = {
